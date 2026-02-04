@@ -152,7 +152,6 @@ taskCommand
       console.log(`Active:    ${stats.active}`);
       console.log(`Completed: ${stats.completed}`);
       console.log(`Failed:    ${stats.failed}`);
-      console.log(`Delayed:   ${stats.delayed}`);
       console.log(`─────────────────────`);
       console.log(`Total:     ${stats.total}`);
     } catch (error) {

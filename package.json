@@ -9,15 +9,14 @@
     "forge": "./dist/cli/index.js"
   },
   "scripts": {
-    "dev": "tsx src/index.ts",
-    "build": "tsc -p tsconfig.build.json",
-    "test": "vitest",
-    "test:coverage": "vitest --coverage",
+    "dev": "bun run src/cli/index.ts",
+    "build": "bun build src/cli/index.ts --target=bun --outdir=dist",
+    "test": "bun test",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
-    "cli": "tsx src/cli/index.ts"
+    "cli": "bun run src/cli/index.ts"
   },
   "keywords": [
     "claude",
@@ -29,16 +28,12 @@
   "author": "vieko",
   "license": "MIT",
   "dependencies": {
-    "bullmq": "^5.1.0",
-    "ioredis": "^5.3.2",
     "commander": "^12.0.0",
     "zod": "^3.22.4",
     "dotenv": "^16.4.5",
     "pino": "^8.18.0",
     "pino-pretty": "^10.3.1",
-    "eventemitter3": "^5.0.1",
-    "p-retry": "^6.2.0",
-    "p-queue": "^8.0.1"
+    "eventemitter3": "^5.0.1"
   },
   "devDependencies": {
     "typescript": "^5.3.3",
@@ -52,6 +47,6 @@
     "prettier": "^3.2.4"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "bun": ">=1.0.0"
   }
 }
