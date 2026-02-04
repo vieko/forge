@@ -1,0 +1,57 @@
+{
+  "name": "@vieko/forge",
+  "version": "0.1.0",
+  "description": "Claude Code orchestrator for coordinating multiple agents",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "forge": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "cli": "tsx src/cli/index.ts"
+  },
+  "keywords": [
+    "claude",
+    "orchestrator",
+    "multi-agent",
+    "task-queue",
+    "coordination"
+  ],
+  "author": "vieko",
+  "license": "MIT",
+  "dependencies": {
+    "bullmq": "^5.1.0",
+    "ioredis": "^5.3.2",
+    "commander": "^12.0.0",
+    "zod": "^3.22.4",
+    "dotenv": "^16.4.5",
+    "pino": "^8.18.0",
+    "pino-pretty": "^10.3.1",
+    "eventemitter3": "^5.0.1",
+    "p-retry": "^6.2.0",
+    "p-queue": "^8.0.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@types/node": "^20.11.5",
+    "tsx": "^4.7.0",
+    "vitest": "^1.2.0",
+    "@vitest/coverage-v8": "^1.2.0",
+    "eslint": "^8.56.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "prettier": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

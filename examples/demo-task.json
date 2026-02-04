@@ -1,0 +1,16 @@
+{
+  "type": "code-analysis",
+  "name": "Analyze TypeScript project structure",
+  "description": "Analyze the forge orchestrator codebase and provide insights",
+  "priority": 2,
+  "payload": {
+    "projectPath": ".",
+    "analysisType": "structure",
+    "outputFormat": "summary"
+  },
+  "tags": ["demo", "analysis"],
+  "metadata": {
+    "createdBy": "demo-script",
+    "purpose": "demonstration"
+  }
+}
