@@ -1,10 +1,18 @@
 import { EventEmitter } from 'eventemitter3';
 import { AgentManager } from './agent-manager.js';
 import { TaskQueue } from './queue.js';
-import { Task, TaskDefinition, AgentConfig, AgentInstance, AgentRole } from '../types/index.js';
+import {
+  Task,
+  TaskDefinition,
+  TaskPriority,
+  AgentConfig,
+  AgentInstance,
+  AgentRole,
+} from '../types/index.js';
 import { createChildLogger } from '../utils/logger.js';
 import { loadConfig } from './config.js';
 import { TaskBridge } from './task-bridge.js';
+import { MessageHandler } from './message-handler.js';
 
 export interface OrchestratorEvents {
   'orchestrator:started': () => void;
@@ -64,6 +72,107 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     });
   }
 
+  private setupMessageHandlers() {
+    // Get message handler from local adapter
+    const localAdapter = this.agentManager.adapters.get('local');
+    if (!localAdapter || !('getMessageHandler' in localAdapter)) {
+      this.logger.warn('Local adapter does not support message handling');
+      return;
+    }
+
+    const messageHandler = (localAdapter as any).getMessageHandler() as MessageHandler;
+
+    // Register request handlers
+    messageHandler.registerRequestHandler('request:query-agents', async (agentId, payload) => {
+      const agents = this.agentManager.getAvailableAgents(
+        payload.role as AgentRole | undefined,
+        payload.capabilities as string[] | undefined,
+        payload.tags as string[] | undefined
+      );
+
+      return {
+        agents: agents.map((a) => ({
+          id: a.id,
+          role: a.role,
+          status: a.status,
+          capabilities: a.config.capabilities,
+          currentTask: a.currentTask,
+        })),
+      };
+    });
+
+    messageHandler.registerRequestHandler('request:query-tasks', async (agentId, payload) => {
+      const status = payload.status as string | undefined;
+      const tasks = status ? await this.taskQueue.getTasks(status as any) : [];
+
+      const limit = (payload.limit as number) || 100;
+      const filteredTasks = tasks.slice(0, limit);
+
+      return {
+        tasks: filteredTasks.map((t) => ({
+          id: t.id,
+          name: t.name,
+          type: t.type,
+          status: t.status,
+          requiredRole: t.requiredRole,
+          requiredCapabilities: t.requiredCapabilities,
+          dependencies: t.dependencies,
+          priority: t.priority,
+        })),
+      };
+    });
+
+    messageHandler.registerRequestHandler('request:submit-task', async (agentId, payload) => {
+      const taskDef: TaskDefinition = {
+        type: payload.type as string,
+        name: payload.name as string,
+        description: payload.description as string,
+        payload: (payload.payload as Record<string, unknown>) || {},
+        requiredRole: payload.requiredRole as AgentRole | undefined,
+        requiredCapabilities: payload.requiredCapabilities as string[] | undefined,
+        dependencies: payload.dependencies as string[] | undefined,
+        priority: payload.priority as TaskPriority | undefined,
+        tags: payload.tags as string[] | undefined,
+      };
+
+      const task = await this.taskQueue.submit(taskDef);
+
+      return {
+        task: {
+          id: task.id,
+          name: task.name,
+          status: task.status,
+          createdAt: task.createdAt.toISOString(),
+        },
+      };
+    });
+
+    messageHandler.registerRequestHandler('request:get-task', async (agentId, payload) => {
+      const taskId = payload.taskId as string;
+      const task = await this.taskQueue.getTask(taskId);
+
+      if (!task) {
+        throw new Error(`Task not found: ${taskId}`);
+      }
+
+      return {
+        task: {
+          id: task.id,
+          name: task.name,
+          type: task.type,
+          status: task.status,
+          result: task.result,
+          agentId: task.agentId,
+          createdAt: task.createdAt.toISOString(),
+          startedAt: task.startedAt?.toISOString(),
+          completedAt: task.completedAt?.toISOString(),
+        },
+      };
+    });
+
+    this.logger.info('Message handlers registered');
+  }
+
   async start(): Promise<void> {
     if (this.running) {
       throw new Error('Orchestrator is already running');
@@ -91,6 +200,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       this.logger.info('Task bridge initialized');
     }
+
+    // Setup message handlers for agent communication
+    this.setupMessageHandlers();
 
     // Start health checks
     await this.agentManager.startHealthChecks();

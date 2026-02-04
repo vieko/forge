@@ -1,20 +1,31 @@
 import { spawn, ChildProcess, exec } from 'child_process';
 import { randomUUID } from 'crypto';
 import { BaseRuntimeAdapter } from './adapter.js';
-import { AgentConfig, AgentInstance, HealthStatus, LogEntry } from '../types/index.js';
+import {
+  AgentConfig,
+  AgentInstance,
+  HealthStatus,
+  LogEntry,
+  RequestMessage,
+  EventMessage,
+  ResponseMessage,
+} from '../types/index.js';
 import { createChildLogger } from '../utils/logger.js';
 import { EventEmitter } from 'eventemitter3';
 import { WorkspaceManager } from '../core/workspace-manager.js';
+import { MessageHandler } from '../core/message-handler.js';
 
 export class LocalProcessAdapter extends BaseRuntimeAdapter {
   private processes: Map<string, ChildProcess> = new Map();
   private logEmitters: Map<string, EventEmitter> = new Map();
   private workspaceManager: WorkspaceManager;
+  private messageHandler: MessageHandler;
   private logger = createChildLogger({ adapter: 'local' });
 
-  constructor() {
+  constructor(messageHandler?: MessageHandler) {
     super();
     this.workspaceManager = new WorkspaceManager();
+    this.messageHandler = messageHandler || new MessageHandler();
   }
 
   async spawn(config: AgentConfig): Promise<AgentInstance> {
@@ -46,13 +57,35 @@ export class LocalProcessAdapter extends BaseRuntimeAdapter {
     const logEmitter = new EventEmitter();
     this.logEmitters.set(agentId, logEmitter);
 
-    // Capture stdout
+    // Capture stdout - parse messages or treat as logs
     childProcess.stdout?.on('data', (data) => {
+      const rawData = data.toString().trim();
+
+      // Try to parse as JSON message
+      try {
+        const message = JSON.parse(rawData);
+
+        // Check if it's a valid message with type field
+        if (message.type && typeof message.type === 'string') {
+          // Set agentId if not present
+          if (!message.agentId) {
+            message.agentId = agentId;
+          }
+
+          // Route to message handler
+          void this.handleAgentMessage(agentId, message);
+          return;
+        }
+      } catch {
+        // Not JSON or invalid format, treat as log
+      }
+
+      // Treat as regular log output
       const log: LogEntry = {
         timestamp: new Date(),
         level: 'info',
         agentId,
-        message: data.toString(),
+        message: rawData,
       };
       logEmitter.emit('log', log);
     });
@@ -105,6 +138,49 @@ export class LocalProcessAdapter extends BaseRuntimeAdapter {
 
     this.agents.set(agentId, agent);
     return agent;
+  }
+
+  private async handleAgentMessage(
+    agentId: string,
+    message: RequestMessage | EventMessage
+  ): Promise<void> {
+    try {
+      if (message.type.startsWith('request:')) {
+        // Handle request - get response and send back
+        const response = await this.messageHandler.handleRequest(
+          agentId,
+          message as RequestMessage
+        );
+        await this.sendMessageToAgent(agentId, response);
+      } else if (message.type.startsWith('event:')) {
+        // Handle event (fire-and-forget)
+        await this.messageHandler.handleEvent(agentId, message as EventMessage);
+      } else {
+        this.logger.warn({ agentId, type: message.type }, 'Unknown message type');
+      }
+    } catch (error) {
+      this.logger.error({ agentId, error }, 'Error handling agent message');
+    }
+  }
+
+  private async sendMessageToAgent(agentId: string, message: ResponseMessage): Promise<void> {
+    const process = this.processes.get(agentId);
+    if (!process || !process.stdin) {
+      this.logger.warn({ agentId }, 'Cannot send message: process stdin not available');
+      return;
+    }
+
+    try {
+      const messageJson = JSON.stringify(message) + '\n';
+      process.stdin.write(messageJson);
+      this.logger.debug({ agentId, messageId: message.id }, 'Message sent to agent');
+    } catch (error) {
+      this.logger.error({ agentId, error }, 'Error sending message to agent');
+    }
+  }
+
+  getMessageHandler(): MessageHandler {
+    return this.messageHandler;
   }
 
   async terminate(agentId: string, force?: boolean): Promise<void> {

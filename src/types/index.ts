@@ -184,3 +184,74 @@ export interface WorkspaceConfig {
   agentWorkspace: string;
   sharedGit: boolean;
 }
+
+// Agent↔Orchestrator Message Protocol Types
+
+export type MessageType =
+  // Agent → Orchestrator (Requests)
+  | 'request:query-agents'
+  | 'request:query-tasks'
+  | 'request:submit-task'
+  | 'request:get-task'
+  | 'request:ask-user'
+  // Agent → Orchestrator (Events)
+  | 'event:progress'
+  | 'event:log'
+  | 'event:error'
+  | 'event:question'
+  // Orchestrator → Agent (Responses)
+  | 'response:success'
+  | 'response:error'
+  // Orchestrator → Agent (Notifications)
+  | 'notify:task-assigned'
+  | 'notify:task-cancelled'
+  | 'notify:shutdown';
+
+export type ErrorCode =
+  | 'INVALID_REQUEST'
+  | 'INVALID_MESSAGE_TYPE'
+  | 'UNAUTHORIZED'
+  | 'NOT_FOUND'
+  | 'TIMEOUT'
+  | 'INTERNAL_ERROR';
+
+export interface BaseMessage {
+  type: MessageType;
+  id: string;
+  timestamp: string;
+  agentId?: string;
+}
+
+export interface RequestMessage extends BaseMessage {
+  type:
+    | 'request:query-agents'
+    | 'request:query-tasks'
+    | 'request:submit-task'
+    | 'request:get-task'
+    | 'request:ask-user';
+  payload: Record<string, unknown>;
+}
+
+export interface EventMessage extends BaseMessage {
+  type: 'event:progress' | 'event:log' | 'event:error' | 'event:question';
+  payload: Record<string, unknown>;
+}
+
+export interface ResponseMessage extends BaseMessage {
+  type: 'response:success' | 'response:error';
+  correlationId: string;
+  payload?: Record<string, unknown>;
+  error?: {
+    code: ErrorCode;
+    message: string;
+    details?: Record<string, unknown>;
+  };
+}
+
+export interface NotificationMessage extends BaseMessage {
+  type: 'notify:task-assigned' | 'notify:task-cancelled' | 'notify:shutdown';
+  payload: Record<string, unknown>;
+}
+
+export type AgentMessage = RequestMessage | EventMessage;
+export type OrchestratorMessage = ResponseMessage | NotificationMessage;
