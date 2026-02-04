@@ -4,15 +4,25 @@ import { BaseRuntimeAdapter } from './adapter.js';
 import { AgentConfig, AgentInstance, HealthStatus, LogEntry } from '../types/index.js';
 import { createChildLogger } from '../utils/logger.js';
 import { EventEmitter } from 'eventemitter3';
+import { WorkspaceManager } from '../core/workspace-manager.js';
 
 export class LocalProcessAdapter extends BaseRuntimeAdapter {
   private processes: Map<string, ChildProcess> = new Map();
   private logEmitters: Map<string, EventEmitter> = new Map();
+  private workspaceManager: WorkspaceManager;
   private logger = createChildLogger({ adapter: 'local' });
+
+  constructor() {
+    super();
+    this.workspaceManager = new WorkspaceManager();
+  }
 
   async spawn(config: AgentConfig): Promise<AgentInstance> {
     const agentId = config.id || randomUUID();
-    this.logger.info({ agentId }, 'Spawning local agent');
+    this.logger.info({ agentId, role: config.role }, 'Spawning local agent');
+
+    // Create isolated workspace
+    const workspace = await this.workspaceManager.createWorkspace(agentId);
 
     const claudeCodePath =
       (config.runtimeOptions?.claudeCodePath as string | undefined) ||
@@ -26,11 +36,11 @@ export class LocalProcessAdapter extends BaseRuntimeAdapter {
       CLAUDE_MODEL: config.claudeConfig.model,
     };
 
-    // Start Claude Code in print mode with JSON output
+    // Start Claude Code in isolated workspace
     const childProcess = spawn(claudeCodePath, ['--print', '--output-format=json'], {
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
-      cwd: process.cwd(),
+      cwd: workspace.agentWorkspace,
     });
 
     const logEmitter = new EventEmitter();
@@ -65,6 +75,11 @@ export class LocalProcessAdapter extends BaseRuntimeAdapter {
       if (agent) {
         agent.status = code === 0 ? 'stopped' : 'crashed';
       }
+
+      // Cleanup workspace on exit
+      void this.workspaceManager.cleanup(agentId).catch((err) =>
+        this.logger.error({ agentId, error: err }, 'Failed to cleanup workspace on exit')
+      );
     });
 
     this.processes.set(agentId, childProcess);
@@ -74,6 +89,8 @@ export class LocalProcessAdapter extends BaseRuntimeAdapter {
       status: 'idle',
       config,
       runtime: 'local',
+      role: config.role,
+      workspace: workspace.agentWorkspace,
       pid: childProcess.pid,
       startedAt: new Date(),
       stats: {
@@ -103,6 +120,9 @@ export class LocalProcessAdapter extends BaseRuntimeAdapter {
 
     this.processes.delete(agentId);
     this.logEmitters.delete(agentId);
+
+    // Cleanup workspace
+    await this.workspaceManager.cleanup(agentId);
 
     const agent = this.getAgent(agentId);
     agent.status = 'stopped';

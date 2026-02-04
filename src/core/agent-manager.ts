@@ -1,5 +1,5 @@
 import { EventEmitter } from 'eventemitter3';
-import { AgentConfig, AgentInstance, AgentStatus, RuntimeType } from '../types/index.js';
+import { AgentConfig, AgentInstance, AgentStatus, AgentRole, RuntimeType } from '../types/index.js';
 import { IRuntimeAdapter } from '../runtime/adapter.js';
 import { LocalProcessAdapter } from '../runtime/local.js';
 import { createChildLogger } from '../utils/logger.js';
@@ -118,12 +118,32 @@ export class AgentManager extends EventEmitter<AgentManagerEvents> {
     return this.getAllAgents().filter((a) => a.status === status);
   }
 
-  getAvailableAgents(tags?: string[]): AgentInstance[] {
+  getAvailableAgents(
+    role?: AgentRole,
+    capabilities?: string[],
+    tags?: string[]
+  ): AgentInstance[] {
     return this.getAllAgents().filter((agent) => {
+      // Must be idle
       if (agent.status !== 'idle') {
         return false;
       }
 
+      // Check role requirement
+      if (role && agent.role !== role) {
+        return false;
+      }
+
+      // Check capability requirements
+      if (capabilities && capabilities.length > 0) {
+        const agentCaps = agent.config.capabilities || [];
+        const hasAllCapabilities = capabilities.every((cap) => agentCaps.includes(cap));
+        if (!hasAllCapabilities) {
+          return false;
+        }
+      }
+
+      // Check tag requirements
       if (tags && tags.length > 0) {
         const agentTags = agent.config.tags || [];
         return tags.every((tag) => agentTags.includes(tag));
@@ -131,6 +151,10 @@ export class AgentManager extends EventEmitter<AgentManagerEvents> {
 
       return true;
     });
+  }
+
+  getAgentsByRole(role: AgentRole): AgentInstance[] {
+    return this.getAllAgents().filter((agent) => agent.role === role);
   }
 
   async assignTask(agentId: string, taskId: string): Promise<void> {

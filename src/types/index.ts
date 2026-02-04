@@ -1,5 +1,7 @@
 export type RuntimeType = 'docker' | 'local' | 'vercel';
 
+export type AgentRole = 'planner' | 'worker' | 'reviewer';
+
 export type AgentStatus =
   | 'initializing'
   | 'idle'
@@ -25,6 +27,8 @@ export type TaskPriority = 1 | 2 | 3 | 4 | 5; // 1 = highest
 export interface AgentConfig {
   id?: string;
   runtime: RuntimeType;
+  role: AgentRole;
+  capabilities?: string[];
   runtimeOptions?: Record<string, unknown>;
   claudeConfig: {
     apiKey?: string;
@@ -46,6 +50,8 @@ export interface AgentInstance {
   status: AgentStatus;
   config: AgentConfig;
   runtime: RuntimeType;
+  role: AgentRole;
+  workspace?: string;
   pid?: number;
   containerId?: string;
   sandboxId?: string;
@@ -76,6 +82,8 @@ export interface TaskDefinition {
   timeout?: number;
   retryPolicy?: RetryPolicy;
   dependencies?: string[]; // Task IDs that must complete first
+  requiredRole?: AgentRole;
+  requiredCapabilities?: string[];
   tags?: string[];
   metadata?: Record<string, unknown>;
 }
@@ -167,4 +175,12 @@ export interface Metrics {
     totalCostUsd: number;
     costByAgent: Record<string, number>;
   };
+}
+
+export interface WorkspaceConfig {
+  agentId: string;
+  baseDir: string;
+  workspaceRoot: string;
+  agentWorkspace: string;
+  sharedGit: boolean;
 }

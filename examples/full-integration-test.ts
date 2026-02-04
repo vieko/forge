@@ -38,6 +38,7 @@ async function runIntegrationTest() {
     console.log('\n🤖 Step 2: Spawning agent...');
     const agentConfig: AgentConfig = {
       runtime: 'local',
+      role: 'worker',
       claudeConfig: {
         apiKey: process.env.ANTHROPIC_API_KEY,
         model: 'claude-sonnet-4-5-20250929',

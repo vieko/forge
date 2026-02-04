@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { Orchestrator } from '../../core/orchestrator.js';
-import { AgentConfig, RuntimeType } from '../../types/index.js';
+import { AgentConfig, AgentRole, RuntimeType } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
 
 export const agentCommand = new Command('agent').description('Manage agents');
@@ -9,6 +9,7 @@ agentCommand
   .command('start')
   .description('Start a new agent')
   .option('-r, --runtime <runtime>', 'Runtime type (local, docker, vercel)', 'local')
+  .option('--role <role>', 'Agent role (planner, worker, reviewer)', 'worker')
   .option('-t, --tags <tags>', 'Comma-separated tags')
   .action(async (options) => {
     const orchestrator = new Orchestrator();
@@ -19,6 +20,7 @@ agentCommand
       const config = loadConfig();
       const agentConfig: AgentConfig = {
         runtime: options.runtime as RuntimeType,
+        role: options.role as AgentRole,
         claudeConfig: {
           apiKey: config.claude.apiKey,
           aiGatewayUrl: config.claude.aiGatewayUrl,
@@ -86,6 +88,7 @@ agentCommand
       console.table(
         agents.map((a) => ({
           id: a.id.slice(0, 8),
+          role: a.role,
           status: a.status,
           runtime: a.runtime,
           currentTask: a.currentTask?.slice(0, 8) || '-',
@@ -120,8 +123,10 @@ agentCommand
       console.log('\nAgent Details:');
       console.log('─────────────────────');
       console.log('ID:', agent.id);
+      console.log('Role:', agent.role);
       console.log('Status:', agent.status);
       console.log('Runtime:', agent.runtime);
+      console.log('Workspace:', agent.workspace || '-');
       console.log('PID:', agent.pid || '-');
       console.log('Current Task:', agent.currentTask || '-');
       console.log('Started:', agent.startedAt.toLocaleString());

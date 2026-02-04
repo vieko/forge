@@ -1,7 +1,7 @@
 import { EventEmitter } from 'eventemitter3';
 import { AgentManager } from './agent-manager.js';
 import { TaskQueue } from './queue.js';
-import { Task, TaskDefinition, AgentConfig, AgentInstance } from '../types/index.js';
+import { Task, TaskDefinition, AgentConfig, AgentInstance, AgentRole } from '../types/index.js';
 import { createChildLogger } from '../utils/logger.js';
 import { loadConfig } from './config.js';
 import { TaskBridge } from './task-bridge.js';
@@ -182,6 +182,35 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     }
   }
 
+  private async hasUnsatisfiedDependencies(task: Task): Promise<boolean> {
+    if (!task.dependencies || task.dependencies.length === 0) {
+      return false;
+    }
+
+    // Check if all dependency tasks are completed
+    for (const depId of task.dependencies) {
+      const depTask = await this.taskQueue.getTask(depId);
+
+      if (!depTask) {
+        this.logger.warn(
+          { taskId: task.id, dependencyId: depId },
+          'Dependency task not found'
+        );
+        return true; // Block if dependency doesn't exist
+      }
+
+      if (depTask.status !== 'completed') {
+        this.logger.debug(
+          { taskId: task.id, dependencyId: depId, dependencyStatus: depTask.status },
+          'Task blocked by uncompleted dependency'
+        );
+        return true; // Block if dependency not completed
+      }
+    }
+
+    return false; // All dependencies satisfied
+  }
+
   private async assignPendingTasks() {
     try {
       const pendingTasks = await this.taskQueue.getTasks('queued');
@@ -189,17 +218,29 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         return;
       }
 
-      const availableAgents = this.agentManager.getAvailableAgents();
-      if (availableAgents.length === 0) {
-        return;
-      }
+      for (const task of pendingTasks) {
+        // Check if task has unsatisfied dependencies
+        if (await this.hasUnsatisfiedDependencies(task)) {
+          continue;
+        }
 
-      // Assign tasks to agents
-      const assignments = Math.min(pendingTasks.length, availableAgents.length);
+        // Get agents filtered by role and capabilities
+        const availableAgents = this.agentManager.getAvailableAgents(
+          task.requiredRole,
+          task.requiredCapabilities,
+          task.tags
+        );
 
-      for (let i = 0; i < assignments; i++) {
-        const task = pendingTasks[i];
-        const agent = availableAgents[i];
+        if (availableAgents.length === 0) {
+          this.logger.debug(
+            { taskId: task.id, requiredRole: task.requiredRole },
+            'No available agents for task'
+          );
+          continue;
+        }
+
+        // Assign to first available agent
+        const agent = availableAgents[0];
 
         try {
           await this.assignTaskToAgent(task, agent);
