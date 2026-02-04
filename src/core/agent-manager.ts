@@ -15,7 +15,7 @@ export interface AgentManagerEvents {
 
 export class AgentManager extends EventEmitter<AgentManagerEvents> {
   private agents: Map<string, AgentInstance> = new Map();
-  private adapters: Map<RuntimeType, IRuntimeAdapter> = new Map();
+  public adapters: Map<RuntimeType, IRuntimeAdapter> = new Map();
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private logger = createChildLogger({ component: 'agent-manager' });
   private config = loadConfig();

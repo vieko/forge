@@ -190,8 +190,15 @@ export class LocalProcessAdapter extends BaseRuntimeAdapter {
     agent.status = 'busy';
     agent.currentTask = taskPayload.taskId as string | undefined;
 
-    // Send task to agent via stdin
-    process.stdin.write(JSON.stringify(taskPayload) + '\n');
+    // Send notification via stdin
+    const message = `Task ${taskPayload.taskId} assigned. Use TaskList and TaskGet to view details.`;
+    const instruction = {
+      type: 'task_notification',
+      taskId: taskPayload.taskId,
+      message,
+    };
+
+    process.stdin.write(JSON.stringify(instruction) + '\n');
   }
 
   async getResourceUsage(agentId: string): Promise<{

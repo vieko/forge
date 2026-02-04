@@ -4,6 +4,7 @@ import { TaskQueue } from './queue.js';
 import { Task, TaskDefinition, AgentConfig, AgentInstance } from '../types/index.js';
 import { createChildLogger } from '../utils/logger.js';
 import { loadConfig } from './config.js';
+import { TaskBridge } from './task-bridge.js';
 
 export interface OrchestratorEvents {
   'orchestrator:started': () => void;
@@ -14,6 +15,7 @@ export interface OrchestratorEvents {
 export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private agentManager: AgentManager;
   private taskQueue: TaskQueue;
+  private taskBridge: TaskBridge | null = null;
   private running = false;
   private pollInterval: NodeJS.Timeout | null = null;
   private logger = createChildLogger({ component: 'orchestrator' });
@@ -70,6 +72,26 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     this.logger.info('Starting orchestrator');
     this.running = true;
 
+    // Initialize task bridge if enabled
+    if (this.config.runtimes.local.enableNativeTasks) {
+      this.taskBridge = new TaskBridge(this.config.runtimes.local.taskListId);
+      await this.taskBridge.initialize();
+      await this.taskBridge.startSync(this.config.runtimes.local.taskSyncInterval);
+
+      // Listen for task completion events
+      this.taskBridge.on('task:completed', (forgeTaskId) => {
+        this.logger.info({ forgeTaskId }, 'Task completed by agent');
+        void this.handleClaudeTaskCompletion(forgeTaskId, true);
+      });
+
+      this.taskBridge.on('task:failed', (forgeTaskId) => {
+        this.logger.warn({ forgeTaskId }, 'Task failed in agent');
+        void this.handleClaudeTaskCompletion(forgeTaskId, false);
+      });
+
+      this.logger.info('Task bridge initialized');
+    }
+
     // Start health checks
     await this.agentManager.startHealthChecks();
 
@@ -93,6 +115,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
     // Stop health checks
     this.agentManager.stopHealthChecks();
+
+    // Clean up task bridge
+    if (this.taskBridge) {
+      await this.taskBridge.cleanup();
+    }
 
     // Clean up agents
     await this.agentManager.cleanup();
@@ -193,9 +220,20 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
     await this.agentManager.assignTask(agent.id, task.id);
 
-    // TODO: Execute task on agent via runtime adapter
-    // For now, this is a placeholder
-    // await runtimeAdapter.executeTask(agent.id, task.payload);
+    // Create Claude Code task if bridge enabled
+    if (this.taskBridge) {
+      await this.taskBridge.createClaudeTask(task, agent.id);
+    }
+
+    // Execute task on agent
+    const adapter = this.agentManager.adapters.get(agent.runtime);
+    if (adapter) {
+      await adapter.executeTask(agent.id, {
+        taskId: task.id,
+        type: task.type,
+        name: task.name,
+      });
+    }
   }
 
   private async handleTaskCompletion(task: Task, success: boolean) {
@@ -211,6 +249,27 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         'Error handling task completion'
       );
     }
+  }
+
+  private async handleClaudeTaskCompletion(forgeTaskId: string, success: boolean) {
+    const task = await this.taskQueue.getTask(forgeTaskId);
+    if (!task) {
+      this.logger.warn({ forgeTaskId }, 'Task not found for Claude completion');
+      return;
+    }
+
+    if (success) {
+      await this.taskQueue.completeTask(forgeTaskId, {
+        success: true,
+        duration: Date.now() - (task.startedAt?.getTime() || Date.now()),
+        stats: { apiCalls: 0, tokensUsed: 0, costUsd: 0 },
+      });
+    } else {
+      await this.taskQueue.failTask(forgeTaskId, 'Agent marked task as failed');
+    }
+
+    // Trigger existing completion handler
+    await this.handleTaskCompletion(task, success);
   }
 
   private async handleAgentCrash(agent: AgentInstance, error: Error) {

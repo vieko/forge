@@ -1,6 +1,6 @@
 import { Queue, Worker, Job, QueueEvents } from 'bullmq';
 import { Redis } from 'ioredis';
-import { Task, TaskDefinition, TaskStatus } from '../types/index.js';
+import { Task, TaskDefinition, TaskStatus, TaskResult } from '../types/index.js';
 import { loadConfig } from './config.js';
 import { createChildLogger } from '../utils/logger.js';
 import { randomUUID } from 'crypto';
@@ -219,6 +219,30 @@ export class TaskQueue extends EventEmitter<TaskQueueEvents> {
     }
 
     return task.checkpoints[task.checkpoints.length - 1].state;
+  }
+
+  async completeTask(taskId: string, result: TaskResult): Promise<void> {
+    const job = await this.queue.getJob(taskId);
+    if (!job) {
+      throw new Error(`Task ${taskId} not found`);
+    }
+
+    await job.moveToCompleted(result, job.token || '', true);
+    const task = await this.jobToTask(job);
+    this.emit('task:completed', task);
+    this.logger.info({ taskId }, 'Task completed');
+  }
+
+  async failTask(taskId: string, error: string): Promise<void> {
+    const job = await this.queue.getJob(taskId);
+    if (!job) {
+      throw new Error(`Task ${taskId} not found`);
+    }
+
+    await job.moveToFailed(new Error(error), job.token || '', true);
+    const task = await this.jobToTask(job);
+    this.emit('task:failed', task, new Error(error));
+    this.logger.error({ taskId, error }, 'Task failed');
   }
 
   async getQueueStats() {

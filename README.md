@@ -16,6 +16,7 @@
 - 🛠️ **CLI Tool** - Complete command-line interface for management
 - 🔧 **Daemon Mode** - Background operation with process management
 - 💪 **Production Ready** - Type-safe, tested, and fault-tolerant
+- 📋 **Claude Code Task Integration** - Native task list support for agent transparency
 
 ## Quick Start
 
@@ -70,6 +71,35 @@ forge daemon logs --follow
 # Stop daemon
 forge daemon stop
 ```
+
+### Claude Code Task Integration
+
+Forge integrates with Claude Code's native task system. Agents can use built-in tools:
+- `TaskList` - View all tasks in the queue
+- `TaskGet` - Read task details
+- `TaskUpdate` - Report progress and completion
+
+Tasks are automatically synced to `~/.claude/tasks/forge/` for multi-agent coordination.
+
+**Configuration:**
+```bash
+# Enable native task integration (default: true)
+ENABLE_NATIVE_TASKS=true
+
+# Task sync interval in milliseconds (default: 2000)
+TASK_SYNC_INTERVAL=2000
+```
+
+The task list ID is configured in `.claude/settings.local.json`:
+```json
+{
+  "env": {
+    "CLAUDE_CODE_TASK_LIST_ID": "forge"
+  }
+}
+```
+
+Agents spawned in this directory automatically inherit the shared task list.
 
 ## Architecture
 

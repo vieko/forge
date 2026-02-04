@@ -62,6 +62,9 @@ export const ConfigSchema = z.object({
     local: z.object({
       claudeCodePath: z.string().optional(),
       nodeOptions: z.string().optional(),
+      enableNativeTasks: z.boolean().default(true),
+      taskSyncInterval: z.number().default(2000),
+      taskListId: z.string().default('forge'),
     }),
     vercel: z.object({
       sandboxUrl: z.string().optional(),
@@ -144,6 +147,11 @@ export function loadConfig(): Config {
       local: {
         claudeCodePath: process.env.CLAUDE_CODE_PATH,
         nodeOptions: process.env.NODE_OPTIONS,
+        enableNativeTasks: process.env.ENABLE_NATIVE_TASKS === 'true',
+        taskSyncInterval: process.env.TASK_SYNC_INTERVAL
+          ? parseInt(process.env.TASK_SYNC_INTERVAL)
+          : undefined,
+        taskListId: process.env.CLAUDE_CODE_TASK_LIST_ID,
       },
       vercel: {
         sandboxUrl: process.env.VERCEL_SANDBOX_URL,
