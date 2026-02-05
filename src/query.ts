@@ -1,8 +1,11 @@
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import { agents } from './agents.js';
 import type { ForgeOptions, ForgeResult } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 async function saveResult(
   workingDir: string,
@@ -46,8 +49,8 @@ ${resultText}
 
 // Format progress output with agent context
 function formatProgress(agent: string | null, message: string): string {
-  const prefix = agent ? `[${agent}]` : '[forge]';
-  return `${prefix} ${message}`;
+  const name = agent ? agent.charAt(0).toUpperCase() + agent.slice(1) : 'Main';
+  return `[${name}] ${message}`;
 }
 
 // Check if an error is transient and retryable
@@ -76,8 +79,79 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export async function runForge(options: ForgeOptions): Promise<void> {
-  const { prompt, specPath, cwd, model = 'opus', planOnly = false, dryRun = false, verbose = false, quiet = false, resume } = options;
+// Detect project type and return verification commands
+async function detectVerification(workingDir: string): Promise<string[]> {
+  const commands: string[] = [];
+
+  try {
+    const packageJsonPath = path.join(workingDir, 'package.json');
+    const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'));
+    const scripts = packageJson.scripts || {};
+
+    // TypeScript check
+    if (packageJson.devDependencies?.typescript || packageJson.dependencies?.typescript) {
+      commands.push('npx tsc --noEmit');
+    }
+
+    // Build command
+    if (scripts.build) {
+      commands.push('npm run build');
+    }
+
+    // Test command (optional - don't fail if no tests)
+    if (scripts.test && !scripts.test.includes('no test specified')) {
+      commands.push('npm test');
+    }
+  } catch {
+    // No package.json - try common patterns
+    try {
+      await fs.access(path.join(workingDir, 'Cargo.toml'));
+      commands.push('cargo check');
+      commands.push('cargo build');
+    } catch {}
+
+    try {
+      await fs.access(path.join(workingDir, 'go.mod'));
+      commands.push('go build ./...');
+    } catch {}
+  }
+
+  return commands;
+}
+
+// Run verification and return errors if any
+async function runVerification(workingDir: string, quiet: boolean): Promise<{ passed: boolean; errors: string }> {
+  const commands = await detectVerification(workingDir);
+
+  if (commands.length === 0) {
+    if (!quiet) console.log('[Verify] No verification commands detected');
+    return { passed: true, errors: '' };
+  }
+
+  const errors: string[] = [];
+
+  for (const cmd of commands) {
+    if (!quiet) console.log(`[Verify] Running: ${cmd}`);
+    try {
+      await execAsync(cmd, { cwd: workingDir, timeout: 120000 });
+      if (!quiet) console.log(`[Verify] ✓ ${cmd}`);
+    } catch (err) {
+      const error = err as { stderr?: string; stdout?: string; message?: string };
+      const errorOutput = error.stderr || error.stdout || error.message || 'Unknown error';
+      errors.push(`Command failed: ${cmd}\n${errorOutput}`);
+      if (!quiet) console.log(`[Verify] ✗ ${cmd}`);
+    }
+  }
+
+  return {
+    passed: errors.length === 0,
+    errors: errors.join('\n\n')
+  };
+}
+
+// Run a single spec
+async function runSingleSpec(options: ForgeOptions & { specContent?: string }): Promise<void> {
+  const { prompt, specPath, specContent, cwd, model = 'opus', maxTurns = 100, planOnly = false, dryRun = false, verbose = false, quiet = false, resume } = options;
 
   // Resolve working directory
   const workingDir = cwd ? (await fs.realpath(cwd)) : process.cwd();
@@ -95,11 +169,11 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     throw err;
   }
 
-  // Read spec content if provided
-  let specContent: string | undefined;
-  if (specPath) {
+  // Read spec content if provided (and not already passed)
+  let finalSpecContent: string | undefined = specContent;
+  if (!finalSpecContent && specPath) {
     try {
-      specContent = await fs.readFile(specPath, 'utf-8');
+      finalSpecContent = await fs.readFile(specPath, 'utf-8');
     } catch {
       throw new Error(`Spec file not found: ${specPath}`);
     }
@@ -107,16 +181,16 @@ export async function runForge(options: ForgeOptions): Promise<void> {
 
   // Build the prompt
   let fullPrompt = prompt;
-  if (specContent) {
-    fullPrompt = `## Specification\n\n${specContent}\n\n## Additional Context\n\n${prompt}`;
+  if (finalSpecContent) {
+    fullPrompt = `## Specification\n\n${finalSpecContent}\n\n## Additional Context\n\n${prompt}`;
   }
 
-  // Configure agent workflow
+  // Configure prompt - outcome-focused, not procedural
   let workflowPrompt: string;
   if (dryRun) {
-    workflowPrompt = `Use the planner agent to break down this work into tasks. Do NOT implement - this is a dry run for cost estimation.
+    workflowPrompt = `Analyze this work and create a task breakdown. Do NOT implement - this is a dry run for cost estimation.
 
-After planning, output a structured summary in this exact format:
+Output a structured summary:
 
 ## Tasks
 
@@ -129,15 +203,33 @@ After planning, output a structured summary in this exact format:
 
 ${fullPrompt}`;
   } else if (planOnly) {
-    workflowPrompt = `Use the planner agent to break down this work into tasks. Do NOT implement - planning only.\n\n${fullPrompt}`;
+    workflowPrompt = `Analyze this work and create a task breakdown. Do NOT implement - planning only.\n\n${fullPrompt}`;
   } else {
-    workflowPrompt = `Complete this work using the following workflow:
-1. Use planner agent to decompose into tasks
-2. Use worker agent to implement each task
-3. Use reviewer agent to verify quality
+    workflowPrompt = `## Outcome
 
-${fullPrompt}`;
+${fullPrompt}
+
+## Acceptance Criteria
+
+- Code compiles without errors
+- All imports resolve correctly
+- No TypeScript errors (if applicable)
+- UI elements are visible and functional
+
+## How to Work
+
+You decide the best approach. You may:
+- Work directly on the code
+- Break work into tasks if helpful
+- Use any tools available
+
+Focus on delivering working code that meets the acceptance criteria.`;
   }
+
+  // Verification loop settings
+  const maxVerifyAttempts = 3;
+  let verifyAttempt = 0;
+  let currentPrompt = workflowPrompt;
 
   // SDK accepts shorthand model names
   const modelName = model;
@@ -164,23 +256,23 @@ ${fullPrompt}`;
   const maxRetries = 3;
   const baseDelayMs = 5000; // 5 seconds, doubles each retry
 
+  // Main execution + verification loop
+  while (verifyAttempt < maxVerifyAttempts) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       for await (const message of sdkQuery({
-      prompt: workflowPrompt,
+      prompt: currentPrompt,
       options: {
         cwd: workingDir,
         model: modelName,
         tools: { type: 'preset', preset: 'claude_code' },
         allowedTools: [
           'Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob',
-          'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet',
-          'Task'  // Required for subagents
+          'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'
         ],
-        agents,
         permissionMode: 'default',
-        maxTurns: dryRun ? 20 : 50,
-        maxBudgetUsd: dryRun ? 5.00 : 20.00,
+        maxTurns: dryRun ? 20 : maxTurns,
+        maxBudgetUsd: dryRun ? 5.00 : 50.00,
         ...(resume && { resume })
       }
     })) {
@@ -201,9 +293,11 @@ ${fullPrompt}`;
               // Detect agent spawning
               if (toolName === 'Task') {
                 const agentType = input.subagent_type as string;
+                const description = input.description as string;
                 if (agentType && agentType !== currentAgent) {
                   currentAgent = agentType;
-                  console.log(formatProgress(currentAgent, 'Starting...'));
+                  const desc = description ? `: ${description}` : '';
+                  console.log(formatProgress(currentAgent, `Starting${desc}`));
                 }
               }
               // Show task operations
@@ -247,6 +341,42 @@ ${fullPrompt}`;
         if (message.subtype === 'success') {
           const resultText = message.result || '';
 
+          // Run verification (unless dry-run or plan-only)
+          if (!dryRun && !planOnly) {
+            if (!quiet) console.log('\n[forge] Running verification...');
+            const verification = await runVerification(workingDir, quiet);
+
+            if (!verification.passed) {
+              verifyAttempt++;
+              if (verifyAttempt < maxVerifyAttempts) {
+                if (!quiet) {
+                  console.log(`\n[forge] Verification failed (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
+                  console.log('[forge] Sending errors back to agent for fixes...\n');
+                }
+                // Update prompt with errors for next iteration
+                currentPrompt = `## Previous Work
+
+The implementation is mostly complete but verification failed.
+
+## Errors to Fix
+
+${verification.errors}
+
+## Instructions
+
+Fix these errors. The code should compile and build successfully.`;
+                break; // Break out of message loop to start new query
+              } else {
+                if (!quiet) {
+                  console.log(`\n[forge] Verification failed after ${maxVerifyAttempts} attempts`);
+                  console.log('[forge] Errors:\n' + verification.errors);
+                }
+              }
+            } else {
+              if (!quiet) console.log('[forge] Verification passed!\n');
+            }
+          }
+
           // Save result to .forge/results/
           const forgeResult: ForgeResult = {
             startedAt: startTime.toISOString(),
@@ -279,15 +409,11 @@ ${fullPrompt}`;
             console.log(`Results saved: ${resultsDir}`);
           }
 
-          // Dry run: show cost estimates (even in quiet mode, this is the point)
+          // Dry run: show cost estimates
           if (dryRun && !quiet) {
-            // Extract task count from result (look for "Total tasks: N" pattern)
             const taskCountMatch = resultText.match(/Total tasks:\s*(\d+)/i);
             const taskCount = taskCountMatch ? parseInt(taskCountMatch[1], 10) : 0;
 
-            // Cost estimation based on observed averages:
-            // - Planning: actual cost from this run
-            // - Execution: ~$1.50-2.50 per task (worker + reviewer overhead)
             const planningCost = message.total_cost_usd || 0;
             const minExecCost = taskCount * 1.50;
             const maxExecCost = taskCount * 2.50;
@@ -306,6 +432,9 @@ ${fullPrompt}`;
             console.log('\nRun without --dry-run to execute.');
             console.log('================================');
           }
+
+          // If we got here without breaking, we're done
+          return;
         } else if (message.subtype === 'error_during_execution') {
           const errorText = JSON.stringify(message.errors, null, 2);
 
@@ -387,5 +516,101 @@ ${fullPrompt}`;
     // Non-transient error or out of retries
     throw error;
   }
+  } // end retry loop
+  } // end verification loop
+}
+
+// Main entry point - handles single spec or spec directory
+export async function runForge(options: ForgeOptions): Promise<void> {
+  const { specDir, specPath, quiet } = options;
+
+  // If spec directory provided, run each spec sequentially
+  if (specDir) {
+    const resolvedDir = path.resolve(specDir);
+
+    try {
+      const files = await fs.readdir(resolvedDir);
+      const specFiles = files
+        .filter(f => f.endsWith('.md'))
+        .sort(); // Alphabetical order for predictable execution
+
+      if (specFiles.length === 0) {
+        throw new Error(`No .md files found in ${resolvedDir}`);
+      }
+
+      if (!quiet) {
+        console.log(`Found ${specFiles.length} specs in ${resolvedDir}:`);
+        specFiles.forEach((f, i) => console.log(`  ${i + 1}. ${f}`));
+        console.log('');
+      }
+
+      let totalCost = 0;
+      let totalDuration = 0;
+      const results: { spec: string; status: string; cost?: number; duration: number }[] = [];
+
+      for (let i = 0; i < specFiles.length; i++) {
+        const specFile = specFiles[i];
+        const specFilePath = path.join(resolvedDir, specFile);
+
+        if (!quiet) {
+          console.log(`\n${'='.repeat(60)}`);
+          console.log(`Running spec ${i + 1}/${specFiles.length}: ${specFile}`);
+          console.log(`${'='.repeat(60)}\n`);
+        }
+
+        const startTime = Date.now();
+        try {
+          // Read spec content
+          const specContent = await fs.readFile(specFilePath, 'utf-8');
+
+          // Run with spec content directly
+          await runSingleSpec({
+            ...options,
+            specPath: specFilePath,
+            specContent,
+            specDir: undefined, // Don't recurse
+          });
+
+          const duration = (Date.now() - startTime) / 1000;
+          totalDuration += duration;
+          results.push({ spec: specFile, status: 'success', duration });
+        } catch (err) {
+          const duration = (Date.now() - startTime) / 1000;
+          totalDuration += duration;
+          results.push({
+            spec: specFile,
+            status: `failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+            duration
+          });
+
+          if (!quiet) {
+            console.error(`\nSpec ${specFile} failed:`, err instanceof Error ? err.message : err);
+            console.log('Continuing with next spec...\n');
+          }
+        }
+      }
+
+      // Summary
+      if (!quiet) {
+        console.log(`\n${'='.repeat(60)}`);
+        console.log('SPEC DIRECTORY SUMMARY');
+        console.log(`${'='.repeat(60)}`);
+        results.forEach(r => {
+          console.log(`  ${r.spec}: ${r.status} (${r.duration.toFixed(1)}s)`);
+        });
+        console.log(`\nTotal duration: ${totalDuration.toFixed(1)}s`);
+        console.log(`Successful: ${results.filter(r => r.status === 'success').length}/${results.length}`);
+      }
+
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error(`Spec directory not found: ${resolvedDir}`);
+      }
+      throw err;
+    }
   }
+
+  // Single spec or no spec - run directly
+  await runSingleSpec(options);
 }

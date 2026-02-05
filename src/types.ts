@@ -1,19 +1,4 @@
 /**
- * Agent definition for subagents.
- * Maps to @anthropic-ai/claude-agent-sdk's AgentDefinition.
- */
-export interface AgentDefinition {
-  /** Natural language description of when to use this agent */
-  description: string;
-  /** The agent's system prompt */
-  prompt: string;
-  /** Array of allowed tool names */
-  tools: string[];
-  /** Model to use for this agent */
-  model: 'opus' | 'sonnet' | 'haiku' | 'inherit';
-}
-
-/**
  * Options for running Forge.
  */
 export interface ForgeOptions {
@@ -21,10 +6,14 @@ export interface ForgeOptions {
   prompt: string;
   /** Path to a spec file to read */
   specPath?: string;
+  /** Path to a directory of spec files (runs each .md sequentially) */
+  specDir?: string;
   /** Working directory (target repo) */
   cwd?: string;
   /** Model to use (opus or sonnet) */
   model?: 'opus' | 'sonnet';
+  /** Maximum turns per spec (default: 100) */
+  maxTurns?: number;
   /** Only create tasks, don't implement */
   planOnly?: boolean;
   /** Preview tasks and estimate cost without executing */
