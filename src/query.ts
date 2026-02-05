@@ -44,8 +44,40 @@ ${resultText}
   return resultsDir;
 }
 
+// Format progress output with agent context
+function formatProgress(agent: string | null, message: string): string {
+  const prefix = agent ? `[${agent}]` : '[forge]';
+  return `${prefix} ${message}`;
+}
+
+// Check if an error is transient and retryable
+function isTransientError(error: unknown): boolean {
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    // Rate limits, network errors, server errors
+    return (
+      message.includes('rate limit') ||
+      message.includes('rate_limit') ||
+      message.includes('429') ||
+      message.includes('503') ||
+      message.includes('502') ||
+      message.includes('timeout') ||
+      message.includes('econnreset') ||
+      message.includes('econnrefused') ||
+      message.includes('network') ||
+      message.includes('overloaded')
+    );
+  }
+  return false;
+}
+
+// Sleep helper for retry delays
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export async function runForge(options: ForgeOptions): Promise<void> {
-  const { prompt, specPath, cwd, model = 'opus', planOnly = false, dryRun = false, verbose = false, resume } = options;
+  const { prompt, specPath, cwd, model = 'opus', planOnly = false, dryRun = false, verbose = false, quiet = false, resume } = options;
 
   // Resolve working directory
   const workingDir = cwd ? (await fs.realpath(cwd)) : process.cwd();
@@ -114,17 +146,27 @@ ${fullPrompt}`;
   const startTime = new Date();
 
   // Run the query
-  if (cwd) {
-    console.log(`Working directory: ${workingDir}`);
-  }
-  if (dryRun) {
-    console.log('Starting Forge (dry run - planning only)...\n');
-  } else {
-    console.log('Starting Forge...\n');
+  if (!quiet) {
+    if (cwd) {
+      console.log(`Working directory: ${workingDir}`);
+    }
+    if (dryRun) {
+      console.log('Starting Forge (dry run - planning only)...\n');
+    } else {
+      console.log('Starting Forge...\n');
+    }
   }
 
-  try {
-    for await (const message of sdkQuery({
+  // Track current agent for progress output
+  let currentAgent: string | null = null;
+
+  // Retry configuration
+  const maxRetries = 3;
+  const baseDelayMs = 5000; // 5 seconds, doubles each retry
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      for await (const message of sdkQuery({
       prompt: workflowPrompt,
       options: {
         cwd: workingDir,
@@ -143,13 +185,56 @@ ${fullPrompt}`;
       }
     })) {
       // Handle different message types
-      if (verbose && message.type === 'assistant') {
-        // Show assistant messages in verbose mode
+      if (message.type === 'assistant' && !quiet) {
         const content = message.message?.content;
         if (Array.isArray(content)) {
           for (const block of content) {
-            if (block.type === 'text') {
+            // Verbose mode: show all text
+            if (verbose && block.type === 'text') {
               console.log(block.text);
+            }
+            // Normal mode: show tool usage for progress
+            if (!verbose && block.type === 'tool_use') {
+              const toolName = block.name;
+              const input = block.input as Record<string, unknown>;
+
+              // Detect agent spawning
+              if (toolName === 'Task') {
+                const agentType = input.subagent_type as string;
+                if (agentType && agentType !== currentAgent) {
+                  currentAgent = agentType;
+                  console.log(formatProgress(currentAgent, 'Starting...'));
+                }
+              }
+              // Show task operations
+              else if (toolName === 'TaskCreate') {
+                const subject = input.subject as string;
+                if (subject) {
+                  console.log(formatProgress(currentAgent, `Creating task: ${subject}`));
+                }
+              }
+              else if (toolName === 'TaskUpdate') {
+                const status = input.status as string;
+                if (status === 'completed') {
+                  console.log(formatProgress(currentAgent, 'Task completed'));
+                }
+              }
+              // Show file operations
+              else if (toolName === 'Edit' || toolName === 'Write') {
+                const filePath = input.file_path as string;
+                if (filePath) {
+                  const fileName = filePath.split('/').pop();
+                  console.log(formatProgress(currentAgent, `Editing ${fileName}`));
+                }
+              }
+              else if (toolName === 'Bash') {
+                const cmd = input.command as string;
+                if (cmd) {
+                  // Show first part of command
+                  const shortCmd = cmd.length > 50 ? cmd.substring(0, 47) + '...' : cmd;
+                  console.log(formatProgress(currentAgent, `Running: ${shortCmd}`));
+                }
+              }
             }
           }
         }
@@ -177,20 +262,25 @@ ${fullPrompt}`;
 
           const resultsDir = await saveResult(workingDir, forgeResult, resultText);
 
-          // Display result (full, no truncation)
-          console.log('\n---\nResult:\n');
-          console.log(resultText);
+          if (quiet) {
+            // Quiet mode: just show results path
+            console.log(resultsDir);
+          } else {
+            // Display result (full, no truncation)
+            console.log('\n---\nResult:\n');
+            console.log(resultText);
 
-          // Display summary
-          console.log('\n---');
-          console.log(`Duration: ${durationSeconds.toFixed(1)}s`);
-          if (message.total_cost_usd !== undefined) {
-            console.log(`Cost: $${message.total_cost_usd.toFixed(4)}`);
+            // Display summary
+            console.log('\n---');
+            console.log(`Duration: ${durationSeconds.toFixed(1)}s`);
+            if (message.total_cost_usd !== undefined) {
+              console.log(`Cost: $${message.total_cost_usd.toFixed(4)}`);
+            }
+            console.log(`Results saved: ${resultsDir}`);
           }
-          console.log(`Results saved: ${resultsDir}`);
 
-          // Dry run: show cost estimates
-          if (dryRun) {
+          // Dry run: show cost estimates (even in quiet mode, this is the point)
+          if (dryRun && !quiet) {
             // Extract task count from result (look for "Total tasks: N" pattern)
             const taskCountMatch = resultText.match(/Total tasks:\s*(\d+)/i);
             const taskCount = taskCountMatch ? parseInt(taskCountMatch[1], 10) : 0;
@@ -275,11 +365,27 @@ ${fullPrompt}`;
         }
       }
     }
+    // If we reach here without error, break out of retry loop
+    break;
   } catch (error) {
     if (error instanceof Error && error.message.includes('not installed')) {
       console.error('Agent SDK not properly installed. Run: bun install @anthropic-ai/claude-agent-sdk');
       process.exit(1);
     }
+
+    // Check if error is transient and we have retries left
+    if (isTransientError(error) && attempt < maxRetries) {
+      const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
+      if (!quiet) {
+        console.log(`\n[forge] Transient error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        console.log(`[forge] Retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+      }
+      await sleep(delayMs);
+      continue;
+    }
+
+    // Non-transient error or out of retries
     throw error;
+  }
   }
 }

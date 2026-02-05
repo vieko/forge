@@ -21,8 +21,11 @@ forge run --plan-only "design API for Y"
 # Dry run (preview tasks + cost estimate)
 forge run --dry-run "implement feature X"
 
-# Verbose output
+# Verbose output (full details)
 forge run -v "debug issue Z"
+
+# Quiet mode (for CI, minimal output)
+forge run -q "implement feature X"
 
 # Quick alias (no 'run' needed)
 forge "simple task"

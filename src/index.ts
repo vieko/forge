@@ -18,6 +18,7 @@ program
   .option('--plan-only', 'Only create tasks, do not implement')
   .option('--dry-run', 'Preview tasks and estimate cost without executing')
   .option('-v, --verbose', 'Show detailed output')
+  .option('-q, --quiet', 'Suppress progress output (for CI)')
   .option('-r, --resume <session>', 'Resume a previous session')
   .action(async (prompt: string, options: {
     spec?: string;
@@ -26,6 +27,7 @@ program
     planOnly?: boolean;
     dryRun?: boolean;
     verbose?: boolean;
+    quiet?: boolean;
     resume?: string;
   }) => {
     try {
@@ -37,6 +39,7 @@ program
         planOnly: options.planOnly,
         dryRun: options.dryRun,
         verbose: options.verbose,
+        quiet: options.quiet,
         resume: options.resume
       });
     } catch (error) {

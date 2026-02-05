@@ -31,6 +31,8 @@ export interface ForgeOptions {
   dryRun?: boolean;
   /** Show detailed output */
   verbose?: boolean;
+  /** Suppress progress output (for CI) */
+  quiet?: boolean;
   /** Resume a previous session */
   resume?: string;
 }
