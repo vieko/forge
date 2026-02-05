@@ -47,8 +47,20 @@ export class LocalProcessAdapter extends BaseRuntimeAdapter {
       CLAUDE_MODEL: config.claudeConfig.model,
     };
 
+    // Build spawn args with role-specific initial prompt
+    const args = ['--print', '--output-format=json'];
+
+    // Add initial prompt based on role
+    if (config.role === 'planner') {
+      args.push('You are a planner agent for the Forge orchestrator. Check your task list with TaskList to see if you have any planning tasks assigned. If you have a planning task, read it with TaskGet, follow the instructions to decompose the spec into executable tasks, and submit tasks via JSON messages to stdout.');
+    } else if (config.role === 'worker') {
+      args.push('You are a worker agent for the Forge orchestrator. Check your task list with TaskList to see if you have any tasks assigned. If you have a task, read it with TaskGet and complete the work described.');
+    } else if (config.role === 'reviewer') {
+      args.push('You are a reviewer agent for the Forge orchestrator. Check your task list with TaskList to see if you have any review tasks assigned. If you have a task, read it with TaskGet and review the code as described.');
+    }
+
     // Start Claude Code in isolated workspace
-    const childProcess = spawn(claudeCodePath, ['--print', '--output-format=json'], {
+    const childProcess = spawn(claudeCodePath, args, {
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: workspace.agentWorkspace,
