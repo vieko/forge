@@ -52,11 +52,15 @@ Agent SDK query()
 ```
 src/
 ├── index.ts    # CLI entry (~50 lines)
-├── agents.ts   # Subagent definitions (~80 lines)
-├── query.ts    # SDK wrapper (~90 lines)
-└── types.ts    # TypeScript types (~30 lines)
+├── agents.ts   # Subagent definitions (~95 lines)
+├── query.ts    # SDK wrapper (~140 lines)
+└── types.ts    # TypeScript types (~50 lines)
 
-src-legacy/     # Previous implementation (reference)
+.forge/
+└── results/    # Run results (auto-created, gitignored)
+    └── <timestamp>/
+        ├── summary.json  # Structured metadata
+        └── result.md     # Full result text
 ```
 
 ## Agent Roles
@@ -117,6 +121,4 @@ The new implementation uses:
 - Agent SDK's native orchestration
 - SDK subagents for role separation
 - Native task tools (TaskCreate, etc.)
-- ~300 lines total
-
-Legacy code preserved in `src-legacy/` for reference.
+- ~350 lines total

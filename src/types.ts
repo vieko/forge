@@ -32,3 +32,29 @@ export interface ForgeOptions {
   /** Resume a previous session */
   resume?: string;
 }
+
+/**
+ * Result from a Forge run, saved to .forge/results/
+ */
+export interface ForgeResult {
+  /** ISO timestamp when the run started */
+  startedAt: string;
+  /** ISO timestamp when the run completed */
+  completedAt: string;
+  /** Duration in seconds */
+  durationSeconds: number;
+  /** Status of the run */
+  status: 'success' | 'error_execution' | 'error_max_turns' | 'error_budget';
+  /** Cost in USD (if available) */
+  costUsd?: number;
+  /** Spec file path (if provided) */
+  specPath?: string;
+  /** The prompt used */
+  prompt: string;
+  /** Model used */
+  model: string;
+  /** Working directory */
+  cwd: string;
+  /** Error message (if failed) */
+  error?: string;
+}
