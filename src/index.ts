@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { program } from 'commander';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { runForge } from './query.js';
 
 program
@@ -62,7 +64,14 @@ if (args.length > 0 && !args[0].startsWith('-') && args[0] !== 'run' && args[0] 
 
 // Handle SIGINT gracefully
 process.on('SIGINT', () => {
-  console.log('\nInterrupted. Tasks created so far are saved in TaskList.');
+  console.log('\nInterrupted.');
+  try {
+    const data = JSON.parse(readFileSync(join(process.cwd(), '.forge', 'latest-session.json'), 'utf-8'));
+    if (data.sessionId) {
+      console.log(`Session: ${data.sessionId}`);
+      console.log(`Resume: forge run --resume ${data.sessionId} "continue"`);
+    }
+  } catch {}
   process.exit(0);
 });
 

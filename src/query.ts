@@ -287,6 +287,18 @@ Focus on delivering working code that meets the acceptance criteria.`;
     return {};
   };
 
+  // Hook: Stop handler - persist session state for resume on interrupt
+  const latestSessionPath = path.join(workingDir, '.forge', 'latest-session.json');
+  const persistSession = async () => {
+    const state = { sessionId, startedAt: startTime.toISOString(), prompt, model: modelName, cwd: workingDir };
+    await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
+    await fs.writeFile(latestSessionPath, JSON.stringify(state, null, 2));
+  };
+  const stopHandler: HookCallback = async () => {
+    try { await persistSession(); } catch {}
+    return {};
+  };
+
   // Hook: Tool call audit log
   const auditPath = path.join(workingDir, '.forge', 'audit.jsonl');
   const auditLog: HookCallback = async (input, toolUseID) => {
@@ -330,6 +342,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
         hooks: {
           PreToolUse: [{ matcher: 'Bash', hooks: [bashGuardrail] }],
           PostToolUse: [{ hooks: [auditLog] }],
+          Stop: [{ hooks: [stopHandler] }],
         },
         maxTurns: dryRun ? 20 : maxTurns,
         maxBudgetUsd: dryRun ? 5.00 : 50.00,
@@ -340,6 +353,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
       if (message.type === 'system' && message.subtype === 'init') {
         sessionId = message.session_id;
         if (!quiet) console.log(`[forge] Session: ${sessionId}`);
+        persistSession().catch(() => {});
       }
 
       // Stream real-time progress via partial messages
@@ -524,8 +538,7 @@ Fix these errors. The code should compile and build successfully.`;
 
           await saveResult(workingDir, forgeResult, `Error:\n${errorText}`);
 
-          console.error('\nExecution failed:', message.errors);
-          process.exit(1);
+          throw new Error(`Execution failed: ${errorText}`);
         } else if (message.subtype === 'error_max_turns') {
           const forgeResult: ForgeResult = {
             startedAt: startTime.toISOString(),
@@ -543,8 +556,7 @@ Fix these errors. The code should compile and build successfully.`;
 
           await saveResult(workingDir, forgeResult, 'Error: Hit maximum turns limit');
 
-          console.error('\nHit maximum turns limit');
-          process.exit(1);
+          throw new Error('Hit maximum turns limit');
         } else if (message.subtype === 'error_max_budget_usd') {
           const forgeResult: ForgeResult = {
             startedAt: startTime.toISOString(),
@@ -562,8 +574,7 @@ Fix these errors. The code should compile and build successfully.`;
 
           await saveResult(workingDir, forgeResult, 'Error: Exceeded budget limit');
 
-          console.error('\nExceeded budget limit');
-          process.exit(1);
+          throw new Error('Exceeded budget limit');
         }
       }
     }
@@ -571,8 +582,7 @@ Fix these errors. The code should compile and build successfully.`;
     break;
   } catch (error) {
     if (error instanceof Error && error.message.includes('not installed')) {
-      console.error('Agent SDK not properly installed. Run: bun install @anthropic-ai/claude-agent-sdk');
-      process.exit(1);
+      throw new Error('Agent SDK not properly installed. Run: bun install @anthropic-ai/claude-agent-sdk');
     }
 
     // Check if error is transient and we have retries left
