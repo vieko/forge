@@ -2,26 +2,39 @@
 
 Minimal AI task orchestrator built on Anthropic's Agent SDK.
 
-## Overview
+## The Problem
 
-Forge coordinates planner, worker, and reviewer agents to accomplish complex tasks. The Agent SDK handles orchestration while subagents use Claude Code's native task system.
+Complex features require multiple steps: reading code, planning tasks, implementing changes, reviewing work. Doing this manually with an AI assistant means constant back-and-forth.
+
+## The Solution
+
+Forge coordinates three specialized agents—planner, worker, reviewer—that handle the full cycle autonomously. Give it a spec, get back working code.
 
 ```
 ~300 lines total
 
-User Prompt
-    ↓
-Agent SDK query()
-    ↓
-┌─────────────────────────────────────┐
-│  Subagents (via Task tool)          │
-│  ┌─────────┐ ┌────────┐ ┌────────┐  │
-│  │ Planner │→│ Worker │→│Reviewer│  │
-│  └─────────┘ └────────┘ └────────┘  │
-│       ↓          ↓          ↓       │
-│  TaskCreate  Edit/Write  TaskCreate │
-│  TaskUpdate  TaskUpdate  (fixes)    │
-└─────────────────────────────────────┘
+User Prompt + Spec
+        ↓
+   Agent SDK query()
+        ↓
+┌────────────────────────────────────┐
+│  Planner → Worker → Reviewer       │
+│     ↓         ↓          ↓         │
+│  TaskCreate  Edit    TaskCreate    │
+│  TaskUpdate  Write   (fixes)       │
+└────────────────────────────────────┘
+        ↓
+   Working Code
+```
+
+## Real Example
+
+```bash
+# Run 10 feature specs on a game project
+$ forge run -C ~/dev/arkanoid-game --spec specs/power-ups.md "implement power-ups"
+
+# Result: 8 power-ups implemented, tests passing, reviewer approved
+# Cost: $6.03 | Time: ~8 min
 ```
 
 ## Installation
@@ -39,7 +52,7 @@ bun run build
 # Run a task
 forge run "implement feature X"
 
-# With spec file
+# With spec file (recommended)
 forge run --spec .bonfire/specs/feature.md "implement this"
 
 # Target different directory
@@ -50,22 +63,17 @@ forge run --resume <session-id>
 
 # Plan only (no implementation)
 forge run --plan-only "design API for Y"
-
-# Verbose output
-forge run -v "debug issue"
 ```
 
 ## Agent Roles
 
 | Agent | Purpose | Tools |
 |-------|---------|-------|
-| **Planner** | Decomposes work into tasks | Read, Grep, Glob, TaskCreate, TaskUpdate, TaskList |
-| **Worker** | Implements individual tasks | Read, Write, Edit, Bash, Grep, Glob, TaskGet, TaskUpdate, TaskList |
-| **Reviewer** | Reviews completed work | Read, Grep, Glob, Bash, TaskCreate, TaskUpdate, TaskList, TaskGet |
+| **Planner** | Reads spec, decomposes into tasks | Read, Grep, Glob, TaskCreate, TaskUpdate, TaskList |
+| **Worker** | Implements each task | Read, Write, Edit, Bash, Grep, Glob, TaskGet, TaskUpdate, TaskList |
+| **Reviewer** | Reviews work, creates fix tasks | Read, Grep, Glob, Bash, TaskCreate, TaskUpdate, TaskList, TaskGet |
 
 ## Configuration
-
-Set your API credentials:
 
 ```bash
 # Option 1: Direct API key
@@ -76,24 +84,21 @@ export VERCEL_AI_GATEWAY_URL=https://...
 export VERCEL_AI_GATEWAY_KEY=vck_...
 ```
 
+## Works With
+
+- [Bonfire](https://github.com/vieko/bonfire) - Session context persistence. Use `/bonfire spec` to create specs, then run them with Forge.
+
 ## Development
 
 ```bash
-# Run in dev mode
-bun run src/index.ts run "test task"
-
-# Type check
-bun run typecheck
-
-# Build
-bun run build
+bun run src/index.ts run "test task"  # Dev mode
+bun run typecheck                      # Type check
+bun run build                          # Build
 ```
 
-## Dependencies
+## Design
 
-- `@anthropic-ai/claude-agent-sdk` - Agent orchestration
-- `commander` - CLI framework
-- `zod` - Runtime validation
+Forge follows patterns from [ctate's "How to Get Out of Your Agent's Way"](https://ctate.dev/posts/how-to-get-out-of-your-agents-way)—define outcomes, let agents determine procedures.
 
 ## License
 
