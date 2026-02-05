@@ -2,6 +2,7 @@ import { EventEmitter } from 'eventemitter3';
 import { AgentConfig, AgentInstance, AgentStatus, AgentRole, RuntimeType } from '../types/index.js';
 import { IRuntimeAdapter } from '../runtime/adapter.js';
 import { LocalProcessAdapter } from '../runtime/local.js';
+import { AnthropicAPIAdapter } from '../runtime/anthropic.js';
 import { createChildLogger } from '../utils/logger.js';
 import { loadConfig } from './config.js';
 
@@ -26,8 +27,11 @@ export class AgentManager extends EventEmitter<AgentManagerEvents> {
   }
 
   private initializeAdapters() {
-    // Initialize Local adapter
+    // Initialize Local adapter (Claude CLI)
     this.adapters.set('local', new LocalProcessAdapter());
+
+    // Initialize Anthropic API adapter
+    this.adapters.set('anthropic', new AnthropicAPIAdapter());
 
     // TODO: Initialize Docker adapter
     // this.adapters.set('docker', new DockerAdapter());

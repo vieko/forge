@@ -1,4 +1,4 @@
-export type RuntimeType = 'docker' | 'local' | 'vercel';
+export type RuntimeType = 'docker' | 'local' | 'vercel' | 'anthropic';
 
 export type AgentRole = 'planner' | 'worker' | 'reviewer';
 
@@ -59,6 +59,7 @@ export interface AgentInstance {
   lastHealthCheck?: Date;
   currentTask?: string;
   stats: AgentStats;
+  metadata?: Record<string, unknown>;
 }
 
 export interface AgentStats {

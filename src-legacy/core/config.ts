@@ -17,21 +17,16 @@ export const ConfigSchema = z.object({
     maxConcurrentAgents: z.number().default(5),
     taskTimeout: z.number().default(300000), // 5 minutes
     healthCheckInterval: z.number().default(30000), // 30 seconds
-    defaultRuntime: z.enum(['docker', 'local', 'vercel']).default('local'),
+    defaultRuntime: z.enum(['docker', 'local', 'vercel', 'anthropic']).default('anthropic'),
   }),
 
   // Claude API configuration
-  claude: z
-    .object({
-      apiKey: z.string().optional(),
-      aiGatewayUrl: z.string().optional(),
-      model: z.string().default('claude-sonnet-4-5-20250929'),
-      maxTokens: z.number().default(100000),
-    })
-    .refine(
-      (data) => data.apiKey || data.aiGatewayUrl,
-      'Either apiKey or aiGatewayUrl must be provided'
-    ),
+  claude: z.object({
+    apiKey: z.string().optional(),
+    aiGatewayUrl: z.string().optional(),
+    model: z.string().default('claude-sonnet-4-5-20250929'),
+    maxTokens: z.number().default(100000),
+  }),
 
   // Monitoring configuration
   monitoring: z.object({

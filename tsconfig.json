@@ -12,18 +12,8 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "paths": {
-      "@/core/*": ["./src/core/*"],
-      "@/runtime/*": ["./src/runtime/*"],
-      "@/monitoring/*": ["./src/monitoring/*"],
-      "@/cli/*": ["./src/cli/*"],
-      "@/tui/*": ["./src/tui/*"],
-      "@/types/*": ["./src/types/*"],
-      "@/utils/*": ["./src/utils/*"]
-    }
+    "sourceMap": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+  "exclude": ["node_modules", "dist", "src-legacy"]
 }

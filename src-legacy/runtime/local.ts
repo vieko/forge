@@ -47,17 +47,8 @@ export class LocalProcessAdapter extends BaseRuntimeAdapter {
       CLAUDE_MODEL: config.claudeConfig.model,
     };
 
-    // Build spawn args with role-specific initial prompt
+    // Build spawn args for interactive session
     const args = ['--print', '--output-format=json'];
-
-    // Add initial prompt based on role
-    if (config.role === 'planner') {
-      args.push('You are a planner agent for the Forge orchestrator. Check your task list with TaskList to see if you have any planning tasks assigned. If you have a planning task, read it with TaskGet, follow the instructions to decompose the spec into executable tasks, and submit tasks via JSON messages to stdout.');
-    } else if (config.role === 'worker') {
-      args.push('You are a worker agent for the Forge orchestrator. Check your task list with TaskList to see if you have any tasks assigned. If you have a task, read it with TaskGet and complete the work described.');
-    } else if (config.role === 'reviewer') {
-      args.push('You are a reviewer agent for the Forge orchestrator. Check your task list with TaskList to see if you have any review tasks assigned. If you have a task, read it with TaskGet and review the code as described.');
-    }
 
     // Start Claude Code in isolated workspace
     const childProcess = spawn(claudeCodePath, args, {
@@ -66,49 +57,99 @@ export class LocalProcessAdapter extends BaseRuntimeAdapter {
       cwd: workspace.agentWorkspace,
     });
 
+    // Send initial prompt via stdin based on role
+    let initialPrompt = '';
+    if (config.role === 'planner') {
+      initialPrompt = 'You are a planner agent for the Forge orchestrator. Check your task list with TaskList to see if you have any planning tasks assigned. If you have a planning task, read it with TaskGet, follow the instructions to decompose the spec into executable tasks, and submit tasks via JSON messages to stdout.';
+    } else if (config.role === 'worker') {
+      initialPrompt = 'You are a worker agent for the Forge orchestrator. Check your task list with TaskList to see if you have any tasks assigned. If you have a task, read it with TaskGet and complete the work described.';
+    } else if (config.role === 'reviewer') {
+      initialPrompt = 'You are a reviewer agent for the Forge orchestrator. Check your task list with TaskList to see if you have any review tasks assigned. If you have a task, read it with TaskGet and review the code as described.';
+    }
+
+    // Write initial prompt to stdin if provided
+    if (initialPrompt && childProcess.stdin) {
+      this.logger.debug({ agentId, promptLength: initialPrompt.length }, 'Writing initial prompt to stdin');
+      childProcess.stdin.write(initialPrompt + '\n');
+      // Close stdin to signal EOF so Claude CLI processes the input
+      childProcess.stdin.end();
+      this.logger.debug({ agentId }, 'Initial prompt written and stdin closed');
+    } else {
+      this.logger.warn({ agentId, hasPrompt: !!initialPrompt, hasStdin: !!childProcess.stdin }, 'Skipped initial prompt write');
+    }
+
     const logEmitter = new EventEmitter();
     this.logEmitters.set(agentId, logEmitter);
 
     // Capture stdout - parse messages or treat as logs
     childProcess.stdout?.on('data', (data) => {
       const rawData = data.toString().trim();
+      this.logger.debug({ agentId, stdoutLength: rawData.length, preview: rawData.slice(0, 200) }, 'Agent stdout');
 
-      // Try to parse as JSON message
-      try {
-        const message = JSON.parse(rawData);
+      // Split by newlines to handle multiple JSON messages
+      const lines = rawData.split('\n').filter((line: string) => line.trim());
 
-        // Check if it's a valid message with type field
-        if (message.type && typeof message.type === 'string') {
-          // Set agentId if not present
-          if (!message.agentId) {
-            message.agentId = agentId;
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine) continue;
+
+        // Try to parse as JSON message
+        try {
+          const message = JSON.parse(trimmedLine);
+          this.logger.debug({ agentId, messageType: message.type }, 'Parsed JSON from agent');
+
+          // Check if it's a valid message with type field
+          if (message.type && typeof message.type === 'string') {
+            // Handle request:* and event:* messages
+            if (message.type.startsWith('request:') || message.type.startsWith('event:')) {
+              // Set agentId if not present
+              if (!message.agentId) {
+                message.agentId = agentId;
+              }
+
+              // Route to message handler
+              void this.handleAgentMessage(agentId, message);
+              continue;
+            }
+
+            // Handle result message from --print mode
+            if (message.type === 'result') {
+              this.logger.info({ agentId, success: message.subtype === 'success', turns: message.num_turns }, 'Agent completed');
+              // Log the result text
+              if (message.result) {
+                this.logger.info({ agentId, result: message.result }, 'Agent result');
+              }
+              continue;
+            }
+
+            // Unknown message type
+            this.logger.warn({ agentId, type: message.type }, 'Unknown message type');
           }
+        } catch (err) {
+          // Not JSON or invalid format, treat as log
+          this.logger.debug({ agentId, error: err }, 'Failed to parse line as JSON');
 
-          // Route to message handler
-          void this.handleAgentMessage(agentId, message);
-          return;
+          // Treat as regular log output
+          const log: LogEntry = {
+            timestamp: new Date(),
+            level: 'info',
+            agentId,
+            message: trimmedLine,
+          };
+          logEmitter.emit('log', log);
         }
-      } catch {
-        // Not JSON or invalid format, treat as log
       }
-
-      // Treat as regular log output
-      const log: LogEntry = {
-        timestamp: new Date(),
-        level: 'info',
-        agentId,
-        message: rawData,
-      };
-      logEmitter.emit('log', log);
     });
 
     // Capture stderr
     childProcess.stderr?.on('data', (data) => {
+      const message = data.toString();
+      this.logger.error({ agentId, stderr: message }, 'Agent stderr');
       const log: LogEntry = {
         timestamp: new Date(),
         level: 'error',
         agentId,
-        message: data.toString(),
+        message,
       };
       logEmitter.emit('log', log);
     });
