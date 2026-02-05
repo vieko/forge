@@ -627,7 +627,6 @@ export async function runForge(options: ForgeOptions): Promise<void> {
         console.log('');
       }
 
-      let totalCost = 0;
       let totalDuration = 0;
       const results: { spec: string; status: string; cost?: number; duration: number }[] = [];
 
