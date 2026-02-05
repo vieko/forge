@@ -15,7 +15,7 @@ program
   .option('-s, --spec <path>', 'Path to spec file (.md)')
   .option('-S, --spec-dir <path>', 'Path to specs directory (runs each .md sequentially)')
   .option('-C, --cwd <path>', 'Working directory (target repo)')
-  .option('-m, --model <model>', 'Model to use (opus, sonnet)', 'opus')
+  .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'opus')
   .option('-t, --max-turns <n>', 'Maximum turns per spec (default: 100)', '100')
   .option('--plan-only', 'Only create tasks, do not implement')
   .option('--dry-run', 'Preview tasks and estimate cost without executing')
@@ -40,7 +40,7 @@ program
         specPath: options.spec,
         specDir: options.specDir,
         cwd: options.cwd,
-        model: options.model as 'opus' | 'sonnet',
+        model: options.model,
         maxTurns: options.maxTurns ? parseInt(options.maxTurns, 10) : 100,
         planOnly: options.planOnly,
         dryRun: options.dryRun,

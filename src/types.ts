@@ -10,8 +10,8 @@ export interface ForgeOptions {
   specDir?: string;
   /** Working directory (target repo) */
   cwd?: string;
-  /** Model to use (opus or sonnet) */
-  model?: 'opus' | 'sonnet';
+  /** Model to use (shorthand like 'opus'/'sonnet' or full ID like 'claude-opus-4-6') */
+  model?: string;
   /** Maximum turns per spec (default: 100) */
   maxTurns?: number;
   /** Only create tasks, don't implement */
@@ -48,6 +48,8 @@ export interface ForgeResult {
   model: string;
   /** Working directory */
   cwd: string;
+  /** SDK session ID (for resuming) */
+  sessionId?: string;
   /** Error message (if failed) */
   error?: string;
 }

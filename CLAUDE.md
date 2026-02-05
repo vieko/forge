@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-Forge is a minimal AI task orchestrator built on Anthropic's Agent SDK. It coordinates planner, worker, and reviewer agents to accomplish complex tasks using Claude Code's native task system.
+Forge is a minimal AI task orchestrator built on Anthropic's Agent SDK. It sends outcome-focused prompts to Claude and verifies the results automatically.
 
-**Key Architecture**: Agent SDK handles orchestration; subagents use TaskCreate/TaskUpdate/TaskList natively.
+**Key Architecture**: Single Agent SDK `query()` call with outcome-based prompts. No procedural agent pipeline — the agent decides its own approach. System-level verification catches errors and loops back for fixes.
 
 ## Commands
 
@@ -14,6 +14,12 @@ forge run "implement feature X"
 
 # With spec file
 forge run --spec .bonfire/specs/feature.md "implement this"
+
+# Run all specs in a directory sequentially
+forge run --spec-dir ./specs/ "implement these"
+
+# Configurable max turns (default: 100)
+forge run --max-turns 150 "large task"
 
 # Plan only (no implementation)
 forge run --plan-only "design API for Y"
@@ -27,6 +33,12 @@ forge run -v "debug issue Z"
 # Quiet mode (for CI, minimal output)
 forge run -q "implement feature X"
 
+# Target a different repo
+forge run -C ~/other-repo "task"
+
+# Resume a previous session
+forge run --resume <session-id> "continue"
+
 # Quick alias (no 'run' needed)
 forge "simple task"
 ```
@@ -34,33 +46,32 @@ forge "simple task"
 ## Architecture
 
 ```
-~300 lines total (down from ~4,600)
+~550 lines total
 
 User Prompt
     ↓
+Outcome-focused prompt construction
+    ↓
 Agent SDK query()
     ↓
-┌─────────────────────────────────────┐
-│  Subagents (via Task tool)          │
-│  ┌─────────┐ ┌────────┐ ┌────────┐  │
-│  │ Planner │→│ Worker │→│Reviewer│  │
-│  └─────────┘ └────────┘ └────────┘  │
-│       ↓          ↓          ↓       │
-│  TaskCreate  Edit/Write  TaskCreate │
-│  TaskUpdate  TaskUpdate  (fixes)    │
-└─────────────────────────────────────┘
+Agent works autonomously (Read, Write, Edit, Bash, etc.)
     ↓
-~/.claude/tasks/ (native task system)
+System-level verification
+    ├── Auto-detect project (Node/Cargo/Go)
+    ├── Run: tsc --noEmit, npm run build, npm test
+    ├── Pass → save results
+    └── Fail → feed errors back to agent (up to 3 attempts)
+    ↓
+.forge/results/<timestamp>/
 ```
 
 ## File Structure
 
 ```
 src/
-├── index.ts    # CLI entry (~50 lines)
-├── agents.ts   # Subagent definitions (~95 lines)
-├── query.ts    # SDK wrapper (~140 lines)
-└── types.ts    # TypeScript types (~50 lines)
+├── index.ts    # CLI entry + arg parsing (~70 lines)
+├── query.ts    # SDK wrapper, verification loop, progress (~420 lines)
+└── types.ts    # TypeScript types (~55 lines)
 
 .forge/
 └── results/    # Run results (auto-created, gitignored)
@@ -69,25 +80,13 @@ src/
         └── result.md     # Full result text
 ```
 
-## Agent Roles
+## How It Works
 
-### Planner
-- Reads specs/prompts and decomposes into tasks
-- Uses TaskCreate with clear subjects and descriptions
-- Sets task dependencies via TaskUpdate
-- Tools: Read, Grep, Glob, TaskCreate, TaskUpdate, TaskList
-
-### Worker
-- Implements individual tasks
-- Makes minimal, focused code changes
-- Updates task status on completion
-- Tools: Read, Write, Edit, Bash, Grep, Glob, TaskGet, TaskUpdate, TaskList
-
-### Reviewer
-- Reviews completed work for quality/security
-- Creates fix tasks if issues found (max 3 per review)
-- Approves work via TaskUpdate
-- Tools: Read, Grep, Glob, Bash, TaskCreate, TaskUpdate, TaskList, TaskGet
+1. **Prompt construction** — wraps user prompt in outcome-focused template with acceptance criteria
+2. **Agent execution** — single SDK `query()` call; agent decides its own approach (direct coding, task breakdown, etc.)
+3. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
+4. **Result persistence** — saves structured metadata and full result text to `.forge/results/`
+5. **Retry on transient errors** — auto-retries rate limits and network errors (3 attempts, exponential backoff)
 
 ## Development
 
@@ -114,17 +113,3 @@ The SDK reads settings from:
 - `@anthropic-ai/claude-agent-sdk` - Agent SDK
 - `commander` - CLI framework
 - `zod` - Runtime validation (SDK dependency)
-
-## Migration from v1
-
-The previous implementation (~4,600 lines) used:
-- Custom message protocol
-- File-based task queue
-- Manual subprocess spawning
-- Custom role system
-
-The new implementation uses:
-- Agent SDK's native orchestration
-- SDK subagents for role separation
-- Native task tools (TaskCreate, etc.)
-- ~350 lines total

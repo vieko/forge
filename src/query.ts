@@ -1,4 +1,4 @@
-import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import { query as sdkQuery, type HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import type { ForgeOptions, ForgeResult } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
@@ -32,6 +32,7 @@ async function saveResult(
 **Status**: ${result.status}
 **Cost**: ${result.costUsd !== undefined ? `$${result.costUsd.toFixed(4)}` : 'N/A'}
 **Model**: ${result.model}
+${result.sessionId ? `**Session**: ${result.sessionId}` : ''}
 ${result.specPath ? `**Spec**: ${result.specPath}` : ''}
 
 ## Prompt
@@ -251,6 +252,60 @@ Focus on delivering working code that meets the acceptance criteria.`;
 
   // Track current agent for progress output
   let currentAgent: string | null = null;
+  // Streaming state
+  let currentToolName: string | null = null;
+  let toolInputJson = '';
+  // Session tracking
+  let sessionId: string | undefined;
+
+  // Hook: Bash command guardrails
+  const blockedCommands: Array<{ pattern: RegExp; reason: string }> = [
+    { pattern: /rm\s+-[^\s]*r[^\s]*\s+\/(?:\s|$)/, reason: 'Recursive delete of root' },
+    { pattern: /rm\s+-[^\s]*r[^\s]*\s+~/, reason: 'Recursive delete of home' },
+    { pattern: /git\s+push\s.*--force/, reason: 'Git force push' },
+    { pattern: /git\s+push\s.*\s-f\b/, reason: 'Git force push' },
+    { pattern: /git\s+reset\s+--hard/, reason: 'Git hard reset' },
+    { pattern: /git\s+clean\s.*-[^\s]*f/, reason: 'Git clean with force' },
+    { pattern: /mkfs/, reason: 'Filesystem format' },
+    { pattern: /dd\s+if=\/dev\//, reason: 'Raw device operation' },
+    { pattern: /:\(\)\s*\{/, reason: 'Fork bomb' },
+  ];
+  const bashGuardrail: HookCallback = async (input) => {
+    const command = ((input as Record<string, unknown>).tool_input as Record<string, unknown>)?.command as string || '';
+    for (const { pattern, reason } of blockedCommands) {
+      if (pattern.test(command)) {
+        if (!quiet) console.log(`[forge] Blocked: ${reason}`);
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse' as const,
+            permissionDecision: 'deny' as const,
+            permissionDecisionReason: `[forge] ${reason}`,
+          },
+        };
+      }
+    }
+    return {};
+  };
+
+  // Hook: Tool call audit log
+  const auditPath = path.join(workingDir, '.forge', 'audit.jsonl');
+  const auditLog: HookCallback = async (input, toolUseID) => {
+    try {
+      const inp = input as Record<string, unknown>;
+      const entry = {
+        ts: new Date().toISOString(),
+        sessionId,
+        tool: inp.tool_name,
+        toolUseId: toolUseID,
+        input: inp.tool_input,
+      };
+      await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
+      await fs.appendFile(auditPath, JSON.stringify(entry) + '\n');
+    } catch {
+      // Never crash on audit failures
+    }
+    return {};
+  };
 
   // Retry configuration
   const maxRetries = 3;
@@ -271,66 +326,76 @@ Focus on delivering working code that meets the acceptance criteria.`;
           'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'
         ],
         permissionMode: 'default',
+        includePartialMessages: true,
+        hooks: {
+          PreToolUse: [{ matcher: 'Bash', hooks: [bashGuardrail] }],
+          PostToolUse: [{ hooks: [auditLog] }],
+        },
         maxTurns: dryRun ? 20 : maxTurns,
         maxBudgetUsd: dryRun ? 5.00 : 50.00,
         ...(resume && { resume })
       }
     })) {
-      // Handle different message types
-      if (message.type === 'assistant' && !quiet) {
-        const content = message.message?.content;
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            // Verbose mode: show all text
-            if (verbose && block.type === 'text') {
-              console.log(block.text);
-            }
-            // Normal mode: show tool usage for progress
-            if (!verbose && block.type === 'tool_use') {
-              const toolName = block.name;
-              const input = block.input as Record<string, unknown>;
+      // Capture session ID from init message
+      if (message.type === 'system' && message.subtype === 'init') {
+        sessionId = message.session_id;
+        if (!quiet) console.log(`[forge] Session: ${sessionId}`);
+      }
 
-              // Detect agent spawning
-              if (toolName === 'Task') {
-                const agentType = input.subagent_type as string;
-                const description = input.description as string;
-                if (agentType && agentType !== currentAgent) {
-                  currentAgent = agentType;
-                  const desc = description ? `: ${description}` : '';
-                  console.log(formatProgress(currentAgent, `Starting${desc}`));
-                }
+      // Stream real-time progress via partial messages
+      if (message.type === 'stream_event' && !quiet) {
+        const event = message.event;
+
+        if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+          currentToolName = event.content_block.name;
+          toolInputJson = '';
+        } else if (event.type === 'content_block_delta') {
+          if (event.delta.type === 'text_delta' && verbose) {
+            process.stdout.write(event.delta.text);
+          } else if (event.delta.type === 'input_json_delta') {
+            toolInputJson += event.delta.partial_json;
+          }
+        } else if (event.type === 'content_block_stop' && currentToolName) {
+          try {
+            const input = JSON.parse(toolInputJson || '{}') as Record<string, unknown>;
+
+            // Track agent changes (both modes)
+            if (currentToolName === 'Task') {
+              const agentType = input.subagent_type as string;
+              const description = input.description as string;
+              if (agentType && agentType !== currentAgent) {
+                currentAgent = agentType;
+                const desc = description ? `: ${description}` : '';
+                console.log(formatProgress(currentAgent, `Starting${desc}`));
               }
-              // Show task operations
-              else if (toolName === 'TaskCreate') {
+            }
+            // Normal mode: show tool progress
+            else if (!verbose) {
+              if (currentToolName === 'TaskCreate') {
                 const subject = input.subject as string;
-                if (subject) {
-                  console.log(formatProgress(currentAgent, `Creating task: ${subject}`));
-                }
-              }
-              else if (toolName === 'TaskUpdate') {
+                if (subject) console.log(formatProgress(currentAgent, `Creating task: ${subject}`));
+              } else if (currentToolName === 'TaskUpdate') {
                 const status = input.status as string;
-                if (status === 'completed') {
-                  console.log(formatProgress(currentAgent, 'Task completed'));
-                }
-              }
-              // Show file operations
-              else if (toolName === 'Edit' || toolName === 'Write') {
+                if (status === 'completed') console.log(formatProgress(currentAgent, 'Task completed'));
+              } else if (currentToolName === 'Edit' || currentToolName === 'Write') {
                 const filePath = input.file_path as string;
                 if (filePath) {
                   const fileName = filePath.split('/').pop();
                   console.log(formatProgress(currentAgent, `Editing ${fileName}`));
                 }
-              }
-              else if (toolName === 'Bash') {
+              } else if (currentToolName === 'Bash') {
                 const cmd = input.command as string;
                 if (cmd) {
-                  // Show first part of command
                   const shortCmd = cmd.length > 50 ? cmd.substring(0, 47) + '...' : cmd;
                   console.log(formatProgress(currentAgent, `Running: ${shortCmd}`));
                 }
               }
             }
+          } catch {
+            // JSON parse failed - skip progress for this tool
           }
+          currentToolName = null;
+          toolInputJson = '';
         }
       }
 
@@ -387,7 +452,8 @@ Fix these errors. The code should compile and build successfully.`;
             specPath,
             prompt,
             model: modelName,
-            cwd: workingDir
+            cwd: workingDir,
+            sessionId
           };
 
           const resultsDir = await saveResult(workingDir, forgeResult, resultText);
@@ -407,6 +473,10 @@ Fix these errors. The code should compile and build successfully.`;
               console.log(`Cost: $${message.total_cost_usd.toFixed(4)}`);
             }
             console.log(`Results saved: ${resultsDir}`);
+            if (sessionId) {
+              console.log(`Session: ${sessionId}`);
+              console.log(`Resume: forge run --resume ${sessionId} "continue"`);
+            }
           }
 
           // Dry run: show cost estimates
@@ -448,6 +518,7 @@ Fix these errors. The code should compile and build successfully.`;
             prompt,
             model: modelName,
             cwd: workingDir,
+            sessionId,
             error: errorText
           };
 
@@ -466,6 +537,7 @@ Fix these errors. The code should compile and build successfully.`;
             prompt,
             model: modelName,
             cwd: workingDir,
+            sessionId,
             error: 'Hit maximum turns limit'
           };
 
@@ -484,6 +556,7 @@ Fix these errors. The code should compile and build successfully.`;
             prompt,
             model: modelName,
             cwd: workingDir,
+            sessionId,
             error: 'Exceeded budget limit'
           };
 
