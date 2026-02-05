@@ -27,6 +27,8 @@ export interface ForgeOptions {
   model?: 'opus' | 'sonnet';
   /** Only create tasks, don't implement */
   planOnly?: boolean;
+  /** Preview tasks and estimate cost without executing */
+  dryRun?: boolean;
   /** Show detailed output */
   verbose?: boolean;
   /** Resume a previous session */

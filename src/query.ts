@@ -45,7 +45,7 @@ ${resultText}
 }
 
 export async function runForge(options: ForgeOptions): Promise<void> {
-  const { prompt, specPath, cwd, model = 'opus', planOnly = false, verbose = false, resume } = options;
+  const { prompt, specPath, cwd, model = 'opus', planOnly = false, dryRun = false, verbose = false, resume } = options;
 
   // Resolve working directory
   const workingDir = cwd ? (await fs.realpath(cwd)) : process.cwd();
@@ -80,14 +80,32 @@ export async function runForge(options: ForgeOptions): Promise<void> {
   }
 
   // Configure agent workflow
-  const workflowPrompt = planOnly
-    ? `Use the planner agent to break down this work into tasks. Do NOT implement - planning only.\n\n${fullPrompt}`
-    : `Complete this work using the following workflow:
+  let workflowPrompt: string;
+  if (dryRun) {
+    workflowPrompt = `Use the planner agent to break down this work into tasks. Do NOT implement - this is a dry run for cost estimation.
+
+After planning, output a structured summary in this exact format:
+
+## Tasks
+
+[List each task with number, subject, and brief description]
+
+## Summary
+
+- Total tasks: [count]
+- Dependencies: [describe any task dependencies]
+
+${fullPrompt}`;
+  } else if (planOnly) {
+    workflowPrompt = `Use the planner agent to break down this work into tasks. Do NOT implement - planning only.\n\n${fullPrompt}`;
+  } else {
+    workflowPrompt = `Complete this work using the following workflow:
 1. Use planner agent to decompose into tasks
 2. Use worker agent to implement each task
 3. Use reviewer agent to verify quality
 
 ${fullPrompt}`;
+  }
 
   // SDK accepts shorthand model names
   const modelName = model;
@@ -99,7 +117,11 @@ ${fullPrompt}`;
   if (cwd) {
     console.log(`Working directory: ${workingDir}`);
   }
-  console.log('Starting Forge...\n');
+  if (dryRun) {
+    console.log('Starting Forge (dry run - planning only)...\n');
+  } else {
+    console.log('Starting Forge...\n');
+  }
 
   try {
     for await (const message of sdkQuery({
@@ -115,8 +137,8 @@ ${fullPrompt}`;
         ],
         agents,
         permissionMode: 'default',
-        maxTurns: 50,
-        maxBudgetUsd: 20.00,
+        maxTurns: dryRun ? 20 : 50,
+        maxBudgetUsd: dryRun ? 5.00 : 20.00,
         ...(resume && { resume })
       }
     })) {
@@ -166,6 +188,34 @@ ${fullPrompt}`;
             console.log(`Cost: $${message.total_cost_usd.toFixed(4)}`);
           }
           console.log(`Results saved: ${resultsDir}`);
+
+          // Dry run: show cost estimates
+          if (dryRun) {
+            // Extract task count from result (look for "Total tasks: N" pattern)
+            const taskCountMatch = resultText.match(/Total tasks:\s*(\d+)/i);
+            const taskCount = taskCountMatch ? parseInt(taskCountMatch[1], 10) : 0;
+
+            // Cost estimation based on observed averages:
+            // - Planning: actual cost from this run
+            // - Execution: ~$1.50-2.50 per task (worker + reviewer overhead)
+            const planningCost = message.total_cost_usd || 0;
+            const minExecCost = taskCount * 1.50;
+            const maxExecCost = taskCount * 2.50;
+            const minTotal = planningCost + minExecCost;
+            const maxTotal = planningCost + maxExecCost;
+
+            console.log('\n===== DRY RUN ESTIMATE =====');
+            console.log(`Planning cost: $${planningCost.toFixed(2)}`);
+            if (taskCount > 0) {
+              console.log(`Tasks: ${taskCount}`);
+              console.log(`Estimated execution: $${minExecCost.toFixed(2)} - $${maxExecCost.toFixed(2)}`);
+              console.log(`Estimated total: $${minTotal.toFixed(2)} - $${maxTotal.toFixed(2)}`);
+            } else {
+              console.log('Could not determine task count from output');
+            }
+            console.log('\nRun without --dry-run to execute.');
+            console.log('================================');
+          }
         } else if (message.subtype === 'error_during_execution') {
           const errorText = JSON.stringify(message.errors, null, 2);
 

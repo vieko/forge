@@ -16,6 +16,7 @@ program
   .option('-C, --cwd <path>', 'Working directory (target repo)')
   .option('-m, --model <model>', 'Model to use (opus, sonnet)', 'opus')
   .option('--plan-only', 'Only create tasks, do not implement')
+  .option('--dry-run', 'Preview tasks and estimate cost without executing')
   .option('-v, --verbose', 'Show detailed output')
   .option('-r, --resume <session>', 'Resume a previous session')
   .action(async (prompt: string, options: {
@@ -23,6 +24,7 @@ program
     cwd?: string;
     model?: string;
     planOnly?: boolean;
+    dryRun?: boolean;
     verbose?: boolean;
     resume?: string;
   }) => {
@@ -33,6 +35,7 @@ program
         cwd: options.cwd,
         model: options.model as 'opus' | 'sonnet',
         planOnly: options.planOnly,
+        dryRun: options.dryRun,
         verbose: options.verbose,
         resume: options.resume
       });

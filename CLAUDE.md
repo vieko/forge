@@ -18,6 +18,9 @@ forge run --spec .bonfire/specs/feature.md "implement this"
 # Plan only (no implementation)
 forge run --plan-only "design API for Y"
 
+# Dry run (preview tasks + cost estimate)
+forge run --dry-run "implement feature X"
+
 # Verbose output
 forge run -v "debug issue Z"
 
