@@ -21,10 +21,14 @@ export interface ForgeOptions {
   prompt: string;
   /** Path to a spec file to read */
   specPath?: string;
+  /** Working directory (target repo) */
+  cwd?: string;
   /** Model to use (opus or sonnet) */
   model?: 'opus' | 'sonnet';
   /** Only create tasks, don't implement */
   planOnly?: boolean;
   /** Show detailed output */
   verbose?: boolean;
+  /** Resume a previous session */
+  resume?: string;
 }

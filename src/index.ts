@@ -13,22 +13,28 @@ program
   .description('Run a task with AI agents')
   .argument('<prompt>', 'The task to accomplish')
   .option('-s, --spec <path>', 'Path to spec file (.md)')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
   .option('-m, --model <model>', 'Model to use (opus, sonnet)', 'opus')
   .option('--plan-only', 'Only create tasks, do not implement')
   .option('-v, --verbose', 'Show detailed output')
+  .option('-r, --resume <session>', 'Resume a previous session')
   .action(async (prompt: string, options: {
     spec?: string;
+    cwd?: string;
     model?: string;
     planOnly?: boolean;
     verbose?: boolean;
+    resume?: string;
   }) => {
     try {
       await runForge({
         prompt,
         specPath: options.spec,
+        cwd: options.cwd,
         model: options.model as 'opus' | 'sonnet',
         planOnly: options.planOnly,
-        verbose: options.verbose
+        verbose: options.verbose,
+        resume: options.resume
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);

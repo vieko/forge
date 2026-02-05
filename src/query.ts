@@ -4,12 +4,29 @@ import type { ForgeOptions } from './types.js';
 import { promises as fs } from 'fs';
 
 export async function runForge(options: ForgeOptions): Promise<void> {
-  const { prompt, specPath, model = 'opus', planOnly = false, verbose = false } = options;
+  const { prompt, specPath, cwd, model = 'opus', planOnly = false, verbose = false, resume } = options;
 
-  // Validate spec file exists if provided
+  // Resolve working directory
+  const workingDir = cwd ? (await fs.realpath(cwd)) : process.cwd();
+
+  // Validate working directory exists
+  try {
+    const stat = await fs.stat(workingDir);
+    if (!stat.isDirectory()) {
+      throw new Error(`Not a directory: ${workingDir}`);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Directory not found: ${workingDir}`);
+    }
+    throw err;
+  }
+
+  // Read spec content if provided
+  let specContent: string | undefined;
   if (specPath) {
     try {
-      await fs.access(specPath);
+      specContent = await fs.readFile(specPath, 'utf-8');
     } catch {
       throw new Error(`Spec file not found: ${specPath}`);
     }
@@ -17,8 +34,8 @@ export async function runForge(options: ForgeOptions): Promise<void> {
 
   // Build the prompt
   let fullPrompt = prompt;
-  if (specPath) {
-    fullPrompt = `Read the spec at ${specPath} and implement it.\n\nAdditional context: ${prompt}`;
+  if (specContent) {
+    fullPrompt = `## Specification\n\n${specContent}\n\n## Additional Context\n\n${prompt}`;
   }
 
   // Configure agent workflow
@@ -35,12 +52,16 @@ ${fullPrompt}`;
   const modelName = model;
 
   // Run the query
+  if (cwd) {
+    console.log(`Working directory: ${workingDir}`);
+  }
   console.log('Starting Forge...\n');
 
   try {
     for await (const message of sdkQuery({
       prompt: workflowPrompt,
       options: {
+        cwd: workingDir,
         model: modelName,
         tools: { type: 'preset', preset: 'claude_code' },
         allowedTools: [
@@ -51,7 +72,8 @@ ${fullPrompt}`;
         agents,
         permissionMode: 'default',
         maxTurns: 50,
-        maxBudgetUsd: 20.00
+        maxBudgetUsd: 20.00,
+        ...(resume && { resume })
       }
     })) {
       // Handle different message types
