@@ -24,6 +24,10 @@ export interface ForgeOptions {
   quiet?: boolean;
   /** Resume a previous session */
   resume?: string;
+  /** Run specs in parallel (only with --spec-dir) */
+  parallel?: boolean;
+  /** Max concurrent specs when parallel (default: 3) */
+  concurrency?: number;
 }
 
 /**

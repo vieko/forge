@@ -24,6 +24,8 @@ program
   .option('-v, --verbose', 'Show detailed output')
   .option('-q, --quiet', 'Suppress progress output (for CI)')
   .option('-r, --resume <session>', 'Resume a previous session')
+  .option('-P, --parallel', 'Run specs in parallel (with --spec-dir)')
+  .option('--concurrency <n>', 'Max concurrent specs in parallel mode (default: 3)', '3')
   .action(async (prompt: string, options: {
     spec?: string;
     specDir?: string;
@@ -35,6 +37,8 @@ program
     verbose?: boolean;
     quiet?: boolean;
     resume?: string;
+    parallel?: boolean;
+    concurrency?: string;
   }) => {
     try {
       await runForge({
@@ -48,7 +52,9 @@ program
         dryRun: options.dryRun,
         verbose: options.verbose,
         quiet: options.quiet,
-        resume: options.resume
+        resume: options.resume,
+        parallel: options.parallel,
+        concurrency: options.concurrency ? parseInt(options.concurrency, 10) : 3
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);

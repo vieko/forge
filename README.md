@@ -63,6 +63,12 @@ forge run --spec .bonfire/specs/feature.md "implement this"
 # Run all specs in a directory sequentially
 forge run --spec-dir ./specs/ "implement these"
 
+# Run specs in parallel (default concurrency: 3)
+forge run --spec-dir ./specs/ --parallel "implement these"
+
+# Run specs in parallel with custom concurrency
+forge run --spec-dir ./specs/ -P --concurrency 5 "implement these"
+
 # Target different directory
 forge run -C ~/other-repo "add tests"
 

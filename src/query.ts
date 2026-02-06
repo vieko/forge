@@ -151,8 +151,8 @@ async function runVerification(workingDir: string, quiet: boolean): Promise<{ pa
 }
 
 // Run a single spec
-async function runSingleSpec(options: ForgeOptions & { specContent?: string }): Promise<void> {
-  const { prompt, specPath, specContent, cwd, model = 'opus', maxTurns = 100, planOnly = false, dryRun = false, verbose = false, quiet = false, resume } = options;
+async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void }): Promise<void> {
+  const { prompt, specPath, specContent, cwd, model = 'opus', maxTurns = 100, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, _silent = false, _onActivity } = options;
 
   // Resolve working directory
   const workingDir = cwd ? (await fs.realpath(cwd)) : process.cwd();
@@ -306,6 +306,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
       const inp = input as Record<string, unknown>;
       const entry = {
         ts: new Date().toISOString(),
+        spec: specPath ? path.basename(specPath) : undefined,
         sessionId,
         tool: inp.tool_name,
         toolUseId: toolUseID,
@@ -357,14 +358,14 @@ Focus on delivering working code that meets the acceptance criteria.`;
       }
 
       // Stream real-time progress via partial messages
-      if (message.type === 'stream_event' && !quiet) {
+      if (message.type === 'stream_event' && (!quiet || _onActivity)) {
         const event = message.event;
 
         if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
           currentToolName = event.content_block.name;
           toolInputJson = '';
         } else if (event.type === 'content_block_delta') {
-          if (event.delta.type === 'text_delta' && verbose) {
+          if (event.delta.type === 'text_delta' && verbose && !_silent) {
             process.stdout.write(event.delta.text);
           } else if (event.delta.type === 'input_json_delta') {
             toolInputJson += event.delta.partial_json;
@@ -373,35 +374,64 @@ Focus on delivering working code that meets the acceptance criteria.`;
           try {
             const input = JSON.parse(toolInputJson || '{}') as Record<string, unknown>;
 
-            // Track agent changes (both modes)
-            if (currentToolName === 'Task') {
-              const agentType = input.subagent_type as string;
-              const description = input.description as string;
-              if (agentType && agentType !== currentAgent) {
-                currentAgent = agentType;
-                const desc = description ? `: ${description}` : '';
-                console.log(formatProgress(currentAgent, `Starting${desc}`));
+            // Derive activity description for parallel display
+            let activity: string | undefined;
+            if (currentToolName === 'Edit' || currentToolName === 'Write') {
+              const filePath = input.file_path as string;
+              if (filePath) activity = `Editing ${filePath.split('/').pop()}`;
+            } else if (currentToolName === 'Read') {
+              const filePath = input.file_path as string;
+              if (filePath) activity = `Reading ${filePath.split('/').pop()}`;
+            } else if (currentToolName === 'Bash') {
+              const cmd = input.command as string;
+              if (cmd) {
+                const shortCmd = cmd.length > 40 ? cmd.substring(0, 37) + '...' : cmd;
+                activity = `$ ${shortCmd}`;
               }
+            } else if (currentToolName === 'Grep') {
+              const pattern = input.pattern as string;
+              if (pattern) activity = `Grep: ${pattern.substring(0, 30)}`;
+            } else if (currentToolName === 'Glob') {
+              const pattern = input.pattern as string;
+              if (pattern) activity = `Glob: ${pattern.substring(0, 30)}`;
+            } else if (currentToolName === 'TaskCreate') {
+              const subject = input.subject as string;
+              if (subject) activity = `Task: ${subject.substring(0, 35)}`;
             }
-            // Normal mode: show tool progress
-            else if (!verbose) {
-              if (currentToolName === 'TaskCreate') {
-                const subject = input.subject as string;
-                if (subject) console.log(formatProgress(currentAgent, `Creating task: ${subject}`));
-              } else if (currentToolName === 'TaskUpdate') {
-                const status = input.status as string;
-                if (status === 'completed') console.log(formatProgress(currentAgent, 'Task completed'));
-              } else if (currentToolName === 'Edit' || currentToolName === 'Write') {
-                const filePath = input.file_path as string;
-                if (filePath) {
-                  const fileName = filePath.split('/').pop();
-                  console.log(formatProgress(currentAgent, `Editing ${fileName}`));
+
+            if (_onActivity && activity) {
+              _onActivity(activity);
+            }
+
+            // Console output for non-silent mode
+            if (!_silent) {
+              if (currentToolName === 'Task') {
+                const agentType = input.subagent_type as string;
+                const description = input.description as string;
+                if (agentType && agentType !== currentAgent) {
+                  currentAgent = agentType;
+                  const desc = description ? `: ${description}` : '';
+                  console.log(formatProgress(currentAgent, `Starting${desc}`));
                 }
-              } else if (currentToolName === 'Bash') {
-                const cmd = input.command as string;
-                if (cmd) {
-                  const shortCmd = cmd.length > 50 ? cmd.substring(0, 47) + '...' : cmd;
-                  console.log(formatProgress(currentAgent, `Running: ${shortCmd}`));
+              } else if (!verbose) {
+                if (currentToolName === 'TaskCreate') {
+                  const subject = input.subject as string;
+                  if (subject) console.log(formatProgress(currentAgent, `Creating task: ${subject}`));
+                } else if (currentToolName === 'TaskUpdate') {
+                  const status = input.status as string;
+                  if (status === 'completed') console.log(formatProgress(currentAgent, 'Task completed'));
+                } else if (currentToolName === 'Edit' || currentToolName === 'Write') {
+                  const filePath = input.file_path as string;
+                  if (filePath) {
+                    const fileName = filePath.split('/').pop();
+                    console.log(formatProgress(currentAgent, `Editing ${fileName}`));
+                  }
+                } else if (currentToolName === 'Bash') {
+                  const cmd = input.command as string;
+                  if (cmd) {
+                    const shortCmd = cmd.length > 50 ? cmd.substring(0, 47) + '...' : cmd;
+                    console.log(formatProgress(currentAgent, `Running: ${shortCmd}`));
+                  }
                 }
               }
             }
@@ -472,7 +502,9 @@ Fix these errors. The code should compile and build successfully.`;
 
           const resultsDir = await saveResult(workingDir, forgeResult, resultText);
 
-          if (quiet) {
+          if (_silent) {
+            // Silent: no output at all (parallel mode)
+          } else if (quiet) {
             // Quiet mode: just show results path
             console.log(resultsDir);
           } else {
@@ -596,18 +628,159 @@ Fix these errors. The code should compile and build successfully.`;
       continue;
     }
 
-    // Non-transient error or out of retries
+    // Non-transient error or out of retries — save result before throwing
+    const endTime = new Date();
+    const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
+    const errMsg = error instanceof Error ? error.message : 'Unknown error';
+    const forgeResult: ForgeResult = {
+      startedAt: startTime.toISOString(),
+      completedAt: endTime.toISOString(),
+      durationSeconds,
+      status: 'error_execution',
+      specPath,
+      prompt,
+      model: modelName,
+      cwd: workingDir,
+      sessionId,
+      error: errMsg
+    };
+    await saveResult(workingDir, forgeResult, `Error:\n${errMsg}`).catch(() => {});
     throw error;
   }
   } // end retry loop
   } // end verification loop
 }
 
+// Worker pool: runs tasks with bounded concurrency
+async function workerPool<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+
+  async function runNext(): Promise<void> {
+    while (nextIndex < items.length) {
+      const i = nextIndex++;
+      results[i] = await worker(items[i], i);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => runNext());
+  await Promise.all(workers);
+  return results;
+}
+
+// Format elapsed time as "Xm Ys"
+function formatElapsed(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+// Multi-line spinner display for parallel spec execution
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+type SpecStatus = 'waiting' | 'running' | 'success' | 'failed';
+
+interface SpecState {
+  name: string;
+  status: SpecStatus;
+  startedAt?: number;
+  duration?: number;
+  error?: string;
+  detail?: string;
+}
+
+function createSpecDisplay(specFiles: string[]) {
+  const states: SpecState[] = specFiles.map(name => ({ name, status: 'waiting' }));
+  let frameIndex = 0;
+  let linesDrawn = 0;
+
+  function render() {
+    const cols = process.stdout.columns || 80;
+
+    // Move cursor up to overwrite previous render
+    if (linesDrawn > 0) {
+      process.stdout.write(`\x1B[${linesDrawn}A`);
+    }
+
+    // Fixed prefix: "X name(35) elapsed(10)" = ~49 visible chars
+    const prefixWidth = 49;
+    const detailMax = Math.max(0, cols - prefixWidth - 4); // 4 for "  " + padding
+
+    const lines: string[] = [];
+    for (const s of states) {
+      const padName = s.name.padEnd(35);
+      switch (s.status) {
+        case 'waiting':
+          lines.push(`  ${padName} \x1B[2mwaiting\x1B[0m`);
+          break;
+        case 'running': {
+          const elapsed = formatElapsed(Date.now() - s.startedAt!);
+          const frame = SPINNER_FRAMES[frameIndex % SPINNER_FRAMES.length];
+          const detail = s.detail && detailMax > 5
+            ? `  \x1B[2m${s.detail.substring(0, detailMax)}\x1B[0m`
+            : '';
+          lines.push(`${frame} ${padName} ${elapsed}${detail}`);
+          break;
+        }
+        case 'success':
+          lines.push(`\x1B[32m✓\x1B[0m ${padName} \x1B[32m${formatElapsed(s.duration! * 1000)}\x1B[0m`);
+          break;
+        case 'failed': {
+          const errMax = Math.max(0, cols - prefixWidth - 10); // "failed" + spacing
+          const errDetail = s.error && errMax > 5
+            ? `  \x1B[2m${s.error.substring(0, errMax)}\x1B[0m`
+            : '';
+          lines.push(`\x1B[31m✗\x1B[0m ${padName} \x1B[31mfailed\x1B[0m${errDetail}`);
+          break;
+        }
+      }
+    }
+
+    // Clear each line before writing to avoid artifacts
+    for (const line of lines) {
+      process.stdout.write(`\x1B[2K${line}\n`);
+    }
+    linesDrawn = lines.length;
+    frameIndex++;
+  }
+
+  const interval = setInterval(render, 80);
+
+  return {
+    start(index: number) {
+      states[index].status = 'running';
+      states[index].startedAt = Date.now();
+    },
+    activity(index: number, detail: string) {
+      states[index].detail = detail;
+    },
+    done(index: number, duration: number) {
+      states[index].status = 'success';
+      states[index].duration = duration;
+      states[index].detail = undefined;
+    },
+    fail(index: number, error: string) {
+      states[index].status = 'failed';
+      states[index].error = error;
+      states[index].detail = undefined;
+    },
+    stop() {
+      clearInterval(interval);
+      render(); // Final render
+    },
+  };
+}
+
 // Main entry point - handles single spec or spec directory
 export async function runForge(options: ForgeOptions): Promise<void> {
-  const { specDir, specPath, quiet } = options;
+  const { specDir, specPath, quiet, parallel, concurrency = 3 } = options;
 
-  // If spec directory provided, run each spec sequentially
+  // If spec directory provided, run each spec
   if (specDir) {
     const resolvedDir = path.resolve(specDir);
 
@@ -622,65 +795,110 @@ export async function runForge(options: ForgeOptions): Promise<void> {
       }
 
       if (!quiet) {
-        console.log(`Found ${specFiles.length} specs in ${resolvedDir}:`);
+        const mode = parallel ? `parallel (concurrency: ${concurrency})` : 'sequential';
+        console.log(`Found ${specFiles.length} specs in ${resolvedDir} [${mode}]:`);
         specFiles.forEach((f, i) => console.log(`  ${i + 1}. ${f}`));
         console.log('');
       }
 
-      let totalDuration = 0;
+      const wallClockStart = Date.now();
       const results: { spec: string; status: string; cost?: number; duration: number }[] = [];
 
-      for (let i = 0; i < specFiles.length; i++) {
-        const specFile = specFiles[i];
-        const specFilePath = path.join(resolvedDir, specFile);
+      if (parallel) {
+        // Parallel execution with worker pool + spinner display
+        const display = createSpecDisplay(specFiles);
 
-        if (!quiet) {
-          console.log(`\n${'='.repeat(60)}`);
-          console.log(`Running spec ${i + 1}/${specFiles.length}: ${specFile}`);
-          console.log(`${'='.repeat(60)}\n`);
-        }
+        await workerPool(specFiles, concurrency, async (specFile, i) => {
+          const specFilePath = path.join(resolvedDir, specFile);
+          display.start(i);
 
-        const startTime = Date.now();
-        try {
-          // Read spec content
-          const specContent = await fs.readFile(specFilePath, 'utf-8');
+          const startTime = Date.now();
+          try {
+            const specContent = await fs.readFile(specFilePath, 'utf-8');
 
-          // Run with spec content directly
-          await runSingleSpec({
-            ...options,
-            specPath: specFilePath,
-            specContent,
-            specDir: undefined, // Don't recurse
-          });
+            await runSingleSpec({
+              ...options,
+              specPath: specFilePath,
+              specContent,
+              specDir: undefined,
+              parallel: undefined,
+              quiet: true,
+              _silent: true,
+              _onActivity: (detail) => display.activity(i, detail),
+            });
 
-          const duration = (Date.now() - startTime) / 1000;
-          totalDuration += duration;
-          results.push({ spec: specFile, status: 'success', duration });
-        } catch (err) {
-          const duration = (Date.now() - startTime) / 1000;
-          totalDuration += duration;
-          results.push({
-            spec: specFile,
-            status: `failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
-            duration
-          });
+            const duration = (Date.now() - startTime) / 1000;
+            display.done(i, duration);
+            results.push({ spec: specFile, status: 'success', duration });
+          } catch (err) {
+            const duration = (Date.now() - startTime) / 1000;
+            const errMsg = err instanceof Error ? err.message : 'Unknown error';
+            display.fail(i, errMsg);
+            results.push({
+              spec: specFile,
+              status: `failed: ${errMsg}`,
+              duration
+            });
+          }
+        });
+
+        display.stop();
+      } else {
+        // Sequential execution (existing behavior)
+        for (let i = 0; i < specFiles.length; i++) {
+          const specFile = specFiles[i];
+          const specFilePath = path.join(resolvedDir, specFile);
 
           if (!quiet) {
-            console.error(`\nSpec ${specFile} failed:`, err instanceof Error ? err.message : err);
-            console.log('Continuing with next spec...\n');
+            console.log(`\n${'='.repeat(60)}`);
+            console.log(`Running spec ${i + 1}/${specFiles.length}: ${specFile}`);
+            console.log(`${'='.repeat(60)}\n`);
+          }
+
+          const startTime = Date.now();
+          try {
+            const specContent = await fs.readFile(specFilePath, 'utf-8');
+
+            await runSingleSpec({
+              ...options,
+              specPath: specFilePath,
+              specContent,
+              specDir: undefined,
+            });
+
+            const duration = (Date.now() - startTime) / 1000;
+            results.push({ spec: specFile, status: 'success', duration });
+          } catch (err) {
+            const duration = (Date.now() - startTime) / 1000;
+            results.push({
+              spec: specFile,
+              status: `failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+              duration
+            });
+
+            if (!quiet) {
+              console.error(`\nSpec ${specFile} failed:`, err instanceof Error ? err.message : err);
+              console.log('Continuing with next spec...\n');
+            }
           }
         }
       }
 
+      const wallClockDuration = (Date.now() - wallClockStart) / 1000;
+      const totalSpecDuration = results.reduce((sum, r) => sum + r.duration, 0);
+
       // Summary
-      if (!quiet) {
+      if (!quiet || parallel) {
         console.log(`\n${'='.repeat(60)}`);
         console.log('SPEC DIRECTORY SUMMARY');
         console.log(`${'='.repeat(60)}`);
         results.forEach(r => {
           console.log(`  ${r.spec}: ${r.status} (${r.duration.toFixed(1)}s)`);
         });
-        console.log(`\nTotal duration: ${totalDuration.toFixed(1)}s`);
+        console.log(`\nWall-clock time: ${wallClockDuration.toFixed(1)}s`);
+        if (parallel) {
+          console.log(`Total spec time: ${totalSpecDuration.toFixed(1)}s`);
+        }
         console.log(`Successful: ${results.filter(r => r.status === 'success').length}/${results.length}`);
       }
 
