@@ -100,7 +100,7 @@ process.on('SIGINT', () => {
     const data = JSON.parse(readFileSync(join(process.cwd(), '.forge', 'latest-session.json'), 'utf-8'));
     if (data.sessionId) {
       console.log(`Session: ${data.sessionId}`);
-      console.log(`Resume: forge run --resume ${data.sessionId} "continue"`);
+      console.log(`Resume: \x1b[36mforge run --resume ${data.sessionId} "continue"\x1b[0m`);
     }
   } catch {}
   process.exit(0);

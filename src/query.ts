@@ -22,6 +22,7 @@ const execAsync = promisify(exec);
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
+const CMD = '\x1b[36m'; // cyan — for user-facing commands
 // 256-color grays — visible on both light and dark terminals
 const G = [
   '\x1b[38;5;252m', // lightest
@@ -50,7 +51,27 @@ function showBanner(subtitle?: string): void {
   console.log();
 }
 
+// Rotating verbs for the agent spinner
+const AGENT_VERBS = [
+  'Working',
+  'Thinking',
+  'Forging',
+  'Summoning',
+  'Hammering',
+  'Conjuring',
+  'Shaping',
+  'Tempering',
+  'Invoking',
+  'Smelting',
+  'Channeling',
+  'Annealing',
+  'Transmuting',
+  'Quenching',
+  'Alloying',
+];
+
 // Single-line spinner that overwrites itself in place
+// prefix: fixed left portion (e.g. "[forge]"), frame renders after it
 function createInlineSpinner(prefix: string) {
   let frameIndex = 0;
   let text = '';
@@ -59,7 +80,7 @@ function createInlineSpinner(prefix: string) {
 
   function render() {
     const frame = SPINNER_FRAMES[frameIndex % SPINNER_FRAMES.length];
-    const line = `${frame} ${prefix}${text ? ` ${DIM}${text}${RESET}` : ''}`;
+    const line = `${prefix} ${CMD}${frame}${RESET}${text ? ` ${text}` : ''}`;
     const truncated = line.length > cols() ? line.substring(0, cols() - 1) : line;
     process.stdout.write(`\x1B[2K\r${truncated}`);
     frameIndex++;
@@ -331,6 +352,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
   // Inline spinner for non-verbose single-spec runs
   const useSpinner = !_silent && !verbose && !quiet;
   let agentSpinner: ReturnType<typeof createInlineSpinner> | null = null;
+  let toolCount = 0;
 
   // Hook: Bash command guardrails
   const blockedCommands: Array<{ pattern: RegExp; reason: string }> = [
@@ -430,7 +452,8 @@ Focus on delivering working code that meets the acceptance criteria.`;
         if (!quiet) console.log(`${DIM}[forge]${RESET} Session: ${DIM}${sessionId}${RESET}`);
         persistSession().catch(() => {});
         if (useSpinner && !agentSpinner) {
-          agentSpinner = createInlineSpinner(`${DIM}[forge]${RESET} Working...`);
+          agentSpinner = createInlineSpinner(`${DIM}[forge]${RESET}`);
+          agentSpinner.update(`${CMD}${AGENT_VERBS[0]}...${RESET}`);
           agentSpinner.start();
         }
       }
@@ -484,8 +507,10 @@ Focus on delivering working code that meets the acceptance criteria.`;
             // Console output for non-silent mode
             if (!_silent) {
               if (agentSpinner && activity) {
-                // Spinner mode: update single line
-                agentSpinner.update(activity);
+                // Spinner mode: update single line with rotating verb
+                toolCount++;
+                const verb = AGENT_VERBS[toolCount % AGENT_VERBS.length];
+                agentSpinner.update(`${CMD}${verb}...${RESET}  ${activity}`);
               } else if (currentToolName === 'Task') {
                 const agentType = input.subagent_type as string;
                 const description = input.description as string;
@@ -606,7 +631,7 @@ Fix these errors. The code should compile and build successfully.`;
             console.log(`  Results:  ${DIM}${resultsDir}${RESET}`);
             if (sessionId) {
               console.log(`  Session:  ${DIM}${sessionId}${RESET}`);
-              console.log(`  Resume:   forge run --resume ${sessionId} "continue"`);
+              console.log(`  Resume:   ${CMD}forge run --resume ${sessionId} "continue"${RESET}`);
             }
           }
 
@@ -630,7 +655,7 @@ Fix these errors. The code should compile and build successfully.`;
             } else {
               console.log('Could not determine task count from output');
             }
-            console.log('\nRun without --dry-run to execute.');
+            console.log(`\nRun without ${CMD}--dry-run${RESET} to execute.`);
             console.log('================================');
           }
 
@@ -798,6 +823,8 @@ function createSpecDisplay(specFiles: string[]) {
   const states: SpecState[] = specFiles.map(name => ({ name, status: 'waiting' }));
   let frameIndex = 0;
   let linesDrawn = 0;
+  let verbIndex = 0;
+  let finished = false;
 
   function render() {
     const cols = process.stdout.columns || 80;
@@ -812,19 +839,28 @@ function createSpecDisplay(specFiles: string[]) {
     const detailMax = Math.max(0, cols - prefixWidth - 4); // 4 for "  " + padding
 
     const lines: string[] = [];
+
+    // Header line with rotating verb (only while specs are still running)
+    if (!finished) {
+      const verb = AGENT_VERBS[verbIndex % AGENT_VERBS.length];
+      lines.push(`${DIM}[forge]${RESET} ${CMD}${verb}...${RESET}`);
+    } else {
+      lines.push('');
+    }
+
     for (const s of states) {
       const padName = s.name.padEnd(35);
       switch (s.status) {
         case 'waiting':
-          lines.push(`  ${padName} \x1B[2mwaiting\x1B[0m`);
+          lines.push(`  ${padName} ${DIM}waiting${RESET}`);
           break;
         case 'running': {
           const elapsed = formatElapsed(Date.now() - s.startedAt!);
           const frame = SPINNER_FRAMES[frameIndex % SPINNER_FRAMES.length];
           const detail = s.detail && detailMax > 5
-            ? `  \x1B[2m${s.detail.substring(0, detailMax)}\x1B[0m`
+            ? `  ${DIM}${s.detail.substring(0, detailMax)}${RESET}`
             : '';
-          lines.push(`${frame} ${padName} ${elapsed}${detail}`);
+          lines.push(`${CMD}${frame}${RESET} ${padName} ${elapsed}${detail}`);
           break;
         }
         case 'success':
@@ -833,7 +869,7 @@ function createSpecDisplay(specFiles: string[]) {
         case 'failed': {
           const errMax = Math.max(0, cols - prefixWidth - 10); // "failed" + spacing
           const errDetail = s.error && errMax > 5
-            ? `  \x1B[2m${s.error.substring(0, errMax)}\x1B[0m`
+            ? `  ${DIM}${s.error.substring(0, errMax)}${RESET}`
             : '';
           lines.push(`\x1B[31m✗\x1B[0m ${padName} \x1B[31mfailed\x1B[0m${errDetail}`);
           break;
@@ -858,18 +894,22 @@ function createSpecDisplay(specFiles: string[]) {
     },
     activity(index: number, detail: string) {
       states[index].detail = detail;
+      verbIndex++;
     },
     done(index: number, duration: number) {
       states[index].status = 'success';
       states[index].duration = duration;
       states[index].detail = undefined;
+      verbIndex++;
     },
     fail(index: number, error: string) {
       states[index].status = 'failed';
       states[index].error = error;
       states[index].detail = undefined;
+      verbIndex++;
     },
     stop() {
+      finished = true;
       clearInterval(interval);
       render(); // Final render
     },
@@ -1173,7 +1213,8 @@ export async function runForge(options: ForgeOptions): Promise<void> {
         const mode = parallel
           ? `parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})`
           : 'sequential';
-        console.log(`Found ${BOLD}${specFiles.length}${RESET} specs in ${DIM}${resolvedDir}${RESET} [${mode}]:`);
+        console.log(`Found ${BOLD}${specFiles.length}${RESET} specs in ${DIM}${resolvedDir}${RESET}`);
+        console.log(`${DIM}[${mode}]${RESET}\n`);
         specFiles.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
         if (parallel && sequentialFirst > 0) {
           console.log(`\nSequential-first: ${Math.min(sequentialFirst, specFiles.length)} spec(s) run before parallel phase`);
