@@ -25,21 +25,17 @@ const DIM = '\x1b[2m';
 const CMD = '\x1b[36m'; // cyan — for user-facing commands
 // 256-color grays — visible on both light and dark terminals
 const G = [
-  '\x1b[38;5;252m', // lightest
-  '\x1b[38;5;249m',
-  '\x1b[38;5;245m',
-  '\x1b[38;5;242m',
-  '\x1b[38;5;238m',
-  '\x1b[38;5;235m', // darkest
+  '\x1b[38;5;255m', // lightest
+  '\x1b[38;5;251m',
+  '\x1b[38;5;247m',
+  '\x1b[38;5;243m', // darkest
 ];
 
 const BANNER = [
-  '███████╗ ██████╗ ██████╗  ██████╗ ███████╗',
-  '██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝',
-  '█████╗  ██║   ██║██████╔╝██║  ███╗█████╗  ',
-  '██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝  ',
-  '██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗',
-  '╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝',
+  '▗▄▄▄▖ ▗▄▖ ▗▄▄▖  ▗▄▄▖▗▄▄▄▖',
+  '▐▌   ▐▌ ▐▌▐▌ ▐▌▐▌   ▐▌   ',
+  '▐▛▀▀▘▐▌ ▐▌▐▛▀▚▖▐▌▝▜▌▐▛▀▀▘',
+  '▐▌   ▝▚▄▞▘▐▌ ▐▌▝▚▄▞▘▐▙▄▄▖',
 ];
 
 function showBanner(subtitle?: string): void {
@@ -831,6 +827,7 @@ interface SpecState {
 
 function createSpecDisplay(specFiles: string[]) {
   const states: SpecState[] = specFiles.map(name => ({ name, status: 'waiting' }));
+  const nameWidth = Math.max(35, ...specFiles.map(f => f.length));
   let frameIndex = 0;
   let linesDrawn = 0;
   let verbIndex = 0;
@@ -844,8 +841,7 @@ function createSpecDisplay(specFiles: string[]) {
       process.stdout.write(`\x1B[${linesDrawn}A`);
     }
 
-    // Fixed prefix: "X name(35) elapsed(10)" = ~49 visible chars
-    const prefixWidth = 49;
+    const prefixWidth = nameWidth + 14; // "X " + name + " elapsed(10)"
     const detailMax = Math.max(0, cols - prefixWidth - 4); // 4 for "  " + padding
 
     const lines: string[] = [];
@@ -853,13 +849,13 @@ function createSpecDisplay(specFiles: string[]) {
     // Header line with rotating verb (only while specs are still running)
     if (!finished) {
       const verb = AGENT_VERBS[verbIndex % AGENT_VERBS.length];
-      lines.push(`${DIM}[forge]${RESET} ${CMD}${verb}...${RESET}`);
+      lines.push(`${CMD}${verb}...${RESET}`);
     } else {
       lines.push('');
     }
 
     for (const s of states) {
-      const padName = s.name.padEnd(35);
+      const padName = s.name.padEnd(nameWidth);
       switch (s.status) {
         case 'waiting':
           lines.push(`  ${padName} ${DIM}waiting${RESET}`);
@@ -1168,7 +1164,7 @@ export async function runForge(options: ForgeOptions): Promise<void> {
   const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed } = options;
 
   if (!quiet) {
-    showBanner('Shaped by prompts, Tempered by fire.');
+    showBanner('SHAPED BY PROMPTS, TEMPERED BY FIRE.');
   }
 
   // Resolve concurrency: use provided value or auto-detect
@@ -1189,10 +1185,12 @@ export async function runForge(options: ForgeOptions): Promise<void> {
 
     const failedNames = failedPaths.map(p => path.basename(p));
     if (!quiet) {
-      console.log(`Rerunning ${BOLD}${failedPaths.length}${RESET} failed spec(s) from batch ${DIM}${prevRunId.substring(0, 8)}${RESET}:`);
-      failedNames.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
+      console.log(`Rerunning ${BOLD}${failedPaths.length}${RESET} failed spec(s) from batch ${DIM}${prevRunId.substring(0, 8)}${RESET}`);
+      if (!parallel) {
+        failedNames.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
+      }
       if (parallel) {
-        console.log(`\nMode: parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})`);
+        console.log(`${DIM}[parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})]${RESET}`);
       }
       console.log('');
     }
@@ -1225,11 +1223,13 @@ export async function runForge(options: ForgeOptions): Promise<void> {
           : 'sequential';
         console.log(`Found ${BOLD}${specFiles.length}${RESET} specs in ${DIM}${resolvedDir}${RESET}`);
         console.log(`${DIM}[${mode}]${RESET}\n`);
-        specFiles.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
-        if (parallel && sequentialFirst > 0) {
-          console.log(`\nSequential-first: ${Math.min(sequentialFirst, specFiles.length)} spec(s) run before parallel phase`);
+        if (!parallel) {
+          specFiles.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
+          console.log('');
         }
-        console.log('');
+        if (parallel && sequentialFirst > 0) {
+          console.log(`Sequential-first: ${Math.min(sequentialFirst, specFiles.length)} spec(s) run before parallel phase\n`);
+        }
       }
 
       const specFilePaths = specFiles.map(f => path.join(resolvedDir, f));

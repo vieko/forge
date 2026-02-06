@@ -51,6 +51,9 @@ forge run -C ~/other-repo "task"
 # Resume a previous session
 forge run --resume <session-id> "continue"
 
+# Fork from a previous session (new session, same history)
+forge run --fork <session-id> "try different approach"
+
 # Quick alias (no 'run' needed)
 forge "simple task"
 
