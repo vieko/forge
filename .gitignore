@@ -38,5 +38,5 @@ coverage/
 # Bonfire session context (local only)
 .bonfire/
 
-# Forge results (local only)
-.forge/
+# Crucible results (local only)
+.crucible/

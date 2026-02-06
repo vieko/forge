@@ -1,17 +1,17 @@
 import { query as sdkQuery, type HookCallback } from '@anthropic-ai/claude-agent-sdk';
-import type { ForgeOptions, ForgeResult } from './types.js';
+import type { CrucibleOptions, CrucibleResult } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import os from 'os';
 
-// Custom error that carries the ForgeResult for cost tracking on failure
-export class ForgeError extends Error {
-  result?: ForgeResult;
-  constructor(message: string, result?: ForgeResult) {
+// Custom error that carries the CrucibleResult for cost tracking on failure
+export class CrucibleError extends Error {
+  result?: CrucibleResult;
+  constructor(message: string, result?: CrucibleResult) {
     super(message);
-    this.name = 'ForgeError';
+    this.name = 'CrucibleError';
     this.result = result;
   }
 }
@@ -32,10 +32,10 @@ const G = [
 ];
 
 const BANNER = [
-  '▗▄▄▄▖ ▗▄▖ ▗▄▄▖  ▗▄▄▖▗▄▄▄▖',
-  '▐▌   ▐▌ ▐▌▐▌ ▐▌▐▌   ▐▌   ',
-  '▐▛▀▀▘▐▌ ▐▌▐▛▀▚▖▐▌▝▜▌▐▛▀▀▘',
-  '▐▌   ▝▚▄▞▘▐▌ ▐▌▝▚▄▞▘▐▙▄▄▖',
+  ' ▗▄▄▖▗▄▄▖ ▐▌ ▐▌ ▗▄▄▖ ▐▌  ▗▄▄▖ ▐▌   ▗▄▄▄▖',
+  '▐▌   ▐▌ ▐▌▐▌ ▐▌▐▌    ▐▌  ▐▌ ▐▌▐▌   ▐▌   ',
+  '▐▌   ▐▛▀▚▖▐▌ ▐▌▐▌    ▐▌  ▐▛▀▚▖▐▌   ▐▛▀▀▘',
+  '▝▚▄▘ ▐▌ ▐▌▝▚▄▞▘▝▚▄▘  ▐▌  ▐▙▄▞▘▐▙▄▄▖▐▙▄▄▖',
 ];
 
 function showBanner(subtitle?: string): void {
@@ -67,7 +67,7 @@ const AGENT_VERBS = [
 ];
 
 // Single-line spinner that overwrites itself in place
-// prefix: fixed left portion (e.g. "[forge]"), frame renders after it
+// prefix: fixed left portion (e.g. "[crucible]"), frame renders after it
 function createInlineSpinner(prefix: string) {
   let frameIndex = 0;
   let text = '';
@@ -95,12 +95,12 @@ function createInlineSpinner(prefix: string) {
 
 async function saveResult(
   workingDir: string,
-  result: ForgeResult,
+  result: CrucibleResult,
   resultText: string
 ): Promise<string> {
   // Create timestamp-based directory name (filesystem safe)
   const timestamp = result.startedAt.replace(/[:.]/g, '-');
-  const resultsDir = path.join(workingDir, '.forge', 'results', timestamp);
+  const resultsDir = path.join(workingDir, '.crucible', 'results', timestamp);
 
   await fs.mkdir(resultsDir, { recursive: true });
 
@@ -110,7 +110,7 @@ async function saveResult(
 
   // Save full result text (no truncation)
   const resultPath = path.join(resultsDir, 'result.md');
-  const resultContent = `# Forge Result
+  const resultContent = `# Crucible Result
 
 **Started**: ${result.startedAt}
 **Completed**: ${result.completedAt}
@@ -241,7 +241,7 @@ async function runVerification(workingDir: string, quiet: boolean): Promise<{ pa
 }
 
 // Run a single spec
-async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string }): Promise<ForgeResult> {
+async function runSingleSpec(options: CrucibleOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string }): Promise<CrucibleResult> {
   const { prompt, specPath, specContent, cwd, model = 'opus', maxTurns = 100, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, fork, _silent = false, _onActivity, _runId } = options;
   const effectiveResume = fork || resume;
   const isFork = !!fork;
@@ -368,12 +368,12 @@ Focus on delivering working code that meets the acceptance criteria.`;
     const command = ((input as Record<string, unknown>).tool_input as Record<string, unknown>)?.command as string || '';
     for (const { pattern, reason } of blockedCommands) {
       if (pattern.test(command)) {
-        if (!quiet) console.log(`${DIM}[forge]${RESET} Blocked: ${reason}`);
+        if (!quiet) console.log(`${DIM}[crucible]${RESET} Blocked: ${reason}`);
         return {
           hookSpecificOutput: {
             hookEventName: 'PreToolUse' as const,
             permissionDecision: 'deny' as const,
-            permissionDecisionReason: `[forge] ${reason}`,
+            permissionDecisionReason: `[crucible] ${reason}`,
           },
         };
       }
@@ -382,10 +382,10 @@ Focus on delivering working code that meets the acceptance criteria.`;
   };
 
   // Hook: Stop handler - persist session state for resume on interrupt
-  const latestSessionPath = path.join(workingDir, '.forge', 'latest-session.json');
+  const latestSessionPath = path.join(workingDir, '.crucible', 'latest-session.json');
   const persistSession = async () => {
     const state = { sessionId, startedAt: startTime.toISOString(), prompt, model: modelName, cwd: workingDir, ...(isFork && { forkedFrom: fork }) };
-    await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(workingDir, '.crucible'), { recursive: true });
     await fs.writeFile(latestSessionPath, JSON.stringify(state, null, 2));
   };
   const stopHandler: HookCallback = async () => {
@@ -394,7 +394,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
   };
 
   // Hook: Tool call audit log
-  const auditPath = path.join(workingDir, '.forge', 'audit.jsonl');
+  const auditPath = path.join(workingDir, '.crucible', 'audit.jsonl');
   const auditLog: HookCallback = async (input, toolUseID) => {
     try {
       const inp = input as Record<string, unknown>;
@@ -406,7 +406,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
         toolUseId: toolUseID,
         input: inp.tool_input,
       };
-      await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
+      await fs.mkdir(path.join(workingDir, '.crucible'), { recursive: true });
       await fs.appendFile(auditPath, JSON.stringify(entry) + '\n');
     } catch {
       // Never crash on audit failures
@@ -448,11 +448,11 @@ Focus on delivering working code that meets the acceptance criteria.`;
       // Capture session ID from init message
       if (message.type === 'system' && message.subtype === 'init') {
         sessionId = message.session_id;
-        if (!quiet) console.log(`${DIM}[forge]${RESET} Session: ${DIM}${sessionId}${RESET}`);
-        if (!quiet && isFork) console.log(`${DIM}[forge]${RESET} Forked from: ${DIM}${fork}${RESET}`);
+        if (!quiet) console.log(`${DIM}[crucible]${RESET} Session: ${DIM}${sessionId}${RESET}`);
+        if (!quiet && isFork) console.log(`${DIM}[crucible]${RESET} Forked from: ${DIM}${fork}${RESET}`);
         persistSession().catch(() => {});
         if (useSpinner && !agentSpinner) {
-          agentSpinner = createInlineSpinner(`${DIM}[forge]${RESET}`);
+          agentSpinner = createInlineSpinner(`${DIM}[crucible]${RESET}`);
           agentSpinner.update(`${CMD}${AGENT_VERBS[0]}...${RESET}`);
           agentSpinner.start();
         }
@@ -561,15 +561,15 @@ Focus on delivering working code that meets the acceptance criteria.`;
 
           // Run verification (unless dry-run or plan-only)
           if (!dryRun && !planOnly) {
-            if (!quiet) console.log(`${DIM}[forge]${RESET} Running verification...`);
+            if (!quiet) console.log(`${DIM}[crucible]${RESET} Running verification...`);
             const verification = await runVerification(workingDir, quiet);
 
             if (!verification.passed) {
               verifyAttempt++;
               if (verifyAttempt < maxVerifyAttempts) {
                 if (!quiet) {
-                  console.log(`\n${DIM}[forge]${RESET} \x1b[33mVerification failed\x1b[0m (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
-                  console.log(`${DIM}[forge]${RESET} Sending errors back to agent for fixes...\n`);
+                  console.log(`\n${DIM}[crucible]${RESET} \x1b[33mVerification failed\x1b[0m (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
+                  console.log(`${DIM}[crucible]${RESET} Sending errors back to agent for fixes...\n`);
                 }
                 // Update prompt with errors for next iteration
                 currentPrompt = `## Previous Work
@@ -586,17 +586,17 @@ Fix these errors. The code should compile and build successfully.`;
                 break; // Break out of message loop to start new query
               } else {
                 if (!quiet) {
-                  console.log(`\n${DIM}[forge]${RESET} \x1b[31mVerification failed after ${maxVerifyAttempts} attempts\x1b[0m`);
-                  console.log(`${DIM}[forge]${RESET} Errors:\n` + verification.errors);
+                  console.log(`\n${DIM}[crucible]${RESET} \x1b[31mVerification failed after ${maxVerifyAttempts} attempts\x1b[0m`);
+                  console.log(`${DIM}[crucible]${RESET} Errors:\n` + verification.errors);
                 }
               }
             } else {
-              if (!quiet) console.log(`${DIM}[forge]${RESET} \x1b[32mVerification passed!\x1b[0m\n`);
+              if (!quiet) console.log(`${DIM}[crucible]${RESET} \x1b[32mVerification passed!\x1b[0m\n`);
             }
           }
 
-          // Save result to .forge/results/
-          const forgeResult: ForgeResult = {
+          // Save result to .crucible/results/
+          const crucibleResult: CrucibleResult = {
             startedAt: startTime.toISOString(),
             completedAt: endTime.toISOString(),
             durationSeconds,
@@ -611,7 +611,7 @@ Fix these errors. The code should compile and build successfully.`;
             runId: _runId
           };
 
-          const resultsDir = await saveResult(workingDir, forgeResult, resultText);
+          const resultsDir = await saveResult(workingDir, crucibleResult, resultText);
 
           if (_silent) {
             // Silent: no output at all (parallel mode)
@@ -632,8 +632,8 @@ Fix these errors. The code should compile and build successfully.`;
             console.log(`  Results:  ${DIM}${resultsDir}${RESET}`);
             if (sessionId) {
               console.log(`  Session:  ${DIM}${sessionId}${RESET}`);
-              console.log(`  Resume:   ${CMD}forge run --resume ${sessionId} "continue"${RESET}`);
-              console.log(`  Fork:     ${CMD}forge run --fork ${sessionId} "try different approach"${RESET}`);
+              console.log(`  Resume:   ${CMD}crucible run --resume ${sessionId} "continue"${RESET}`);
+              console.log(`  Fork:     ${CMD}crucible run --fork ${sessionId} "try different approach"${RESET}`);
             }
           }
 
@@ -662,11 +662,11 @@ Fix these errors. The code should compile and build successfully.`;
           }
 
           // If we got here without breaking, we're done
-          return forgeResult;
+          return crucibleResult;
         } else if (message.subtype === 'error_during_execution') {
           const errorText = JSON.stringify(message.errors, null, 2);
 
-          const forgeResult: ForgeResult = {
+          const crucibleResult: CrucibleResult = {
             startedAt: startTime.toISOString(),
             completedAt: endTime.toISOString(),
             durationSeconds,
@@ -682,11 +682,11 @@ Fix these errors. The code should compile and build successfully.`;
             runId: _runId
           };
 
-          await saveResult(workingDir, forgeResult, `Error:\n${errorText}`);
+          await saveResult(workingDir, crucibleResult, `Error:\n${errorText}`);
 
-          throw new ForgeError(`Execution failed: ${errorText}`, forgeResult);
+          throw new CrucibleError(`Execution failed: ${errorText}`, crucibleResult);
         } else if (message.subtype === 'error_max_turns') {
-          const forgeResult: ForgeResult = {
+          const crucibleResult: CrucibleResult = {
             startedAt: startTime.toISOString(),
             completedAt: endTime.toISOString(),
             durationSeconds,
@@ -702,11 +702,11 @@ Fix these errors. The code should compile and build successfully.`;
             runId: _runId
           };
 
-          await saveResult(workingDir, forgeResult, 'Error: Hit maximum turns limit');
+          await saveResult(workingDir, crucibleResult, 'Error: Hit maximum turns limit');
 
-          throw new ForgeError('Hit maximum turns limit', forgeResult);
+          throw new CrucibleError('Hit maximum turns limit', crucibleResult);
         } else if (message.subtype === 'error_max_budget_usd') {
-          const forgeResult: ForgeResult = {
+          const crucibleResult: CrucibleResult = {
             startedAt: startTime.toISOString(),
             completedAt: endTime.toISOString(),
             durationSeconds,
@@ -722,9 +722,9 @@ Fix these errors. The code should compile and build successfully.`;
             runId: _runId
           };
 
-          await saveResult(workingDir, forgeResult, 'Error: Exceeded budget limit');
+          await saveResult(workingDir, crucibleResult, 'Error: Exceeded budget limit');
 
-          throw new ForgeError('Exceeded budget limit', forgeResult);
+          throw new CrucibleError('Exceeded budget limit', crucibleResult);
         }
       }
     }
@@ -742,22 +742,22 @@ Fix these errors. The code should compile and build successfully.`;
     if (isTransientError(error) && attempt < maxRetries) {
       const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
       if (!quiet) {
-        console.log(`\n${DIM}[forge]${RESET} \x1b[33mTransient error:\x1b[0m ${error instanceof Error ? error.message : 'Unknown error'}`);
-        console.log(`${DIM}[forge]${RESET} Retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+        console.log(`\n${DIM}[crucible]${RESET} \x1b[33mTransient error:\x1b[0m ${error instanceof Error ? error.message : 'Unknown error'}`);
+        console.log(`${DIM}[crucible]${RESET} Retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
       }
       await sleep(delayMs);
       continue;
     }
 
     // Non-transient error or out of retries — save result before throwing
-    // If it's already a ForgeError (from the result handlers above), just re-throw
-    if (error instanceof ForgeError) {
+    // If it's already a CrucibleError (from the result handlers above), just re-throw
+    if (error instanceof CrucibleError) {
       throw error;
     }
     const endTime = new Date();
     const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
     const errMsg = error instanceof Error ? error.message : 'Unknown error';
-    const forgeResult: ForgeResult = {
+    const crucibleResult: CrucibleResult = {
       startedAt: startTime.toISOString(),
       completedAt: endTime.toISOString(),
       durationSeconds,
@@ -771,15 +771,15 @@ Fix these errors. The code should compile and build successfully.`;
       error: errMsg,
       runId: _runId
     };
-    await saveResult(workingDir, forgeResult, `Error:\n${errMsg}`).catch(() => {});
-    throw new ForgeError(errMsg, forgeResult);
+    await saveResult(workingDir, crucibleResult, `Error:\n${errMsg}`).catch(() => {});
+    throw new CrucibleError(errMsg, crucibleResult);
   }
   } // end retry loop
   } // end verification loop
 
   // All verification attempts exhausted — should not normally reach here
   // (the success path returns, error paths throw)
-  throw new ForgeError('Verification failed after all attempts');
+  throw new CrucibleError('Verification failed after all attempts');
 }
 
 // Worker pool: runs tasks with bounded concurrency
@@ -932,7 +932,7 @@ function autoDetectConcurrency(): number {
 async function runSpecBatch(
   specFilePaths: string[],
   specFileNames: string[],
-  options: ForgeOptions,
+  options: CrucibleOptions,
   concurrency: number,
   runId: string,
 ): Promise<{ spec: string; status: string; cost?: number; duration: number }[]> {
@@ -973,7 +973,7 @@ async function runSpecBatch(
       results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration });
     } catch (err) {
       const duration = (Date.now() - startTime) / 1000;
-      const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
+      const cost = err instanceof CrucibleError ? err.result?.costUsd : undefined;
       results.push({
         spec: specFile,
         status: `failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
@@ -1017,7 +1017,7 @@ async function runSpecBatch(
         results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration });
       } catch (err) {
         const duration = (Date.now() - startTime) / 1000;
-        const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
+        const cost = err instanceof CrucibleError ? err.result?.costUsd : undefined;
         const errMsg = err instanceof Error ? err.message : 'Unknown error';
         display.fail(i, errMsg);
         results.push({
@@ -1035,22 +1035,22 @@ async function runSpecBatch(
   return results;
 }
 
-// Find failed specs from latest batch in .forge/results/
+// Find failed specs from latest batch in .crucible/results/
 async function findFailedSpecs(workingDir: string): Promise<{ runId: string; specPaths: string[] }> {
-  const resultsBase = path.join(workingDir, '.forge', 'results');
+  const resultsBase = path.join(workingDir, '.crucible', 'results');
 
   let dirs: string[];
   try {
     dirs = (await fs.readdir(resultsBase)).sort().reverse(); // newest first
   } catch {
-    throw new Error('No results found in .forge/results/');
+    throw new Error('No results found in .crucible/results/');
   }
 
   // Find the latest runId by scanning summaries
   let latestRunId: string | undefined;
   for (const dir of dirs) {
     try {
-      const summary: ForgeResult = JSON.parse(
+      const summary: CrucibleResult = JSON.parse(
         await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
       );
       if (summary.runId) {
@@ -1068,7 +1068,7 @@ async function findFailedSpecs(workingDir: string): Promise<{ runId: string; spe
   const failedPaths: string[] = [];
   for (const dir of dirs) {
     try {
-      const summary: ForgeResult = JSON.parse(
+      const summary: CrucibleResult = JSON.parse(
         await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
       );
       if (summary.runId === latestRunId && summary.status !== 'success' && summary.specPath) {
@@ -1084,7 +1084,7 @@ async function findFailedSpecs(workingDir: string): Promise<{ runId: string; spe
 export async function showStatus(options: { cwd?: string; all?: boolean; last?: number }): Promise<void> {
   showBanner();
   const workingDir = options.cwd ? path.resolve(options.cwd) : process.cwd();
-  const resultsBase = path.join(workingDir, '.forge', 'results');
+  const resultsBase = path.join(workingDir, '.crucible', 'results');
 
   let dirs: string[];
   try {
@@ -1095,10 +1095,10 @@ export async function showStatus(options: { cwd?: string; all?: boolean; last?: 
   }
 
   // Load all summaries
-  const summaries: ForgeResult[] = [];
+  const summaries: CrucibleResult[] = [];
   for (const dir of dirs) {
     try {
-      const summary: ForgeResult = JSON.parse(
+      const summary: CrucibleResult = JSON.parse(
         await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
       );
       summaries.push(summary);
@@ -1111,7 +1111,7 @@ export async function showStatus(options: { cwd?: string; all?: boolean; last?: 
   }
 
   // Group by runId (ungrouped specs get their own entry)
-  const groups = new Map<string, ForgeResult[]>();
+  const groups = new Map<string, CrucibleResult[]>();
   for (const s of summaries) {
     const key = s.runId || s.startedAt; // Use startedAt as unique key for non-batch runs
     const arr = groups.get(key) || [];
@@ -1158,7 +1158,7 @@ export async function showStatus(options: { cwd?: string; all?: boolean; last?: 
 }
 
 // Main entry point - handles single spec or spec directory
-export async function runForge(options: ForgeOptions): Promise<void> {
+export async function runCrucible(options: CrucibleOptions): Promise<void> {
   const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed } = options;
 
   if (!quiet) {

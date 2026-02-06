@@ -1,11 +1,11 @@
 {
-  "name": "@vieko/forge",
-  "version": "2.3.0",
+  "name": "crucible",
+  "version": "2.5.0",
   "description": "Outcome-driven development with agents",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "forge": "./dist/index.js"
+    "crucible": "./dist/index.js"
   },
   "scripts": {
     "dev": "bun run src/index.ts",
