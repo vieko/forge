@@ -7,7 +7,7 @@ import { runForge, showStatus } from './query.js';
 
 program
   .name('forge')
-  .description('AI task orchestrator built on Anthropic Agent SDK')
+  .description('Outcome-driven development with agents')
   .version('2.4.0');
 
 program

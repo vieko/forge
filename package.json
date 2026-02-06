@@ -1,7 +1,7 @@
 {
   "name": "@vieko/forge",
   "version": "2.3.0",
-  "description": "AI task orchestrator built on Anthropic Agent SDK",
+  "description": "Outcome-driven development with agents",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
@@ -17,8 +17,8 @@
   "keywords": [
     "claude",
     "agent-sdk",
-    "orchestrator",
-    "multi-agent",
+    "outcome-driven",
+    "code-generation",
     "ai"
   ],
   "author": "vieko",

@@ -1,6 +1,6 @@
 # Forge
 
-Minimal AI task orchestrator built on Anthropic's Agent SDK.
+Outcome-driven development with agents. Shaped by prompts, Tempered by fire.
 
 ## The Problem
 
@@ -8,7 +8,7 @@ Complex features require multiple steps: reading code, planning tasks, implement
 
 ## The Solution
 
-Forge sends outcome-focused prompts to Claude and verifies the results automatically. Give it a task, get back working code.
+Define the outcome. The agent builds and verifies. Forge wraps Claude in an outcome-focused prompt, runs it, checks the output, and loops back until it passes.
 
 ```
 ~1050 lines total

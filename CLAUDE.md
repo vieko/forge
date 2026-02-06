@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Forge is a minimal AI task orchestrator built on Anthropic's Agent SDK. It sends outcome-focused prompts to Claude and verifies the results automatically.
+Forge is an outcome-driven development tool built on Anthropic's Agent SDK. Define the outcome, the agent builds and verifies.
 
 **Key Architecture**: Single Agent SDK `query()` call with outcome-based prompts. No procedural agent pipeline — the agent decides its own approach. System-level verification catches errors and loops back for fixes.
 
