@@ -1158,7 +1158,7 @@ export async function runForge(options: ForgeOptions): Promise<void> {
   const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed } = options;
 
   if (!quiet) {
-    showBanner('AI task orchestrator');
+    showBanner('Shaped by prompts, Tempered by fire.');
   }
 
   // Resolve concurrency: use provided value or auto-detect
