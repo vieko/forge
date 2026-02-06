@@ -830,13 +830,12 @@ function createSpecDisplay(specFiles: string[]) {
   const nameWidth = Math.max(35, ...specFiles.map(f => f.length));
   let frameIndex = 0;
   let linesDrawn = 0;
-  let verbIndex = 0;
   let finished = false;
 
   function render() {
     const cols = process.stdout.columns || 80;
 
-    // Move cursor up to overwrite previous render
+    // Move cursor up to overwrite previous render (cursor is ON last line, not below it)
     if (linesDrawn > 0) {
       process.stdout.write(`\x1B[${linesDrawn}A`);
     }
@@ -846,9 +845,9 @@ function createSpecDisplay(specFiles: string[]) {
 
     const lines: string[] = [];
 
-    // Header line with rotating verb (only while specs are still running)
+    // Header line with rotating verb (every ~12 frames ≈ 1s)
     if (!finished) {
-      const verb = AGENT_VERBS[verbIndex % AGENT_VERBS.length];
+      const verb = AGENT_VERBS[Math.floor(frameIndex / 12) % AGENT_VERBS.length];
       lines.push(`${CMD}${verb}...${RESET}`);
     } else {
       lines.push('');
@@ -883,11 +882,12 @@ function createSpecDisplay(specFiles: string[]) {
       }
     }
 
-    // Clear each line before writing to avoid artifacts
-    for (const line of lines) {
-      process.stdout.write(`\x1B[2K${line}\n`);
+    // Clear and write each line; no trailing \n on last line to prevent scroll
+    for (let i = 0; i < lines.length; i++) {
+      const eol = i < lines.length - 1 ? '\n' : '';
+      process.stdout.write(`\x1B[2K${lines[i]}${eol}`);
     }
-    linesDrawn = lines.length;
+    linesDrawn = lines.length - 1; // cursor is ON last line, move up N-1 to reach first
     frameIndex++;
   }
 
@@ -900,24 +900,22 @@ function createSpecDisplay(specFiles: string[]) {
     },
     activity(index: number, detail: string) {
       states[index].detail = detail;
-      verbIndex++;
     },
     done(index: number, duration: number) {
       states[index].status = 'success';
       states[index].duration = duration;
       states[index].detail = undefined;
-      verbIndex++;
     },
     fail(index: number, error: string) {
       states[index].status = 'failed';
       states[index].error = error;
       states[index].detail = undefined;
-      verbIndex++;
     },
     stop() {
       finished = true;
       clearInterval(interval);
       render(); // Final render
+      process.stdout.write('\n'); // Move below display for subsequent output
     },
   };
 }
@@ -1164,7 +1162,7 @@ export async function runForge(options: ForgeOptions): Promise<void> {
   const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed } = options;
 
   if (!quiet) {
-    showBanner('SHAPED BY PROMPTS, TEMPERED BY FIRE.');
+    showBanner('SHAPED BY PROMPTS ▲ TEMPERED BY FIRE.');
   }
 
   // Resolve concurrency: use provided value or auto-detect
