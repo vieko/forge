@@ -24,6 +24,7 @@ program
   .option('-v, --verbose', 'Show detailed output')
   .option('-q, --quiet', 'Suppress progress output (for CI)')
   .option('-r, --resume <session>', 'Resume a previous session')
+  .option('-f, --fork <session>', 'Fork from a previous session')
   .option('-P, --parallel', 'Run specs in parallel (with --spec-dir)')
   .option('--concurrency <n>', 'Max concurrent specs in parallel mode (default: auto)')
   .option('--sequential-first <n>', 'Run first N specs sequentially before parallelizing')
@@ -39,11 +40,16 @@ program
     verbose?: boolean;
     quiet?: boolean;
     resume?: string;
+    fork?: string;
     parallel?: boolean;
     concurrency?: string;
     sequentialFirst?: string;
     rerunFailed?: boolean;
   }) => {
+    if (options.resume && options.fork) {
+      console.error('Error: --resume and --fork are mutually exclusive. Use one or the other.');
+      process.exit(1);
+    }
     try {
       await runForge({
         prompt,
@@ -57,6 +63,7 @@ program
         verbose: options.verbose,
         quiet: options.quiet,
         resume: options.resume,
+        fork: options.fork,
         parallel: options.parallel,
         concurrency: options.concurrency ? parseInt(options.concurrency, 10) : undefined,
         sequentialFirst: options.sequentialFirst ? parseInt(options.sequentialFirst, 10) : undefined,
@@ -101,6 +108,7 @@ process.on('SIGINT', () => {
     if (data.sessionId) {
       console.log(`Session: ${data.sessionId}`);
       console.log(`Resume: \x1b[36mforge run --resume ${data.sessionId} "continue"\x1b[0m`);
+      console.log(`Fork:   \x1b[36mforge run --fork ${data.sessionId} "try different approach"\x1b[0m`);
     }
   } catch {}
   process.exit(0);

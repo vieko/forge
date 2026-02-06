@@ -24,6 +24,8 @@ export interface ForgeOptions {
   quiet?: boolean;
   /** Resume a previous session */
   resume?: string;
+  /** Fork from a previous session (new session, same history) */
+  fork?: string;
   /** Run specs in parallel (only with --spec-dir) */
   parallel?: boolean;
   /** Max concurrent specs when parallel (default: auto) */
@@ -58,6 +60,8 @@ export interface ForgeResult {
   cwd: string;
   /** SDK session ID (for resuming) */
   sessionId?: string;
+  /** Session ID this was forked from */
+  forkedFrom?: string;
   /** Error message (if failed) */
   error?: string;
   /** Batch run ID for grouping specs in the same run */

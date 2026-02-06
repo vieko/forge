@@ -246,7 +246,9 @@ async function runVerification(workingDir: string, quiet: boolean): Promise<{ pa
 
 // Run a single spec
 async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string }): Promise<ForgeResult> {
-  const { prompt, specPath, specContent, cwd, model = 'opus', maxTurns = 100, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, _silent = false, _onActivity, _runId } = options;
+  const { prompt, specPath, specContent, cwd, model = 'opus', maxTurns = 100, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, fork, _silent = false, _onActivity, _runId } = options;
+  const effectiveResume = fork || resume;
+  const isFork = !!fork;
 
   // Resolve working directory
   const workingDir = cwd ? (await fs.realpath(cwd)) : process.cwd();
@@ -386,7 +388,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
   // Hook: Stop handler - persist session state for resume on interrupt
   const latestSessionPath = path.join(workingDir, '.forge', 'latest-session.json');
   const persistSession = async () => {
-    const state = { sessionId, startedAt: startTime.toISOString(), prompt, model: modelName, cwd: workingDir };
+    const state = { sessionId, startedAt: startTime.toISOString(), prompt, model: modelName, cwd: workingDir, ...(isFork && { forkedFrom: fork }) };
     await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
     await fs.writeFile(latestSessionPath, JSON.stringify(state, null, 2));
   };
@@ -443,13 +445,15 @@ Focus on delivering working code that meets the acceptance criteria.`;
         },
         maxTurns: dryRun ? 20 : maxTurns,
         maxBudgetUsd: dryRun ? 5.00 : 50.00,
-        ...(resume && { resume })
+        ...(effectiveResume && { resume: effectiveResume }),
+        ...(isFork && { forkSession: true })
       }
     })) {
       // Capture session ID from init message
       if (message.type === 'system' && message.subtype === 'init') {
         sessionId = message.session_id;
         if (!quiet) console.log(`${DIM}[forge]${RESET} Session: ${DIM}${sessionId}${RESET}`);
+        if (!quiet && isFork) console.log(`${DIM}[forge]${RESET} Forked from: ${DIM}${fork}${RESET}`);
         persistSession().catch(() => {});
         if (useSpinner && !agentSpinner) {
           agentSpinner = createInlineSpinner(`${DIM}[forge]${RESET}`);
@@ -607,6 +611,7 @@ Fix these errors. The code should compile and build successfully.`;
             model: modelName,
             cwd: workingDir,
             sessionId,
+            forkedFrom: isFork ? fork : undefined,
             runId: _runId
           };
 
@@ -632,6 +637,7 @@ Fix these errors. The code should compile and build successfully.`;
             if (sessionId) {
               console.log(`  Session:  ${DIM}${sessionId}${RESET}`);
               console.log(`  Resume:   ${CMD}forge run --resume ${sessionId} "continue"${RESET}`);
+              console.log(`  Fork:     ${CMD}forge run --fork ${sessionId} "try different approach"${RESET}`);
             }
           }
 
@@ -675,6 +681,7 @@ Fix these errors. The code should compile and build successfully.`;
             model: modelName,
             cwd: workingDir,
             sessionId,
+            forkedFrom: isFork ? fork : undefined,
             error: errorText,
             runId: _runId
           };
@@ -694,6 +701,7 @@ Fix these errors. The code should compile and build successfully.`;
             model: modelName,
             cwd: workingDir,
             sessionId,
+            forkedFrom: isFork ? fork : undefined,
             error: 'Hit maximum turns limit',
             runId: _runId
           };
@@ -713,6 +721,7 @@ Fix these errors. The code should compile and build successfully.`;
             model: modelName,
             cwd: workingDir,
             sessionId,
+            forkedFrom: isFork ? fork : undefined,
             error: 'Exceeded budget limit',
             runId: _runId
           };
@@ -762,6 +771,7 @@ Fix these errors. The code should compile and build successfully.`;
       model: modelName,
       cwd: workingDir,
       sessionId,
+      forkedFrom: isFork ? fork : undefined,
       error: errMsg,
       runId: _runId
     };
