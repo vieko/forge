@@ -52,18 +52,18 @@ forge "simple task"
 ## Architecture
 
 ```
-~550 lines total
+~850 lines total
 
 User Prompt
     ↓
 Outcome-focused prompt construction
     ↓
-Agent SDK query()
-    ↓
-Agent works autonomously (Read, Write, Edit, Bash, etc.)
-    ↓
-System-level verification
-    ├── Auto-detect project (Node/Cargo/Go)
+Agent SDK query()  ──────────────────────┐
+    ↓                                    │ parallel mode:
+Agent works autonomously                 │ worker pool with
+    ↓                                    │ bounded concurrency,
+System-level verification                │ braille spinner display,
+    ├── Auto-detect project (Node/Cargo/Go)  live tool activity
     ├── Run: tsc --noEmit, npm run build, npm test
     ├── Pass → save results
     └── Fail → feed errors back to agent (up to 3 attempts)
@@ -75,12 +75,14 @@ System-level verification
 
 ```
 src/
-├── index.ts    # CLI entry + arg parsing (~70 lines)
-├── query.ts    # SDK wrapper, verification loop, progress (~420 lines)
-└── types.ts    # TypeScript types (~55 lines)
+├── index.ts    # CLI entry + arg parsing (~82 lines)
+├── query.ts    # SDK wrapper, verification, streaming, parallel (~810 lines)
+└── types.ts    # TypeScript types (~59 lines)
 
 .forge/
-└── results/    # Run results (auto-created, gitignored)
+├── audit.jsonl   # Tool call audit log (with spec filename)
+├── latest-session.json  # Session persistence for resume
+└── results/      # Run results (auto-created, gitignored)
     └── <timestamp>/
         ├── summary.json  # Structured metadata
         └── result.md     # Full result text
@@ -90,9 +92,10 @@ src/
 
 1. **Prompt construction** — wraps user prompt in outcome-focused template with acceptance criteria
 2. **Agent execution** — single SDK `query()` call; agent decides its own approach (direct coding, task breakdown, etc.)
-3. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
-4. **Result persistence** — saves structured metadata and full result text to `.forge/results/`
-5. **Retry on transient errors** — auto-retries rate limits and network errors (3 attempts, exponential backoff)
+3. **Parallel execution** — worker pool runs specs concurrently with braille spinner showing per-spec status and live tool activity
+4. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
+5. **Result persistence** — saves structured metadata and full result text to `.forge/results/` (all error paths included)
+6. **Retry on transient errors** — auto-retries rate limits and network errors (3 attempts, exponential backoff)
 
 ## Development
 

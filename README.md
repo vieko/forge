@@ -11,18 +11,18 @@ Complex features require multiple steps: reading code, planning tasks, implement
 Forge sends outcome-focused prompts to Claude and verifies the results automatically. Give it a task, get back working code.
 
 ```
-~550 lines total
+~850 lines total
 
 User Prompt
     ↓
 Outcome-focused prompt construction
     ↓
-Agent SDK query()
-    ↓
-Agent works autonomously (Read, Write, Edit, Bash, etc.)
-    ↓
-System-level verification
-    ├── Auto-detect project (Node/Cargo/Go)
+Agent SDK query()  ──────────────────────┐
+    ↓                                    │ parallel mode:
+Agent works autonomously                 │ worker pool with
+    ↓                                    │ bounded concurrency,
+System-level verification                │ braille spinner display,
+    ├── Auto-detect project (Node/Cargo/Go)  live tool activity
     ├── Run: tsc --noEmit, npm run build, npm test
     ├── Pass → save results
     └── Fail → feed errors back (up to 3 attempts)
@@ -96,10 +96,11 @@ forge run -q "implement feature X"
 1. **Prompt construction** — wraps user prompt in outcome-focused template with acceptance criteria
 2. **Agent execution** — single SDK `query()` call; the agent decides its own approach
 3. **Streaming** — real-time progress output via `includePartialMessages`
-4. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
-5. **Result persistence** — saves structured metadata and full result text to `.forge/results/`
-6. **Safety** — bash guardrails block destructive commands, audit log tracks all tool calls
-7. **Resilience** — auto-retries rate limits and network errors with exponential backoff; session persistence for resume on interrupt
+4. **Parallel execution** — worker pool runs specs concurrently with braille spinner showing per-spec status and live tool activity
+5. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
+6. **Result persistence** — saves structured metadata and full result text to `.forge/results/`
+7. **Safety** — bash guardrails block destructive commands, audit log tracks all tool calls (includes spec filename)
+8. **Resilience** — auto-retries rate limits and network errors with exponential backoff; session persistence for resume on interrupt
 
 ## Configuration
 
