@@ -18,11 +18,17 @@ forge run --spec .bonfire/specs/feature.md "implement this"
 # Run all specs in a directory sequentially
 forge run --spec-dir ./specs/ "implement these"
 
-# Run specs in parallel (default concurrency: 3)
+# Run specs in parallel (concurrency: auto-detected)
 forge run --spec-dir ./specs/ --parallel "implement these"
 
 # Run specs in parallel with custom concurrency
 forge run --spec-dir ./specs/ -P --concurrency 5 "implement these"
+
+# Run first spec sequentially, then parallelize the rest
+forge run --spec-dir ./specs/ -P --sequential-first 1 "implement these"
+
+# Rerun only failed specs from the latest batch
+forge run --rerun-failed -P -C ~/target-repo "fix failures"
 
 # Configurable max turns (default: 100)
 forge run --max-turns 150 "large task"
@@ -47,12 +53,18 @@ forge run --resume <session-id> "continue"
 
 # Quick alias (no 'run' needed)
 forge "simple task"
+
+# View run results
+forge status                    # Latest run
+forge status --all              # All runs
+forge status -n 5               # Last 5 runs
+forge status -C ~/other-repo    # Different repo
 ```
 
 ## Architecture
 
 ```
-~850 lines total
+~1050 lines total
 
 User Prompt
     ↓
@@ -61,7 +73,7 @@ Outcome-focused prompt construction
 Agent SDK query()  ──────────────────────┐
     ↓                                    │ parallel mode:
 Agent works autonomously                 │ worker pool with
-    ↓                                    │ bounded concurrency,
+    ↓                                    │ auto-tuned concurrency,
 System-level verification                │ braille spinner display,
     ├── Auto-detect project (Node/Cargo/Go)  live tool activity
     ├── Run: tsc --noEmit, npm run build, npm test
@@ -75,16 +87,16 @@ System-level verification                │ braille spinner display,
 
 ```
 src/
-├── index.ts    # CLI entry + arg parsing (~82 lines)
-├── query.ts    # SDK wrapper, verification, streaming, parallel (~810 lines)
-└── types.ts    # TypeScript types (~59 lines)
+├── index.ts    # CLI entry + arg parsing (~110 lines)
+├── query.ts    # SDK wrapper, verification, streaming, parallel, status (~1000 lines)
+└── types.ts    # TypeScript types (~65 lines)
 
 .forge/
 ├── audit.jsonl   # Tool call audit log (with spec filename)
 ├── latest-session.json  # Session persistence for resume
 └── results/      # Run results (auto-created, gitignored)
     └── <timestamp>/
-        ├── summary.json  # Structured metadata
+        ├── summary.json  # Structured metadata (includes runId)
         └── result.md     # Full result text
 ```
 
@@ -92,10 +104,14 @@ src/
 
 1. **Prompt construction** — wraps user prompt in outcome-focused template with acceptance criteria
 2. **Agent execution** — single SDK `query()` call; agent decides its own approach (direct coding, task breakdown, etc.)
-3. **Parallel execution** — worker pool runs specs concurrently with braille spinner showing per-spec status and live tool activity
-4. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
-5. **Result persistence** — saves structured metadata and full result text to `.forge/results/` (all error paths included)
-6. **Retry on transient errors** — auto-retries rate limits and network errors (3 attempts, exponential backoff)
+3. **Parallel execution** — worker pool runs specs concurrently with auto-tuned concurrency (freeMem/2GB, capped at CPUs), braille spinner showing per-spec status and live tool activity
+4. **Sequential-first** — optionally run foundation specs sequentially before parallelizing the rest
+5. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
+6. **Result persistence** — saves structured metadata (with runId for batch grouping) and full result text to `.forge/results/`
+7. **Cost tracking** — per-spec and total cost shown in batch summary
+8. **Rerun failed** — `--rerun-failed` finds failed specs from latest batch and reruns them
+9. **Status** — `forge status` shows results from recent runs grouped by batch
+10. **Retry on transient errors** — auto-retries rate limits and network errors (3 attempts, exponential backoff)
 
 ## Development
 

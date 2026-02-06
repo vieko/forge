@@ -26,8 +26,12 @@ export interface ForgeOptions {
   resume?: string;
   /** Run specs in parallel (only with --spec-dir) */
   parallel?: boolean;
-  /** Max concurrent specs when parallel (default: 3) */
+  /** Max concurrent specs when parallel (default: auto) */
   concurrency?: number;
+  /** Run first N specs sequentially before parallelizing (with --parallel) */
+  sequentialFirst?: number;
+  /** Rerun only failed specs from the latest batch */
+  rerunFailed?: boolean;
 }
 
 /**
@@ -56,4 +60,6 @@ export interface ForgeResult {
   sessionId?: string;
   /** Error message (if failed) */
   error?: string;
+  /** Batch run ID for grouping specs in the same run */
+  runId?: string;
 }

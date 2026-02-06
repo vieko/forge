@@ -4,8 +4,77 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import os from 'os';
+
+// Custom error that carries the ForgeResult for cost tracking on failure
+export class ForgeError extends Error {
+  result?: ForgeResult;
+  constructor(message: string, result?: ForgeResult) {
+    super(message);
+    this.name = 'ForgeError';
+    this.result = result;
+  }
+}
 
 const execAsync = promisify(exec);
+
+// ── ANSI Colors ──────────────────────────────────────────────
+const RESET = '\x1b[0m';
+const BOLD = '\x1b[1m';
+const DIM = '\x1b[2m';
+// 256-color grays — visible on both light and dark terminals
+const G = [
+  '\x1b[38;5;252m', // lightest
+  '\x1b[38;5;249m',
+  '\x1b[38;5;245m',
+  '\x1b[38;5;242m',
+  '\x1b[38;5;238m',
+  '\x1b[38;5;235m', // darkest
+];
+
+const BANNER = [
+  '███████╗ ██████╗ ██████╗  ██████╗ ███████╗',
+  '██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝',
+  '█████╗  ██║   ██║██████╔╝██║  ███╗█████╗  ',
+  '██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝  ',
+  '██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗',
+  '╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝',
+];
+
+function showBanner(subtitle?: string): void {
+  console.log();
+  BANNER.forEach((line, i) => console.log(`${G[i]}${line}${RESET}`));
+  if (subtitle) {
+    console.log(`\n${DIM}${subtitle}${RESET}`);
+  }
+  console.log();
+}
+
+// Single-line spinner that overwrites itself in place
+function createInlineSpinner(prefix: string) {
+  let frameIndex = 0;
+  let text = '';
+  let interval: ReturnType<typeof setInterval> | null = null;
+  const cols = () => process.stdout.columns || 80;
+
+  function render() {
+    const frame = SPINNER_FRAMES[frameIndex % SPINNER_FRAMES.length];
+    const line = `${frame} ${prefix}${text ? ` ${DIM}${text}${RESET}` : ''}`;
+    const truncated = line.length > cols() ? line.substring(0, cols() - 1) : line;
+    process.stdout.write(`\x1B[2K\r${truncated}`);
+    frameIndex++;
+  }
+
+  return {
+    start() { interval = setInterval(render, 80); render(); },
+    update(newText: string) { text = newText; },
+    stop(finalLine?: string) {
+      if (interval) clearInterval(interval);
+      process.stdout.write('\x1B[2K\r');
+      if (finalLine) console.log(finalLine);
+    },
+  };
+}
 
 async function saveResult(
   workingDir: string,
@@ -51,7 +120,7 @@ ${resultText}
 // Format progress output with agent context
 function formatProgress(agent: string | null, message: string): string {
   const name = agent ? agent.charAt(0).toUpperCase() + agent.slice(1) : 'Main';
-  return `[${name}] ${message}`;
+  return `${DIM}[${name}]${RESET} ${message}`;
 }
 
 // Check if an error is transient and retryable
@@ -125,22 +194,26 @@ async function runVerification(workingDir: string, quiet: boolean): Promise<{ pa
   const commands = await detectVerification(workingDir);
 
   if (commands.length === 0) {
-    if (!quiet) console.log('[Verify] No verification commands detected');
+    if (!quiet) console.log(`${DIM}[Verify]${RESET} No verification commands detected`);
     return { passed: true, errors: '' };
   }
 
   const errors: string[] = [];
 
   for (const cmd of commands) {
-    if (!quiet) console.log(`[Verify] Running: ${cmd}`);
+    let spinner: ReturnType<typeof createInlineSpinner> | null = null;
+    if (!quiet) {
+      spinner = createInlineSpinner(`${DIM}[Verify]${RESET} ${cmd}`);
+      spinner.start();
+    }
     try {
       await execAsync(cmd, { cwd: workingDir, timeout: 120000 });
-      if (!quiet) console.log(`[Verify] ✓ ${cmd}`);
+      if (spinner) spinner.stop(`${DIM}[Verify]${RESET} \x1b[32m✓\x1b[0m ${cmd}`);
     } catch (err) {
       const error = err as { stderr?: string; stdout?: string; message?: string };
       const errorOutput = error.stderr || error.stdout || error.message || 'Unknown error';
       errors.push(`Command failed: ${cmd}\n${errorOutput}`);
-      if (!quiet) console.log(`[Verify] ✗ ${cmd}`);
+      if (spinner) spinner.stop(`${DIM}[Verify]${RESET} \x1b[31m✗\x1b[0m ${cmd}`);
     }
   }
 
@@ -151,8 +224,8 @@ async function runVerification(workingDir: string, quiet: boolean): Promise<{ pa
 }
 
 // Run a single spec
-async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void }): Promise<void> {
-  const { prompt, specPath, specContent, cwd, model = 'opus', maxTurns = 100, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, _silent = false, _onActivity } = options;
+async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string }): Promise<ForgeResult> {
+  const { prompt, specPath, specContent, cwd, model = 'opus', maxTurns = 100, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, _silent = false, _onActivity, _runId } = options;
 
   // Resolve working directory
   const workingDir = cwd ? (await fs.realpath(cwd)) : process.cwd();
@@ -241,12 +314,10 @@ Focus on delivering working code that meets the acceptance criteria.`;
   // Run the query
   if (!quiet) {
     if (cwd) {
-      console.log(`Working directory: ${workingDir}`);
+      console.log(`${DIM}Working directory:${RESET} ${workingDir}`);
     }
     if (dryRun) {
-      console.log('Starting Forge (dry run - planning only)...\n');
-    } else {
-      console.log('Starting Forge...\n');
+      console.log(`${DIM}Mode: dry run (planning only)${RESET}\n`);
     }
   }
 
@@ -257,6 +328,9 @@ Focus on delivering working code that meets the acceptance criteria.`;
   let toolInputJson = '';
   // Session tracking
   let sessionId: string | undefined;
+  // Inline spinner for non-verbose single-spec runs
+  const useSpinner = !_silent && !verbose && !quiet;
+  let agentSpinner: ReturnType<typeof createInlineSpinner> | null = null;
 
   // Hook: Bash command guardrails
   const blockedCommands: Array<{ pattern: RegExp; reason: string }> = [
@@ -274,7 +348,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
     const command = ((input as Record<string, unknown>).tool_input as Record<string, unknown>)?.command as string || '';
     for (const { pattern, reason } of blockedCommands) {
       if (pattern.test(command)) {
-        if (!quiet) console.log(`[forge] Blocked: ${reason}`);
+        if (!quiet) console.log(`${DIM}[forge]${RESET} Blocked: ${reason}`);
         return {
           hookSpecificOutput: {
             hookEventName: 'PreToolUse' as const,
@@ -353,8 +427,12 @@ Focus on delivering working code that meets the acceptance criteria.`;
       // Capture session ID from init message
       if (message.type === 'system' && message.subtype === 'init') {
         sessionId = message.session_id;
-        if (!quiet) console.log(`[forge] Session: ${sessionId}`);
+        if (!quiet) console.log(`${DIM}[forge]${RESET} Session: ${DIM}${sessionId}${RESET}`);
         persistSession().catch(() => {});
+        if (useSpinner && !agentSpinner) {
+          agentSpinner = createInlineSpinner(`${DIM}[forge]${RESET} Working...`);
+          agentSpinner.start();
+        }
       }
 
       // Stream real-time progress via partial messages
@@ -405,7 +483,10 @@ Focus on delivering working code that meets the acceptance criteria.`;
 
             // Console output for non-silent mode
             if (!_silent) {
-              if (currentToolName === 'Task') {
+              if (agentSpinner && activity) {
+                // Spinner mode: update single line
+                agentSpinner.update(activity);
+              } else if (currentToolName === 'Task') {
                 const agentType = input.subagent_type as string;
                 const description = input.description as string;
                 if (agentType && agentType !== currentAgent) {
@@ -444,6 +525,9 @@ Focus on delivering working code that meets the acceptance criteria.`;
       }
 
       if (message.type === 'result') {
+        // Stop agent spinner before any result output
+        if (agentSpinner) { agentSpinner.stop(); agentSpinner = null; }
+
         const endTime = new Date();
         const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
 
@@ -452,15 +536,15 @@ Focus on delivering working code that meets the acceptance criteria.`;
 
           // Run verification (unless dry-run or plan-only)
           if (!dryRun && !planOnly) {
-            if (!quiet) console.log('\n[forge] Running verification...');
+            if (!quiet) console.log(`${DIM}[forge]${RESET} Running verification...`);
             const verification = await runVerification(workingDir, quiet);
 
             if (!verification.passed) {
               verifyAttempt++;
               if (verifyAttempt < maxVerifyAttempts) {
                 if (!quiet) {
-                  console.log(`\n[forge] Verification failed (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
-                  console.log('[forge] Sending errors back to agent for fixes...\n');
+                  console.log(`\n${DIM}[forge]${RESET} \x1b[33mVerification failed\x1b[0m (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
+                  console.log(`${DIM}[forge]${RESET} Sending errors back to agent for fixes...\n`);
                 }
                 // Update prompt with errors for next iteration
                 currentPrompt = `## Previous Work
@@ -477,12 +561,12 @@ Fix these errors. The code should compile and build successfully.`;
                 break; // Break out of message loop to start new query
               } else {
                 if (!quiet) {
-                  console.log(`\n[forge] Verification failed after ${maxVerifyAttempts} attempts`);
-                  console.log('[forge] Errors:\n' + verification.errors);
+                  console.log(`\n${DIM}[forge]${RESET} \x1b[31mVerification failed after ${maxVerifyAttempts} attempts\x1b[0m`);
+                  console.log(`${DIM}[forge]${RESET} Errors:\n` + verification.errors);
                 }
               }
             } else {
-              if (!quiet) console.log('[forge] Verification passed!\n');
+              if (!quiet) console.log(`${DIM}[forge]${RESET} \x1b[32mVerification passed!\x1b[0m\n`);
             }
           }
 
@@ -497,7 +581,8 @@ Fix these errors. The code should compile and build successfully.`;
             prompt,
             model: modelName,
             cwd: workingDir,
-            sessionId
+            sessionId,
+            runId: _runId
           };
 
           const resultsDir = await saveResult(workingDir, forgeResult, resultText);
@@ -513,15 +598,15 @@ Fix these errors. The code should compile and build successfully.`;
             console.log(resultText);
 
             // Display summary
-            console.log('\n---');
-            console.log(`Duration: ${durationSeconds.toFixed(1)}s`);
+            console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+            console.log(`  Duration: ${BOLD}${durationSeconds.toFixed(1)}s${RESET}`);
             if (message.total_cost_usd !== undefined) {
-              console.log(`Cost: $${message.total_cost_usd.toFixed(4)}`);
+              console.log(`  Cost:     ${BOLD}$${message.total_cost_usd.toFixed(4)}${RESET}`);
             }
-            console.log(`Results saved: ${resultsDir}`);
+            console.log(`  Results:  ${DIM}${resultsDir}${RESET}`);
             if (sessionId) {
-              console.log(`Session: ${sessionId}`);
-              console.log(`Resume: forge run --resume ${sessionId} "continue"`);
+              console.log(`  Session:  ${DIM}${sessionId}${RESET}`);
+              console.log(`  Resume:   forge run --resume ${sessionId} "continue"`);
             }
           }
 
@@ -550,7 +635,7 @@ Fix these errors. The code should compile and build successfully.`;
           }
 
           // If we got here without breaking, we're done
-          return;
+          return forgeResult;
         } else if (message.subtype === 'error_during_execution') {
           const errorText = JSON.stringify(message.errors, null, 2);
 
@@ -565,12 +650,13 @@ Fix these errors. The code should compile and build successfully.`;
             model: modelName,
             cwd: workingDir,
             sessionId,
-            error: errorText
+            error: errorText,
+            runId: _runId
           };
 
           await saveResult(workingDir, forgeResult, `Error:\n${errorText}`);
 
-          throw new Error(`Execution failed: ${errorText}`);
+          throw new ForgeError(`Execution failed: ${errorText}`, forgeResult);
         } else if (message.subtype === 'error_max_turns') {
           const forgeResult: ForgeResult = {
             startedAt: startTime.toISOString(),
@@ -583,12 +669,13 @@ Fix these errors. The code should compile and build successfully.`;
             model: modelName,
             cwd: workingDir,
             sessionId,
-            error: 'Hit maximum turns limit'
+            error: 'Hit maximum turns limit',
+            runId: _runId
           };
 
           await saveResult(workingDir, forgeResult, 'Error: Hit maximum turns limit');
 
-          throw new Error('Hit maximum turns limit');
+          throw new ForgeError('Hit maximum turns limit', forgeResult);
         } else if (message.subtype === 'error_max_budget_usd') {
           const forgeResult: ForgeResult = {
             startedAt: startTime.toISOString(),
@@ -601,18 +688,22 @@ Fix these errors. The code should compile and build successfully.`;
             model: modelName,
             cwd: workingDir,
             sessionId,
-            error: 'Exceeded budget limit'
+            error: 'Exceeded budget limit',
+            runId: _runId
           };
 
           await saveResult(workingDir, forgeResult, 'Error: Exceeded budget limit');
 
-          throw new Error('Exceeded budget limit');
+          throw new ForgeError('Exceeded budget limit', forgeResult);
         }
       }
     }
     // If we reach here without error, break out of retry loop
     break;
   } catch (error) {
+    // Stop spinner if still running
+    if (agentSpinner) { agentSpinner.stop(); agentSpinner = null; }
+
     if (error instanceof Error && error.message.includes('not installed')) {
       throw new Error('Agent SDK not properly installed. Run: bun install @anthropic-ai/claude-agent-sdk');
     }
@@ -621,14 +712,18 @@ Fix these errors. The code should compile and build successfully.`;
     if (isTransientError(error) && attempt < maxRetries) {
       const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
       if (!quiet) {
-        console.log(`\n[forge] Transient error: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        console.log(`[forge] Retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+        console.log(`\n${DIM}[forge]${RESET} \x1b[33mTransient error:\x1b[0m ${error instanceof Error ? error.message : 'Unknown error'}`);
+        console.log(`${DIM}[forge]${RESET} Retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
       }
       await sleep(delayMs);
       continue;
     }
 
     // Non-transient error or out of retries — save result before throwing
+    // If it's already a ForgeError (from the result handlers above), just re-throw
+    if (error instanceof ForgeError) {
+      throw error;
+    }
     const endTime = new Date();
     const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
     const errMsg = error instanceof Error ? error.message : 'Unknown error';
@@ -642,13 +737,18 @@ Fix these errors. The code should compile and build successfully.`;
       model: modelName,
       cwd: workingDir,
       sessionId,
-      error: errMsg
+      error: errMsg,
+      runId: _runId
     };
     await saveResult(workingDir, forgeResult, `Error:\n${errMsg}`).catch(() => {});
-    throw error;
+    throw new ForgeError(errMsg, forgeResult);
   }
   } // end retry loop
   } // end verification loop
+
+  // All verification attempts exhausted — should not normally reach here
+  // (the success path returns, error paths throw)
+  throw new ForgeError('Verification failed after all attempts');
 }
 
 // Worker pool: runs tasks with bounded concurrency
@@ -776,9 +876,284 @@ function createSpecDisplay(specFiles: string[]) {
   };
 }
 
+// Auto-detect concurrency based on available memory and CPU
+function autoDetectConcurrency(): number {
+  const freeMem = os.freemem();
+  const memBased = Math.floor(freeMem / (2 * 1024 * 1024 * 1024)); // 2GB per worker
+  const cpuBased = Math.min(os.cpus().length, 5);
+  return Math.max(1, Math.min(memBased, cpuBased));
+}
+
+// Run a batch of spec files (shared by specDir and rerunFailed paths)
+async function runSpecBatch(
+  specFilePaths: string[],
+  specFileNames: string[],
+  options: ForgeOptions,
+  concurrency: number,
+  runId: string,
+): Promise<{ spec: string; status: string; cost?: number; duration: number }[]> {
+  const results: { spec: string; status: string; cost?: number; duration: number }[] = [];
+  const { quiet, parallel, sequentialFirst = 0 } = options;
+
+  // Split into sequential-first and parallel portions
+  const seqCount = parallel ? Math.min(sequentialFirst, specFileNames.length) : specFileNames.length;
+  const seqNames = specFileNames.slice(0, seqCount);
+  const seqPaths = specFilePaths.slice(0, seqCount);
+  const parNames = specFileNames.slice(seqCount);
+  const parPaths = specFilePaths.slice(seqCount);
+
+  // Sequential phase
+  for (let i = 0; i < seqNames.length; i++) {
+    const specFile = seqNames[i];
+    const specFilePath = seqPaths[i];
+
+    if (!quiet) {
+      console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+      console.log(`Running spec ${i + 1}/${seqNames.length}${parNames.length > 0 ? ' (sequential)' : ''}: ${BOLD}${specFile}${RESET}`);
+      console.log(`${DIM}${'─'.repeat(60)}${RESET}\n`);
+    }
+
+    const startTime = Date.now();
+    try {
+      const specContent = await fs.readFile(specFilePath, 'utf-8');
+
+      const result = await runSingleSpec({
+        ...options,
+        specPath: specFilePath,
+        specContent,
+        specDir: undefined,
+        _runId: runId,
+      });
+
+      const duration = (Date.now() - startTime) / 1000;
+      results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration });
+    } catch (err) {
+      const duration = (Date.now() - startTime) / 1000;
+      const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
+      results.push({
+        spec: specFile,
+        status: `failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        cost,
+        duration
+      });
+
+      if (!quiet) {
+        console.error(`\nSpec ${specFile} failed:`, err instanceof Error ? err.message : err);
+        console.log('Continuing with next spec...\n');
+      }
+    }
+  }
+
+  // Parallel phase
+  if (parNames.length > 0) {
+    const display = createSpecDisplay(parNames);
+
+    await workerPool(parNames, concurrency, async (specFile, i) => {
+      const specFilePath = parPaths[i];
+      display.start(i);
+
+      const startTime = Date.now();
+      try {
+        const specContent = await fs.readFile(specFilePath, 'utf-8');
+
+        const result = await runSingleSpec({
+          ...options,
+          specPath: specFilePath,
+          specContent,
+          specDir: undefined,
+          parallel: undefined,
+          quiet: true,
+          _silent: true,
+          _onActivity: (detail) => display.activity(i, detail),
+          _runId: runId,
+        });
+
+        const duration = (Date.now() - startTime) / 1000;
+        display.done(i, duration);
+        results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration });
+      } catch (err) {
+        const duration = (Date.now() - startTime) / 1000;
+        const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
+        const errMsg = err instanceof Error ? err.message : 'Unknown error';
+        display.fail(i, errMsg);
+        results.push({
+          spec: specFile,
+          status: `failed: ${errMsg}`,
+          cost,
+          duration
+        });
+      }
+    });
+
+    display.stop();
+  }
+
+  return results;
+}
+
+// Find failed specs from latest batch in .forge/results/
+async function findFailedSpecs(workingDir: string): Promise<{ runId: string; specPaths: string[] }> {
+  const resultsBase = path.join(workingDir, '.forge', 'results');
+
+  let dirs: string[];
+  try {
+    dirs = (await fs.readdir(resultsBase)).sort().reverse(); // newest first
+  } catch {
+    throw new Error('No results found in .forge/results/');
+  }
+
+  // Find the latest runId by scanning summaries
+  let latestRunId: string | undefined;
+  for (const dir of dirs) {
+    try {
+      const summary: ForgeResult = JSON.parse(
+        await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
+      );
+      if (summary.runId) {
+        latestRunId = summary.runId;
+        break;
+      }
+    } catch { continue; }
+  }
+
+  if (!latestRunId) {
+    throw new Error('No batch runs found (no runId in results). Run with --spec-dir first.');
+  }
+
+  // Collect all results with this runId
+  const failedPaths: string[] = [];
+  for (const dir of dirs) {
+    try {
+      const summary: ForgeResult = JSON.parse(
+        await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
+      );
+      if (summary.runId === latestRunId && summary.status !== 'success' && summary.specPath) {
+        failedPaths.push(summary.specPath);
+      }
+    } catch { continue; }
+  }
+
+  return { runId: latestRunId, specPaths: failedPaths };
+}
+
+// Display status of recent runs
+export async function showStatus(options: { cwd?: string; all?: boolean; last?: number }): Promise<void> {
+  showBanner();
+  const workingDir = options.cwd ? path.resolve(options.cwd) : process.cwd();
+  const resultsBase = path.join(workingDir, '.forge', 'results');
+
+  let dirs: string[];
+  try {
+    dirs = (await fs.readdir(resultsBase)).sort().reverse(); // newest first
+  } catch {
+    console.log('No results found.');
+    return;
+  }
+
+  // Load all summaries
+  const summaries: ForgeResult[] = [];
+  for (const dir of dirs) {
+    try {
+      const summary: ForgeResult = JSON.parse(
+        await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
+      );
+      summaries.push(summary);
+    } catch { continue; }
+  }
+
+  if (summaries.length === 0) {
+    console.log('No results found.');
+    return;
+  }
+
+  // Group by runId (ungrouped specs get their own entry)
+  const groups = new Map<string, ForgeResult[]>();
+  for (const s of summaries) {
+    const key = s.runId || s.startedAt; // Use startedAt as unique key for non-batch runs
+    const arr = groups.get(key) || [];
+    arr.push(s);
+    groups.set(key, arr);
+  }
+
+  // Convert to array sorted by newest first
+  const groupEntries = Array.from(groups.entries()).sort((a, b) => {
+    const aTime = a[1][0].startedAt;
+    const bTime = b[1][0].startedAt;
+    return bTime.localeCompare(aTime);
+  });
+
+  // Limit display
+  const limit = options.all ? groupEntries.length : (options.last || 1);
+  const displayed = groupEntries.slice(0, limit);
+
+  for (const [key, specs] of displayed) {
+    const isBatch = specs.length > 1 || specs[0].runId;
+    const successCount = specs.filter(s => s.status === 'success').length;
+    const totalCost = specs.reduce((sum, s) => sum + (s.costUsd || 0), 0);
+    const totalDuration = specs.reduce((sum, s) => sum + s.durationSeconds, 0);
+
+    console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+    if (isBatch) {
+      console.log(`Batch: ${DIM}${key.substring(0, 8)}${RESET}  |  ${specs[0].startedAt}`);
+    } else {
+      console.log(`Run: ${specs[0].startedAt}`);
+    }
+    console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
+
+    for (const s of specs) {
+      const name = s.specPath ? path.basename(s.specPath) : '(no spec)';
+      const statusIcon = s.status === 'success' ? '\x1B[32m✓\x1B[0m' : '\x1B[31m✗\x1B[0m';
+      const cost = s.costUsd !== undefined ? `$${s.costUsd.toFixed(2)}` : '   -';
+      console.log(`  ${statusIcon} ${name.padEnd(35)} ${s.durationSeconds.toFixed(0).padStart(4)}s  ${cost}`);
+    }
+
+    console.log(`\n  ${successCount}/${specs.length} successful  |  ${totalDuration.toFixed(0)}s  |  $${totalCost.toFixed(2)}`);
+  }
+
+  console.log('');
+}
+
 // Main entry point - handles single spec or spec directory
 export async function runForge(options: ForgeOptions): Promise<void> {
-  const { specDir, specPath, quiet, parallel, concurrency = 3 } = options;
+  const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed } = options;
+
+  if (!quiet) {
+    showBanner('AI task orchestrator');
+  }
+
+  // Resolve concurrency: use provided value or auto-detect
+  const concurrency = options.concurrency ?? autoDetectConcurrency();
+
+  // Generate a unique run ID for batch grouping
+  const runId = `${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
+
+  // Rerun failed specs from latest batch
+  if (rerunFailed) {
+    const workingDir = options.cwd ? path.resolve(options.cwd) : process.cwd();
+    const { runId: prevRunId, specPaths: failedPaths } = await findFailedSpecs(workingDir);
+
+    if (failedPaths.length === 0) {
+      console.log('No failed specs found in latest batch. All passed!');
+      return;
+    }
+
+    const failedNames = failedPaths.map(p => path.basename(p));
+    if (!quiet) {
+      console.log(`Rerunning ${BOLD}${failedPaths.length}${RESET} failed spec(s) from batch ${DIM}${prevRunId.substring(0, 8)}${RESET}:`);
+      failedNames.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
+      if (parallel) {
+        console.log(`\nMode: parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})`);
+      }
+      console.log('');
+    }
+
+    const wallClockStart = Date.now();
+    const results = await runSpecBatch(failedPaths, failedNames, options, concurrency, runId);
+    const wallClockDuration = (Date.now() - wallClockStart) / 1000;
+
+    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false);
+    return;
+  }
 
   // If spec directory provided, run each spec
   if (specDir) {
@@ -795,112 +1170,24 @@ export async function runForge(options: ForgeOptions): Promise<void> {
       }
 
       if (!quiet) {
-        const mode = parallel ? `parallel (concurrency: ${concurrency})` : 'sequential';
-        console.log(`Found ${specFiles.length} specs in ${resolvedDir} [${mode}]:`);
-        specFiles.forEach((f, i) => console.log(`  ${i + 1}. ${f}`));
+        const mode = parallel
+          ? `parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})`
+          : 'sequential';
+        console.log(`Found ${BOLD}${specFiles.length}${RESET} specs in ${DIM}${resolvedDir}${RESET} [${mode}]:`);
+        specFiles.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
+        if (parallel && sequentialFirst > 0) {
+          console.log(`\nSequential-first: ${Math.min(sequentialFirst, specFiles.length)} spec(s) run before parallel phase`);
+        }
         console.log('');
       }
 
+      const specFilePaths = specFiles.map(f => path.join(resolvedDir, f));
+
       const wallClockStart = Date.now();
-      const results: { spec: string; status: string; cost?: number; duration: number }[] = [];
-
-      if (parallel) {
-        // Parallel execution with worker pool + spinner display
-        const display = createSpecDisplay(specFiles);
-
-        await workerPool(specFiles, concurrency, async (specFile, i) => {
-          const specFilePath = path.join(resolvedDir, specFile);
-          display.start(i);
-
-          const startTime = Date.now();
-          try {
-            const specContent = await fs.readFile(specFilePath, 'utf-8');
-
-            await runSingleSpec({
-              ...options,
-              specPath: specFilePath,
-              specContent,
-              specDir: undefined,
-              parallel: undefined,
-              quiet: true,
-              _silent: true,
-              _onActivity: (detail) => display.activity(i, detail),
-            });
-
-            const duration = (Date.now() - startTime) / 1000;
-            display.done(i, duration);
-            results.push({ spec: specFile, status: 'success', duration });
-          } catch (err) {
-            const duration = (Date.now() - startTime) / 1000;
-            const errMsg = err instanceof Error ? err.message : 'Unknown error';
-            display.fail(i, errMsg);
-            results.push({
-              spec: specFile,
-              status: `failed: ${errMsg}`,
-              duration
-            });
-          }
-        });
-
-        display.stop();
-      } else {
-        // Sequential execution (existing behavior)
-        for (let i = 0; i < specFiles.length; i++) {
-          const specFile = specFiles[i];
-          const specFilePath = path.join(resolvedDir, specFile);
-
-          if (!quiet) {
-            console.log(`\n${'='.repeat(60)}`);
-            console.log(`Running spec ${i + 1}/${specFiles.length}: ${specFile}`);
-            console.log(`${'='.repeat(60)}\n`);
-          }
-
-          const startTime = Date.now();
-          try {
-            const specContent = await fs.readFile(specFilePath, 'utf-8');
-
-            await runSingleSpec({
-              ...options,
-              specPath: specFilePath,
-              specContent,
-              specDir: undefined,
-            });
-
-            const duration = (Date.now() - startTime) / 1000;
-            results.push({ spec: specFile, status: 'success', duration });
-          } catch (err) {
-            const duration = (Date.now() - startTime) / 1000;
-            results.push({
-              spec: specFile,
-              status: `failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
-              duration
-            });
-
-            if (!quiet) {
-              console.error(`\nSpec ${specFile} failed:`, err instanceof Error ? err.message : err);
-              console.log('Continuing with next spec...\n');
-            }
-          }
-        }
-      }
-
+      const results = await runSpecBatch(specFilePaths, specFiles, options, concurrency, runId);
       const wallClockDuration = (Date.now() - wallClockStart) / 1000;
-      const totalSpecDuration = results.reduce((sum, r) => sum + r.duration, 0);
 
-      // Summary
-      if (!quiet || parallel) {
-        console.log(`\n${'='.repeat(60)}`);
-        console.log('SPEC DIRECTORY SUMMARY');
-        console.log(`${'='.repeat(60)}`);
-        results.forEach(r => {
-          console.log(`  ${r.spec}: ${r.status} (${r.duration.toFixed(1)}s)`);
-        });
-        console.log(`\nWall-clock time: ${wallClockDuration.toFixed(1)}s`);
-        if (parallel) {
-          console.log(`Total spec time: ${totalSpecDuration.toFixed(1)}s`);
-        }
-        console.log(`Successful: ${results.filter(r => r.status === 'success').length}/${results.length}`);
-      }
+      printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false);
 
       return;
     } catch (err) {
@@ -912,5 +1199,36 @@ export async function runForge(options: ForgeOptions): Promise<void> {
   }
 
   // Single spec or no spec - run directly
-  await runSingleSpec(options);
+  await runSingleSpec({ ...options, _runId: runId });
+}
+
+// Print batch summary with cost tracking
+function printBatchSummary(
+  results: { spec: string; status: string; cost?: number; duration: number }[],
+  wallClockDuration: number,
+  parallel: boolean,
+  quiet: boolean,
+): void {
+  const totalSpecDuration = results.reduce((sum, r) => sum + r.duration, 0);
+  const totalCost = results.reduce((sum, r) => sum + (r.cost || 0), 0);
+
+  if (!quiet || parallel) {
+    const successCount = results.filter(r => r.status === 'success').length;
+    console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+    console.log(`${BOLD}SPEC BATCH SUMMARY${RESET}`);
+    console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
+    results.forEach(r => {
+      const icon = r.status === 'success' ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
+      const cost = r.cost !== undefined ? `$${r.cost.toFixed(2)}` : '   -';
+      const statusText = r.status === 'success' ? `${DIM}success${RESET}` : `\x1b[31m${r.status}\x1b[0m`;
+      console.log(`  ${icon} ${r.spec.padEnd(30)} ${r.duration.toFixed(1).padStart(6)}s  ${cost}`);
+    });
+    console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
+    console.log(`  Wall-clock: ${BOLD}${wallClockDuration.toFixed(1)}s${RESET}`);
+    if (parallel) {
+      console.log(`  Spec total: ${totalSpecDuration.toFixed(1)}s`);
+    }
+    console.log(`  Cost:       ${BOLD}$${totalCost.toFixed(2)}${RESET}`);
+    console.log(`  Result:     ${successCount === results.length ? '\x1b[32m' : '\x1b[33m'}${successCount}/${results.length} successful\x1b[0m`);
+  }
 }

@@ -3,12 +3,12 @@
 import { program } from 'commander';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { runForge } from './query.js';
+import { runForge, showStatus } from './query.js';
 
 program
   .name('forge')
   .description('AI task orchestrator built on Anthropic Agent SDK')
-  .version('2.3.0');
+  .version('2.4.0');
 
 program
   .command('run')
@@ -25,7 +25,9 @@ program
   .option('-q, --quiet', 'Suppress progress output (for CI)')
   .option('-r, --resume <session>', 'Resume a previous session')
   .option('-P, --parallel', 'Run specs in parallel (with --spec-dir)')
-  .option('--concurrency <n>', 'Max concurrent specs in parallel mode (default: 3)', '3')
+  .option('--concurrency <n>', 'Max concurrent specs in parallel mode (default: auto)')
+  .option('--sequential-first <n>', 'Run first N specs sequentially before parallelizing')
+  .option('--rerun-failed', 'Rerun only failed specs from latest batch')
   .action(async (prompt: string, options: {
     spec?: string;
     specDir?: string;
@@ -39,6 +41,8 @@ program
     resume?: string;
     parallel?: boolean;
     concurrency?: string;
+    sequentialFirst?: string;
+    rerunFailed?: boolean;
   }) => {
     try {
       await runForge({
@@ -54,7 +58,28 @@ program
         quiet: options.quiet,
         resume: options.resume,
         parallel: options.parallel,
-        concurrency: options.concurrency ? parseInt(options.concurrency, 10) : 3
+        concurrency: options.concurrency ? parseInt(options.concurrency, 10) : undefined,
+        sequentialFirst: options.sequentialFirst ? parseInt(options.sequentialFirst, 10) : undefined,
+        rerunFailed: options.rerunFailed,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('status')
+  .description('Show results from recent runs')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('-a, --all', 'Show all runs')
+  .option('-n, --last <n>', 'Show last N runs (default: 1)')
+  .action(async (options: { cwd?: string; all?: boolean; last?: string }) => {
+    try {
+      await showStatus({
+        cwd: options.cwd,
+        all: options.all,
+        last: options.last ? parseInt(options.last, 10) : undefined,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);
@@ -64,7 +89,7 @@ program
 
 // Quick alias: `forge "do something"` = `forge run "do something"`
 const args = process.argv.slice(2);
-if (args.length > 0 && !args[0].startsWith('-') && args[0] !== 'run' && args[0] !== 'help' && args[0] !== '--help' && args[0] !== '-h' && args[0] !== '--version' && args[0] !== '-V') {
+if (args.length > 0 && !args[0].startsWith('-') && args[0] !== 'run' && args[0] !== 'status' && args[0] !== 'help' && args[0] !== '--help' && args[0] !== '-h' && args[0] !== '--version' && args[0] !== '-V') {
   process.argv.splice(2, 0, 'run');
 }
 

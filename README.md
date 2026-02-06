@@ -11,7 +11,7 @@ Complex features require multiple steps: reading code, planning tasks, implement
 Forge sends outcome-focused prompts to Claude and verifies the results automatically. Give it a task, get back working code.
 
 ```
-~850 lines total
+~1050 lines total
 
 User Prompt
     ↓
@@ -20,7 +20,7 @@ Outcome-focused prompt construction
 Agent SDK query()  ──────────────────────┐
     ↓                                    │ parallel mode:
 Agent works autonomously                 │ worker pool with
-    ↓                                    │ bounded concurrency,
+    ↓                                    │ auto-tuned concurrency,
 System-level verification                │ braille spinner display,
     ├── Auto-detect project (Node/Cargo/Go)  live tool activity
     ├── Run: tsc --noEmit, npm run build, npm test
@@ -63,11 +63,17 @@ forge run --spec .bonfire/specs/feature.md "implement this"
 # Run all specs in a directory sequentially
 forge run --spec-dir ./specs/ "implement these"
 
-# Run specs in parallel (default concurrency: 3)
+# Run specs in parallel (concurrency: auto-detected)
 forge run --spec-dir ./specs/ --parallel "implement these"
 
 # Run specs in parallel with custom concurrency
 forge run --spec-dir ./specs/ -P --concurrency 5 "implement these"
+
+# Run first spec sequentially, then parallelize the rest
+forge run --spec-dir ./specs/ -P --sequential-first 1 "implement these"
+
+# Rerun only failed specs from the latest batch
+forge run --rerun-failed -P -C ~/target-repo "fix failures"
 
 # Target different directory
 forge run -C ~/other-repo "add tests"
@@ -89,6 +95,12 @@ forge run -v "debug issue Z"
 
 # Quiet mode (for CI, minimal output)
 forge run -q "implement feature X"
+
+# View run results
+forge status                    # Latest run
+forge status --all              # All runs
+forge status -n 5               # Last 5 runs
+forge status -C ~/other-repo    # Different repo
 ```
 
 ## How It Works
@@ -96,11 +108,15 @@ forge run -q "implement feature X"
 1. **Prompt construction** — wraps user prompt in outcome-focused template with acceptance criteria
 2. **Agent execution** — single SDK `query()` call; the agent decides its own approach
 3. **Streaming** — real-time progress output via `includePartialMessages`
-4. **Parallel execution** — worker pool runs specs concurrently with braille spinner showing per-spec status and live tool activity
-5. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
-6. **Result persistence** — saves structured metadata and full result text to `.forge/results/`
-7. **Safety** — bash guardrails block destructive commands, audit log tracks all tool calls (includes spec filename)
-8. **Resilience** — auto-retries rate limits and network errors with exponential backoff; session persistence for resume on interrupt
+4. **Parallel execution** — worker pool runs specs concurrently with auto-tuned concurrency, braille spinner showing per-spec status and live tool activity
+5. **Sequential-first** — optionally run foundation specs sequentially before parallelizing the rest (`--sequential-first N`)
+6. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
+7. **Cost tracking** — per-spec and total cost in batch summary
+8. **Result persistence** — saves structured metadata and full result text to `.forge/results/`
+9. **Rerun failed** — `--rerun-failed` finds and reruns only failed specs from the latest batch
+10. **Status** — `forge status` shows results from recent runs grouped by batch
+11. **Safety** — bash guardrails block destructive commands, audit log tracks all tool calls (includes spec filename)
+12. **Resilience** — auto-retries rate limits and network errors with exponential backoff; session persistence for resume on interrupt
 
 ## Configuration
 
