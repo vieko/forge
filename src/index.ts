@@ -2,13 +2,17 @@
 
 import { program } from 'commander';
 import { readFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { runForge, showStatus } from './query.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
 
 program
   .name('forge')
   .description('Outcome-driven development with agents')
-  .version('2.4.0');
+  .version(pkg.version);
 
 program
   .command('run')
