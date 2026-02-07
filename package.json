@@ -1,6 +1,6 @@
 {
   "name": "@vieko/forge",
-  "version": "2.3.0",
+  "version": "2.5.0",
   "description": "Outcome-driven development with agents",
   "type": "module",
   "main": "./dist/index.js",
@@ -23,6 +23,12 @@
   ],
   "author": "vieko",
   "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.31",
     "commander": "^12.0.0",
