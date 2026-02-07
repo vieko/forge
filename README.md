@@ -4,15 +4,13 @@ Outcome-driven development with agents. Shaped by prompts, Tempered by fire.
 
 ## The Problem
 
-Complex features require multiple steps: reading code, planning tasks, implementing changes, verifying results. Doing this manually with an AI assistant means constant back-and-forth.
+Complex features require multiple steps: reading code, planning tasks, implementing changes, verifying results. Doing this manually with an Claude Code means constant back-and-forth.
 
 ## The Solution
 
-Define the outcome. The agent builds and verifies. Forge wraps Claude in an outcome-focused prompt, runs it, checks the output, and loops back until it passes.
+Define the outcome. The agent builds and verifies. Forge wraps Claude Code in an outcome-focused prompt, runs it, checks the output, and loops back until it passes.
 
 ```
-~1050 lines total
-
 User Prompt
     ↓
 Outcome-focused prompt construction
