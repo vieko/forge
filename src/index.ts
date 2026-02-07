@@ -3,10 +3,10 @@
 import { program } from 'commander';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { runCrucible, showStatus } from './query.js';
+import { runForge, showStatus } from './query.js';
 
 program
-  .name('crucible')
+  .name('forge')
   .description('Outcome-driven development with agents')
   .version('2.4.0');
 
@@ -51,7 +51,7 @@ program
       process.exit(1);
     }
     try {
-      await runCrucible({
+      await runForge({
         prompt,
         specPath: options.spec,
         specDir: options.specDir,
@@ -94,7 +94,7 @@ program
     }
   });
 
-// Quick alias: `crucible "do something"` = `crucible run "do something"`
+// Quick alias: `forge "do something"` = `forge run "do something"`
 const args = process.argv.slice(2);
 if (args.length > 0 && !args[0].startsWith('-') && args[0] !== 'run' && args[0] !== 'status' && args[0] !== 'help' && args[0] !== '--help' && args[0] !== '-h' && args[0] !== '--version' && args[0] !== '-V') {
   process.argv.splice(2, 0, 'run');
@@ -104,11 +104,11 @@ if (args.length > 0 && !args[0].startsWith('-') && args[0] !== 'run' && args[0] 
 process.on('SIGINT', () => {
   console.log('\nInterrupted.');
   try {
-    const data = JSON.parse(readFileSync(join(process.cwd(), '.crucible', 'latest-session.json'), 'utf-8'));
+    const data = JSON.parse(readFileSync(join(process.cwd(), '.forge', 'latest-session.json'), 'utf-8'));
     if (data.sessionId) {
       console.log(`Session: ${data.sessionId}`);
-      console.log(`Resume: \x1b[36mcrucible run --resume ${data.sessionId} "continue"\x1b[0m`);
-      console.log(`Fork:   \x1b[36mcrucible run --fork ${data.sessionId} "try different approach"\x1b[0m`);
+      console.log(`Resume: \x1b[36mforge run --resume ${data.sessionId} "continue"\x1b[0m`);
+      console.log(`Fork:   \x1b[36mforge run --fork ${data.sessionId} "try different approach"\x1b[0m`);
     }
   } catch {}
   process.exit(0);

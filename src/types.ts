@@ -1,7 +1,7 @@
 /**
- * Options for running Crucible.
+ * Options for running Forge.
  */
-export interface CrucibleOptions {
+export interface ForgeOptions {
   /** The task prompt */
   prompt: string;
   /** Path to a spec file to read */
@@ -37,9 +37,9 @@ export interface CrucibleOptions {
 }
 
 /**
- * Result from a Crucible run, saved to .crucible/results/
+ * Result from a Forge run, saved to .forge/results/
  */
-export interface CrucibleResult {
+export interface ForgeResult {
   /** ISO timestamp when the run started */
   startedAt: string;
   /** ISO timestamp when the run completed */
