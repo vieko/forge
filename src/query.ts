@@ -1,5 +1,5 @@
 import { query as sdkQuery, type HookCallback } from '@anthropic-ai/claude-agent-sdk';
-import type { ForgeOptions, ForgeResult } from './types.js';
+import type { ForgeOptions, ForgeResult, AuditOptions } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
@@ -242,7 +242,7 @@ async function runVerification(workingDir: string, quiet: boolean): Promise<{ pa
 
 // Run a single spec
 async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string }): Promise<ForgeResult> {
-  const { prompt, specPath, specContent, cwd, model = 'opus', maxTurns = 100, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, fork, _silent = false, _onActivity, _runId } = options;
+  const { prompt, specPath, specContent, cwd, model = 'opus', maxTurns = 250, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, fork, _silent = false, _onActivity, _runId } = options;
   const effectiveResume = fork || resume;
   const isFork = !!fork;
 
@@ -428,8 +428,9 @@ Focus on delivering working code that meets the acceptance criteria.`;
         cwd: workingDir,
         model: modelName,
         tools: { type: 'preset', preset: 'claude_code' },
+        settingSources: ['user', 'project'],
         allowedTools: [
-          'Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob',
+          'Skill', 'Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob',
           'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'
         ],
         permissionMode: 'default',
@@ -506,11 +507,23 @@ Focus on delivering working code that meets the acceptance criteria.`;
 
             // Console output for non-silent mode
             if (!_silent) {
-              if (agentSpinner && activity) {
-                // Spinner mode: update single line with rotating verb
-                toolCount++;
-                const verb = AGENT_VERBS[toolCount % AGENT_VERBS.length];
-                agentSpinner.update(`${CMD}${verb}...${RESET}  ${activity}`);
+              if (agentSpinner) {
+                // Spinner mode: update single line
+                if (currentToolName === 'Task') {
+                  const agentType = input.subagent_type as string;
+                  const description = input.description as string;
+                  if (agentType && agentType !== currentAgent) {
+                    currentAgent = agentType;
+                    const desc = description ? `: ${description}` : '';
+                    toolCount++;
+                    const verb = AGENT_VERBS[toolCount % AGENT_VERBS.length];
+                    agentSpinner.update(`${CMD}${verb}...${RESET}  ${desc.substring(2)}`);
+                  }
+                } else if (activity) {
+                  toolCount++;
+                  const verb = AGENT_VERBS[toolCount % AGENT_VERBS.length];
+                  agentSpinner.update(`${CMD}${verb}...${RESET}  ${activity}`);
+                }
               } else if (currentToolName === 'Task') {
                 const agentType = input.subagent_type as string;
                 const description = input.description as string;
@@ -663,68 +676,55 @@ Fix these errors. The code should compile and build successfully.`;
 
           // If we got here without breaking, we're done
           return forgeResult;
-        } else if (message.subtype === 'error_during_execution') {
-          const errorText = JSON.stringify(message.errors, null, 2);
+        } else if (message.subtype === 'error_during_execution' || message.subtype === 'error_max_turns' || message.subtype === 'error_max_budget_usd') {
+          const status: ForgeResult['status'] =
+            message.subtype === 'error_max_turns' ? 'error_max_turns' :
+            message.subtype === 'error_max_budget_usd' ? 'error_budget' :
+            'error_execution';
+
+          const label =
+            message.subtype === 'error_max_turns' ? 'Hit maximum turns limit' :
+            message.subtype === 'error_max_budget_usd' ? 'Exceeded budget limit' :
+            'Execution error';
+
+          const errors = message.errors || [];
+          const errorDetail = errors.length > 0 ? errors.join('\n') : label;
+
+          const resultText = `# ${label}
+
+**Turns used**: ${message.num_turns}
+**Cost**: $${message.total_cost_usd?.toFixed(4) ?? 'N/A'}
+**Session**: ${message.session_id || sessionId || 'N/A'}
+
+## Errors
+
+${errors.length > 0 ? errors.map(e => `- ${e}`).join('\n') : '_No error details from SDK._'}
+
+## Resume
+
+\`\`\`bash
+forge run --resume ${message.session_id || sessionId} "continue"
+\`\`\``;
 
           const forgeResult: ForgeResult = {
             startedAt: startTime.toISOString(),
             completedAt: endTime.toISOString(),
             durationSeconds,
-            status: 'error_execution',
+            status,
             costUsd: message.total_cost_usd,
             specPath,
             prompt,
             model: modelName,
             cwd: workingDir,
-            sessionId,
+            sessionId: message.session_id || sessionId,
             forkedFrom: isFork ? fork : undefined,
-            error: errorText,
+            error: errorDetail,
             runId: _runId
           };
 
-          await saveResult(workingDir, forgeResult, `Error:\n${errorText}`);
+          await saveResult(workingDir, forgeResult, resultText);
 
-          throw new ForgeError(`Execution failed: ${errorText}`, forgeResult);
-        } else if (message.subtype === 'error_max_turns') {
-          const forgeResult: ForgeResult = {
-            startedAt: startTime.toISOString(),
-            completedAt: endTime.toISOString(),
-            durationSeconds,
-            status: 'error_max_turns',
-            costUsd: message.total_cost_usd,
-            specPath,
-            prompt,
-            model: modelName,
-            cwd: workingDir,
-            sessionId,
-            forkedFrom: isFork ? fork : undefined,
-            error: 'Hit maximum turns limit',
-            runId: _runId
-          };
-
-          await saveResult(workingDir, forgeResult, 'Error: Hit maximum turns limit');
-
-          throw new ForgeError('Hit maximum turns limit', forgeResult);
-        } else if (message.subtype === 'error_max_budget_usd') {
-          const forgeResult: ForgeResult = {
-            startedAt: startTime.toISOString(),
-            completedAt: endTime.toISOString(),
-            durationSeconds,
-            status: 'error_budget',
-            costUsd: message.total_cost_usd,
-            specPath,
-            prompt,
-            model: modelName,
-            cwd: workingDir,
-            sessionId,
-            forkedFrom: isFork ? fork : undefined,
-            error: 'Exceeded budget limit',
-            runId: _runId
-          };
-
-          await saveResult(workingDir, forgeResult, 'Error: Exceeded budget limit');
-
-          throw new ForgeError('Exceeded budget limit', forgeResult);
+          throw new ForgeError(label, forgeResult);
         }
       }
     }
@@ -885,7 +885,7 @@ function createSpecDisplay(specFiles: string[]) {
     // Clear and write each line; no trailing \n on last line to prevent scroll
     for (let i = 0; i < lines.length; i++) {
       const eol = i < lines.length - 1 ? '\n' : '';
-      process.stdout.write(`\x1B[2K${lines[i]}${eol}`);
+      process.stdout.write(`\x1B[2K\r${lines[i]}${eol}`);
     }
     linesDrawn = lines.length - 1; // cursor is ON last line, move up N-1 to reach first
     frameIndex++;
@@ -1279,5 +1279,383 @@ function printBatchSummary(
     }
     console.log(`  Cost:       ${BOLD}$${totalCost.toFixed(2)}${RESET}`);
     console.log(`  Result:     ${successCount === results.length ? '\x1b[32m' : '\x1b[33m'}${successCount}/${results.length} successful\x1b[0m`);
+  }
+}
+
+// ── Audit ───────────────────────────────────────────────────
+
+export async function runAudit(options: AuditOptions): Promise<void> {
+  const { specDir, prompt, model = 'opus', maxTurns = 250, verbose = false, quiet = false } = options;
+
+  if (!quiet) {
+    showBanner('SHAPED BY PROMPTS ▲ TEMPERED BY FIRE.');
+  }
+
+  // Resolve working directory
+  const workingDir = options.cwd ? (await fs.realpath(options.cwd)) : process.cwd();
+
+  // Validate working directory
+  try {
+    const stat = await fs.stat(workingDir);
+    if (!stat.isDirectory()) throw new Error(`Not a directory: ${workingDir}`);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`Directory not found: ${workingDir}`);
+    throw err;
+  }
+
+  // Read all .md files from specDir
+  const resolvedSpecDir = path.resolve(specDir);
+  let specFiles: string[];
+  try {
+    const files = await fs.readdir(resolvedSpecDir);
+    specFiles = files.filter(f => f.endsWith('.md')).sort();
+  } catch {
+    throw new Error(`Spec directory not found: ${resolvedSpecDir}`);
+  }
+
+  if (specFiles.length === 0) {
+    throw new Error(`No .md files found in ${resolvedSpecDir}`);
+  }
+
+  // Concatenate spec contents with filename headers
+  const specContents: string[] = [];
+  for (const file of specFiles) {
+    const content = await fs.readFile(path.join(resolvedSpecDir, file), 'utf-8');
+    specContents.push(`### ${file}\n\n${content}`);
+  }
+  const allSpecContents = specContents.join('\n\n---\n\n');
+
+  // Resolve output directory
+  const outputDir = options.outputDir
+    ? path.resolve(options.outputDir)
+    : path.join(resolvedSpecDir, 'audit');
+
+  // Warn if output dir is non-empty
+  try {
+    const existing = await fs.readdir(outputDir);
+    if (existing.length > 0 && !quiet) {
+      console.log(`\x1b[33m[forge]\x1b[0m Output directory is non-empty: ${outputDir}`);
+      console.log(`${DIM}[forge]${RESET} Existing files may be overwritten. Use ${CMD}--output-dir${RESET} to write elsewhere.\n`);
+    }
+  } catch {
+    // Directory doesn't exist yet — that's fine
+  }
+
+  // Ensure output directory exists
+  await fs.mkdir(outputDir, { recursive: true });
+
+  if (!quiet) {
+    console.log(`${DIM}Specs:${RESET}      ${specFiles.length} file(s) from ${DIM}${resolvedSpecDir}${RESET}`);
+    console.log(`${DIM}Output:${RESET}     ${DIM}${outputDir}${RESET}`);
+    console.log(`${DIM}Working dir:${RESET} ${workingDir}\n`);
+  }
+
+  // Construct audit prompt
+  const auditPrompt = `## Outcome
+
+Audit the codebase against the specifications below. For any work that
+remains incomplete, unimplemented, or incorrect, produce new spec files
+in ${outputDir}/.
+
+Each output spec must be:
+- A self-contained .md file that Forge can execute independently
+- Named descriptively (e.g., fix-auth-token-refresh.md)
+- Focused on a single concern
+- Written as an outcome, not a procedure
+
+## Specifications
+
+${allSpecContents}
+
+${prompt ? `## Additional Context\n\n${prompt}\n` : ''}
+## Acceptance Criteria
+
+- Every spec reviewed against the current codebase
+- All gaps, bugs, and incomplete work captured as new specs
+- Each new spec is actionable and independently executable
+- If fully implemented, produce no output specs
+- Output specs written to: ${outputDir}/`;
+
+  const modelName = model;
+  const startTime = new Date();
+
+  // Streaming / spinner state
+  let sessionId: string | undefined;
+  let currentToolName: string | null = null;
+  let toolInputJson = '';
+  let toolCount = 0;
+  const useSpinner = !verbose && !quiet;
+  let agentSpinner: ReturnType<typeof createInlineSpinner> | null = null;
+
+  // Hook: Bash command guardrails (same as runSingleSpec)
+  const blockedCommands: Array<{ pattern: RegExp; reason: string }> = [
+    { pattern: /rm\s+-[^\s]*r[^\s]*\s+\/(?:\s|$)/, reason: 'Recursive delete of root' },
+    { pattern: /rm\s+-[^\s]*r[^\s]*\s+~/, reason: 'Recursive delete of home' },
+    { pattern: /git\s+push\s.*--force/, reason: 'Git force push' },
+    { pattern: /git\s+push\s.*\s-f\b/, reason: 'Git force push' },
+    { pattern: /git\s+reset\s+--hard/, reason: 'Git hard reset' },
+    { pattern: /git\s+clean\s.*-[^\s]*f/, reason: 'Git clean with force' },
+    { pattern: /mkfs/, reason: 'Filesystem format' },
+    { pattern: /dd\s+if=\/dev\//, reason: 'Raw device operation' },
+    { pattern: /:\(\)\s*\{/, reason: 'Fork bomb' },
+  ];
+  const bashGuardrail: HookCallback = async (input) => {
+    const command = ((input as Record<string, unknown>).tool_input as Record<string, unknown>)?.command as string || '';
+    for (const { pattern, reason } of blockedCommands) {
+      if (pattern.test(command)) {
+        if (!quiet) console.log(`${DIM}[forge]${RESET} Blocked: ${reason}`);
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse' as const,
+            permissionDecision: 'deny' as const,
+            permissionDecisionReason: `[forge] ${reason}`,
+          },
+        };
+      }
+    }
+    return {};
+  };
+
+  // Hook: Stop handler
+  const latestSessionPath = path.join(workingDir, '.forge', 'latest-session.json');
+  const persistSession = async () => {
+    const state = { sessionId, startedAt: startTime.toISOString(), type: 'audit', model: modelName, cwd: workingDir };
+    await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
+    await fs.writeFile(latestSessionPath, JSON.stringify(state, null, 2));
+  };
+  const stopHandler: HookCallback = async () => {
+    try { await persistSession(); } catch {}
+    return {};
+  };
+
+  // Hook: Audit log
+  const auditPath = path.join(workingDir, '.forge', 'audit.jsonl');
+  const auditLog: HookCallback = async (input, toolUseID) => {
+    try {
+      const inp = input as Record<string, unknown>;
+      const entry = {
+        ts: new Date().toISOString(),
+        type: 'audit',
+        sessionId,
+        tool: inp.tool_name,
+        toolUseId: toolUseID,
+        input: inp.tool_input,
+      };
+      await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
+      await fs.appendFile(auditPath, JSON.stringify(entry) + '\n');
+    } catch {}
+    return {};
+  };
+
+  // Retry configuration
+  const maxRetries = 3;
+  const baseDelayMs = 5000;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      for await (const message of sdkQuery({
+        prompt: auditPrompt,
+        options: {
+          cwd: workingDir,
+          model: modelName,
+          tools: { type: 'preset', preset: 'claude_code' },
+          settingSources: ['user', 'project'],
+          allowedTools: [
+            'Skill', 'Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob',
+            'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'
+          ],
+          permissionMode: 'default',
+          includePartialMessages: true,
+          hooks: {
+            PreToolUse: [{ matcher: 'Bash', hooks: [bashGuardrail] }],
+            PostToolUse: [{ hooks: [auditLog] }],
+            Stop: [{ hooks: [stopHandler] }],
+          },
+          maxTurns,
+          maxBudgetUsd: 10.00,
+        }
+      })) {
+        // Capture session ID
+        if (message.type === 'system' && message.subtype === 'init') {
+          sessionId = message.session_id;
+          if (!quiet) console.log(`${DIM}[forge]${RESET} Session: ${DIM}${sessionId}${RESET}`);
+          persistSession().catch(() => {});
+          if (useSpinner && !agentSpinner) {
+            agentSpinner = createInlineSpinner(`${DIM}[forge]${RESET}`);
+            agentSpinner.update(`${CMD}${AGENT_VERBS[0]}...${RESET}`);
+            agentSpinner.start();
+          }
+        }
+
+        // Stream progress
+        if (message.type === 'stream_event' && !quiet) {
+          const event = message.event;
+
+          if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+            currentToolName = event.content_block.name;
+            toolInputJson = '';
+          } else if (event.type === 'content_block_delta') {
+            if (event.delta.type === 'text_delta' && verbose) {
+              process.stdout.write(event.delta.text);
+            } else if (event.delta.type === 'input_json_delta') {
+              toolInputJson += event.delta.partial_json;
+            }
+          } else if (event.type === 'content_block_stop' && currentToolName) {
+            try {
+              const input = JSON.parse(toolInputJson || '{}') as Record<string, unknown>;
+              let activity: string | undefined;
+              if (currentToolName === 'Write') {
+                const filePath = input.file_path as string;
+                if (filePath) activity = `Writing ${filePath.split('/').pop()}`;
+              } else if (currentToolName === 'Read') {
+                const filePath = input.file_path as string;
+                if (filePath) activity = `Reading ${filePath.split('/').pop()}`;
+              } else if (currentToolName === 'Grep') {
+                const pattern = input.pattern as string;
+                if (pattern) activity = `Grep: ${pattern.substring(0, 30)}`;
+              } else if (currentToolName === 'Glob') {
+                const pattern = input.pattern as string;
+                if (pattern) activity = `Glob: ${pattern.substring(0, 30)}`;
+              } else if (currentToolName === 'Bash') {
+                const cmd = input.command as string;
+                if (cmd) {
+                  const shortCmd = cmd.length > 40 ? cmd.substring(0, 37) + '...' : cmd;
+                  activity = `$ ${shortCmd}`;
+                }
+              }
+
+              if (agentSpinner && activity) {
+                toolCount++;
+                const verb = AGENT_VERBS[toolCount % AGENT_VERBS.length];
+                agentSpinner.update(`${CMD}${verb}...${RESET}  ${activity}`);
+              }
+            } catch {}
+            currentToolName = null;
+            toolInputJson = '';
+          }
+        }
+
+        // Handle result
+        if (message.type === 'result') {
+          if (agentSpinner) { agentSpinner.stop(); agentSpinner = null; }
+
+          const endTime = new Date();
+          const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
+
+          const resultText = message.subtype === 'success' ? (message.result || '') : '';
+
+          const status: ForgeResult['status'] =
+            message.subtype === 'success' ? 'success' :
+            message.subtype === 'error_max_turns' ? 'error_max_turns' :
+            message.subtype === 'error_max_budget_usd' ? 'error_budget' :
+            'error_execution';
+
+          const forgeResult: ForgeResult = {
+            startedAt: startTime.toISOString(),
+            completedAt: endTime.toISOString(),
+            durationSeconds,
+            status,
+            costUsd: message.total_cost_usd,
+            prompt: '(audit)',
+            model: modelName,
+            cwd: workingDir,
+            sessionId,
+            type: 'audit',
+          };
+
+          if (message.subtype !== 'success') {
+            const label =
+              message.subtype === 'error_max_turns' ? 'Hit maximum turns limit' :
+              message.subtype === 'error_max_budget_usd' ? 'Exceeded budget limit' :
+              'Execution error';
+            const errors = message.errors || [];
+            const errorDetail = errors.length > 0 ? errors.join('\n') : label;
+
+            const errorResultText = `# ${label}
+
+**Turns used**: ${message.num_turns}
+**Cost**: $${message.total_cost_usd?.toFixed(4) ?? 'N/A'}
+**Session**: ${message.session_id || sessionId || 'N/A'}
+
+## Errors
+
+${errors.length > 0 ? errors.map((e: string) => `- ${e}`).join('\n') : '_No error details from SDK._'}
+
+## Resume
+
+\`\`\`bash
+forge run --resume ${message.session_id || sessionId} "continue"
+\`\`\``;
+
+            forgeResult.error = errorDetail;
+            forgeResult.sessionId = message.session_id || sessionId;
+            await saveResult(workingDir, forgeResult, errorResultText);
+            throw new ForgeError(label, forgeResult);
+          }
+
+          await saveResult(workingDir, forgeResult, resultText);
+
+          // Post-query: list generated spec files
+          let outputSpecs: string[] = [];
+          try {
+            const files = await fs.readdir(outputDir);
+            outputSpecs = files.filter(f => f.endsWith('.md')).sort();
+          } catch {}
+
+          if (!quiet) {
+            console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+            console.log(`  Duration: ${BOLD}${durationSeconds.toFixed(1)}s${RESET}`);
+            if (message.total_cost_usd !== undefined) {
+              console.log(`  Cost:     ${BOLD}$${message.total_cost_usd.toFixed(4)}${RESET}`);
+            }
+
+            if (outputSpecs.length === 0) {
+              console.log(`\n  \x1b[32mAll specs fully implemented — no remaining work.\x1b[0m`);
+            } else {
+              console.log(`\n  ${BOLD}${outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
+              outputSpecs.forEach((f, i) => console.log(`    ${DIM}${i + 1}.${RESET} ${f}`));
+              console.log(`\n  Next step:\n    ${CMD}forge run --spec-dir ${outputDir} -C ${workingDir} "implement remaining work"${RESET}`);
+            }
+            console.log('');
+          }
+
+          return;
+        }
+      }
+      // If we reach here without error, break out of retry loop
+      break;
+    } catch (error) {
+      if (agentSpinner) { agentSpinner.stop(); agentSpinner = null; }
+
+      if (error instanceof ForgeError) throw error;
+
+      if (isTransientError(error) && attempt < maxRetries) {
+        const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
+        if (!quiet) {
+          console.log(`\n${DIM}[forge]${RESET} \x1b[33mTransient error:\x1b[0m ${error instanceof Error ? error.message : 'Unknown error'}`);
+          console.log(`${DIM}[forge]${RESET} Retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+        }
+        await sleep(delayMs);
+        continue;
+      }
+
+      const endTime = new Date();
+      const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
+      const errMsg = error instanceof Error ? error.message : 'Unknown error';
+      const forgeResult: ForgeResult = {
+        startedAt: startTime.toISOString(),
+        completedAt: endTime.toISOString(),
+        durationSeconds,
+        status: 'error_execution',
+        prompt: '(audit)',
+        model: modelName,
+        cwd: workingDir,
+        sessionId,
+        type: 'audit',
+        error: errMsg,
+      };
+      await saveResult(workingDir, forgeResult, `Error:\n${errMsg}`).catch(() => {});
+      throw new ForgeError(errMsg, forgeResult);
+    }
   }
 }

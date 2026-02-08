@@ -66,4 +66,28 @@ export interface ForgeResult {
   error?: string;
   /** Batch run ID for grouping specs in the same run */
   runId?: string;
+  /** Type of run */
+  type?: 'run' | 'audit';
+}
+
+/**
+ * Options for running an audit.
+ */
+export interface AuditOptions {
+  /** Path to a directory of spec files to audit against */
+  specDir: string;
+  /** Output directory for generated spec files (default: <specDir>/audit/) */
+  outputDir?: string;
+  /** Additional context prompt */
+  prompt?: string;
+  /** Working directory (target repo) */
+  cwd?: string;
+  /** Model to use (shorthand like 'opus'/'sonnet' or full ID) */
+  model?: string;
+  /** Maximum turns (default: 100) */
+  maxTurns?: number;
+  /** Show detailed output */
+  verbose?: boolean;
+  /** Suppress progress output */
+  quiet?: boolean;
 }

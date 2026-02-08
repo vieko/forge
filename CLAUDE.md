@@ -57,6 +57,12 @@ forge run --fork <session-id> "try different approach"
 # Quick alias (no 'run' needed)
 forge "simple task"
 
+# Audit codebase against specs
+forge audit specs/                              # Audit, output to specs/audit/
+forge audit specs/ -C ~/target-repo             # Audit a different repo
+forge audit specs/ -o ./remediation/            # Custom output directory
+forge audit specs/ "focus on auth module"       # With additional context
+
 # View run results
 forge status                    # Latest run
 forge status --all              # All runs
@@ -115,6 +121,7 @@ src/
 8. **Rerun failed** — `--rerun-failed` finds failed specs from latest batch and reruns them
 9. **Status** — `forge status` shows results from recent runs grouped by batch
 10. **Retry on transient errors** — auto-retries rate limits and network errors (3 attempts, exponential backoff)
+11. **Audit** — `forge audit` reviews the codebase against specs via a single read-heavy `query()` call and produces new spec files for any remaining work; output feeds directly into `forge run --spec-dir`
 
 ## Development
 
