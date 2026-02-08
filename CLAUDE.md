@@ -73,7 +73,7 @@ forge status -C ~/other-repo    # Different repo
 ## Architecture
 
 ```
-~1050 lines total
+~1900 lines total
 
 User Prompt
     ↓
@@ -96,9 +96,9 @@ System-level verification                │ braille spinner display,
 
 ```
 src/
-├── index.ts    # CLI entry + arg parsing (~110 lines)
-├── query.ts    # SDK wrapper, verification, streaming, parallel, status (~1000 lines)
-└── types.ts    # TypeScript types (~65 lines)
+├── index.ts    # CLI entry + arg parsing (~160 lines)
+├── query.ts    # SDK wrapper, verification, streaming, parallel, audit (~1660 lines)
+└── types.ts    # TypeScript types (~95 lines)
 
 .forge/
 ├── audit.jsonl   # Tool call audit log (with spec filename)
