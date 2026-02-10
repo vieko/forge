@@ -240,7 +240,395 @@ async function runVerification(workingDir: string, quiet: boolean): Promise<{ pa
   };
 }
 
-// Run a single spec
+// ── Shared SDK query core ────────────────────────────────────
+
+// What callers pass to runQuery()
+interface QueryConfig {
+  prompt: string;
+  workingDir: string;
+  model: string;
+  maxTurns: number;
+  maxBudgetUsd: number;
+  verbose: boolean;
+  quiet: boolean;
+  silent: boolean;
+  onActivity?: (detail: string) => void;
+  auditLogExtra?: Record<string, unknown>;
+  sessionExtra?: Record<string, unknown>;
+  resume?: string;
+  forkSession?: boolean;
+}
+
+// What runQuery() returns on success
+interface QueryResult {
+  resultText: string;
+  costUsd?: number;
+  sessionId?: string;
+  durationSeconds: number;
+  numTurns?: number;
+}
+
+// Bash commands that are always blocked
+const BLOCKED_COMMANDS: Array<{ pattern: RegExp; reason: string }> = [
+  { pattern: /rm\s+-[^\s]*r[^\s]*\s+\/(?:\s|$)/, reason: 'Recursive delete of root' },
+  { pattern: /rm\s+-[^\s]*r[^\s]*\s+~/, reason: 'Recursive delete of home' },
+  { pattern: /git\s+push\s.*--force/, reason: 'Git force push' },
+  { pattern: /git\s+push\s.*\s-f\b/, reason: 'Git force push' },
+  { pattern: /git\s+reset\s+--hard/, reason: 'Git hard reset' },
+  { pattern: /git\s+clean\s.*-[^\s]*f/, reason: 'Git clean with force' },
+  { pattern: /mkfs/, reason: 'Filesystem format' },
+  { pattern: /dd\s+if=\/dev\//, reason: 'Raw device operation' },
+  { pattern: /:\(\)\s*\{/, reason: 'Fork bomb' },
+];
+
+async function runQuery(config: QueryConfig): Promise<QueryResult> {
+  const {
+    prompt, workingDir, model: modelName, maxTurns, maxBudgetUsd,
+    verbose, quiet, silent, onActivity,
+    auditLogExtra = {}, sessionExtra = {},
+    resume, forkSession,
+  } = config;
+
+  const startTime = new Date();
+  let sessionId: string | undefined;
+
+  // Streaming state
+  let currentAgent: string | null = null;
+  let currentToolName: string | null = null;
+  let toolInputJson = '';
+  let toolCount = 0;
+
+  // Spinner
+  const useSpinner = !silent && !verbose && !quiet;
+  let agentSpinner: ReturnType<typeof createInlineSpinner> | null = null;
+
+  // Progress mode: 'spinner' | 'verbose' | 'silent'
+  const progressMode = verbose ? 'verbose' : silent ? 'silent' : 'spinner';
+
+  // Hook: Bash command guardrails
+  const bashGuardrail: HookCallback = async (input) => {
+    const command = ((input as Record<string, unknown>).tool_input as Record<string, unknown>)?.command as string || '';
+    for (const { pattern, reason } of BLOCKED_COMMANDS) {
+      if (pattern.test(command)) {
+        if (!quiet) console.log(`${DIM}[forge]${RESET} Blocked: ${reason}`);
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse' as const,
+            permissionDecision: 'deny' as const,
+            permissionDecisionReason: `[forge] ${reason}`,
+          },
+        };
+      }
+    }
+    return {};
+  };
+
+  // Hook: Stop handler — persist session state for resume on interrupt
+  const latestSessionPath = path.join(workingDir, '.forge', 'latest-session.json');
+  const persistSession = async () => {
+    const state = { sessionId, startedAt: startTime.toISOString(), model: modelName, cwd: workingDir, ...sessionExtra };
+    await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
+    await fs.writeFile(latestSessionPath, JSON.stringify(state, null, 2));
+  };
+  const stopHandler: HookCallback = async () => {
+    try { await persistSession(); } catch {}
+    return {};
+  };
+
+  // Hook: Tool call audit log
+  const auditPath = path.join(workingDir, '.forge', 'audit.jsonl');
+  const auditLog: HookCallback = async (input, toolUseID) => {
+    try {
+      const inp = input as Record<string, unknown>;
+      const entry = {
+        ts: new Date().toISOString(),
+        ...auditLogExtra,
+        sessionId,
+        tool: inp.tool_name,
+        toolUseId: toolUseID,
+        input: inp.tool_input,
+      };
+      await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
+      await fs.appendFile(auditPath, JSON.stringify(entry) + '\n');
+    } catch {
+      // Never crash on audit failures
+    }
+    return {};
+  };
+
+  // Derive activity description from a tool call
+  function deriveActivity(toolName: string, input: Record<string, unknown>): string | undefined {
+    if (toolName === 'Edit' || toolName === 'Write') {
+      const filePath = input.file_path as string;
+      if (filePath) return `${toolName === 'Write' ? 'Writing' : 'Editing'} ${filePath.split('/').pop()}`;
+    } else if (toolName === 'Read') {
+      const filePath = input.file_path as string;
+      if (filePath) return `Reading ${filePath.split('/').pop()}`;
+    } else if (toolName === 'Bash') {
+      const cmd = input.command as string;
+      if (cmd) {
+        const shortCmd = cmd.length > 40 ? cmd.substring(0, 37) + '...' : cmd;
+        return `$ ${shortCmd}`;
+      }
+    } else if (toolName === 'Grep') {
+      const pattern = input.pattern as string;
+      if (pattern) return `Grep: ${pattern.substring(0, 30)}`;
+    } else if (toolName === 'Glob') {
+      const pattern = input.pattern as string;
+      if (pattern) return `Glob: ${pattern.substring(0, 30)}`;
+    } else if (toolName === 'TaskCreate') {
+      const subject = input.subject as string;
+      if (subject) return `Task: ${subject.substring(0, 35)}`;
+    }
+    return undefined;
+  }
+
+  // Retry configuration
+  const maxRetries = 3;
+  const baseDelayMs = 5000; // 5 seconds, doubles each retry
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      for await (const message of sdkQuery({
+        prompt,
+        options: {
+          cwd: workingDir,
+          model: modelName,
+          tools: { type: 'preset', preset: 'claude_code' },
+          settingSources: ['user', 'project'],
+          allowedTools: [
+            'Skill', 'Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob',
+            'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'
+          ],
+          permissionMode: 'default',
+          includePartialMessages: true,
+          hooks: {
+            PreToolUse: [{ matcher: 'Bash', hooks: [bashGuardrail] }],
+            PostToolUse: [{ hooks: [auditLog] }],
+            Stop: [{ hooks: [stopHandler] }],
+          },
+          maxTurns,
+          maxBudgetUsd,
+          ...(resume && { resume }),
+          ...(forkSession && { forkSession: true }),
+        }
+      })) {
+        // Capture session ID from init message
+        if (message.type === 'system' && message.subtype === 'init') {
+          sessionId = message.session_id;
+          if (!quiet) console.log(`${DIM}[forge]${RESET} Session: ${DIM}${sessionId}${RESET}`);
+          if (!quiet && forkSession && resume) console.log(`${DIM}[forge]${RESET} Forked from: ${DIM}${resume}${RESET}`);
+          persistSession().catch(() => {});
+          if (useSpinner && !agentSpinner) {
+            agentSpinner = createInlineSpinner(`${DIM}[forge]${RESET}`);
+            agentSpinner.update(`${CMD}${AGENT_VERBS[0]}...${RESET}`);
+            agentSpinner.start();
+          }
+        }
+
+        // Stream real-time progress via partial messages
+        if (message.type === 'stream_event' && (!quiet || onActivity)) {
+          const event = message.event;
+
+          if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+            currentToolName = event.content_block.name;
+            toolInputJson = '';
+          } else if (event.type === 'content_block_delta') {
+            if (event.delta.type === 'text_delta' && progressMode === 'verbose') {
+              process.stdout.write(event.delta.text);
+            } else if (event.delta.type === 'input_json_delta') {
+              toolInputJson += event.delta.partial_json;
+            }
+          } else if (event.type === 'content_block_stop' && currentToolName) {
+            try {
+              const input = JSON.parse(toolInputJson || '{}') as Record<string, unknown>;
+              const activity = deriveActivity(currentToolName, input);
+
+              if (onActivity && activity) {
+                onActivity(activity);
+              }
+
+              // Console output based on progress mode
+              if (progressMode === 'spinner' && agentSpinner) {
+                if (currentToolName === 'Task') {
+                  const agentType = input.subagent_type as string;
+                  const description = input.description as string;
+                  if (agentType && agentType !== currentAgent) {
+                    currentAgent = agentType;
+                    const desc = description ? `: ${description}` : '';
+                    toolCount++;
+                    const verb = AGENT_VERBS[toolCount % AGENT_VERBS.length];
+                    agentSpinner.update(`${CMD}${verb}...${RESET}  ${desc.substring(2)}`);
+                  }
+                } else if (activity) {
+                  toolCount++;
+                  const verb = AGENT_VERBS[toolCount % AGENT_VERBS.length];
+                  agentSpinner.update(`${CMD}${verb}...${RESET}  ${activity}`);
+                }
+              } else if (progressMode === 'verbose') {
+                if (currentToolName === 'Task') {
+                  const agentType = input.subagent_type as string;
+                  const description = input.description as string;
+                  if (agentType && agentType !== currentAgent) {
+                    currentAgent = agentType;
+                    const desc = description ? `: ${description}` : '';
+                    console.log(formatProgress(currentAgent, `Starting${desc}`));
+                  }
+                }
+                // In verbose mode, text deltas already stream above
+              } else if (progressMode === 'spinner' && !agentSpinner) {
+                // Non-spinner fallback (quiet=false but spinner not yet started)
+                if (currentToolName === 'Task') {
+                  const agentType = input.subagent_type as string;
+                  const description = input.description as string;
+                  if (agentType && agentType !== currentAgent) {
+                    currentAgent = agentType;
+                    const desc = description ? `: ${description}` : '';
+                    console.log(formatProgress(currentAgent, `Starting${desc}`));
+                  }
+                } else if (currentToolName === 'TaskCreate') {
+                  const subject = input.subject as string;
+                  if (subject) console.log(formatProgress(currentAgent, `Creating task: ${subject}`));
+                } else if (currentToolName === 'TaskUpdate') {
+                  const status = input.status as string;
+                  if (status === 'completed') console.log(formatProgress(currentAgent, 'Task completed'));
+                } else if (currentToolName === 'Edit' || currentToolName === 'Write') {
+                  const filePath = input.file_path as string;
+                  if (filePath) {
+                    const fileName = filePath.split('/').pop();
+                    console.log(formatProgress(currentAgent, `Editing ${fileName}`));
+                  }
+                } else if (currentToolName === 'Bash') {
+                  const cmd = input.command as string;
+                  if (cmd) {
+                    const shortCmd = cmd.length > 50 ? cmd.substring(0, 47) + '...' : cmd;
+                    console.log(formatProgress(currentAgent, `Running: ${shortCmd}`));
+                  }
+                }
+              }
+              // progressMode === 'silent': no output
+            } catch {
+              // JSON parse failed - skip progress for this tool
+            }
+            currentToolName = null;
+            toolInputJson = '';
+          }
+        }
+
+        if (message.type === 'result') {
+          // Stop agent spinner before any result output
+          if (agentSpinner) { agentSpinner.stop(); agentSpinner = null; }
+
+          const endTime = new Date();
+          const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
+
+          if (message.subtype === 'success') {
+            return {
+              resultText: message.result || '',
+              costUsd: message.total_cost_usd,
+              sessionId: sessionId,
+              durationSeconds,
+              numTurns: message.num_turns,
+            };
+          }
+
+          // Error result (max_turns, budget, execution)
+          const status: ForgeResult['status'] =
+            message.subtype === 'error_max_turns' ? 'error_max_turns' :
+            message.subtype === 'error_max_budget_usd' ? 'error_budget' :
+            'error_execution';
+
+          const label =
+            message.subtype === 'error_max_turns' ? 'Hit maximum turns limit' :
+            message.subtype === 'error_max_budget_usd' ? 'Exceeded budget limit' :
+            'Execution error';
+
+          const errors = message.errors || [];
+          const errorDetail = errors.length > 0 ? errors.join('\n') : label;
+
+          const errorResultText = `# ${label}
+
+**Turns used**: ${message.num_turns}
+**Cost**: $${message.total_cost_usd?.toFixed(4) ?? 'N/A'}
+**Session**: ${message.session_id || sessionId || 'N/A'}
+
+## Errors
+
+${errors.length > 0 ? errors.map((e: string) => `- ${e}`).join('\n') : '_No error details from SDK._'}
+
+## Resume
+
+\`\`\`bash
+forge run --resume ${message.session_id || sessionId} "continue"
+\`\`\``;
+
+          const forgeResult: ForgeResult = {
+            startedAt: startTime.toISOString(),
+            completedAt: endTime.toISOString(),
+            durationSeconds,
+            status,
+            costUsd: message.total_cost_usd,
+            prompt: config.prompt,
+            model: modelName,
+            cwd: workingDir,
+            sessionId: message.session_id || sessionId,
+            error: errorDetail,
+          };
+
+          await saveResult(workingDir, forgeResult, errorResultText);
+          throw new ForgeError(label, forgeResult);
+        }
+      }
+      // If we reach here without error, break out of retry loop
+      break;
+    } catch (error) {
+      // Stop spinner if still running
+      if (agentSpinner) { agentSpinner.stop(); agentSpinner = null; }
+
+      if (error instanceof Error && error.message.includes('not installed')) {
+        throw new Error('Agent SDK not properly installed. Run: bun install @anthropic-ai/claude-agent-sdk');
+      }
+
+      // Check if error is transient and we have retries left
+      if (isTransientError(error) && attempt < maxRetries) {
+        const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
+        if (!quiet) {
+          console.log(`\n${DIM}[forge]${RESET} \x1b[33mTransient error:\x1b[0m ${error instanceof Error ? error.message : 'Unknown error'}`);
+          console.log(`${DIM}[forge]${RESET} Retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+        }
+        await sleep(delayMs);
+        continue;
+      }
+
+      // Non-transient error or out of retries — save result before throwing
+      if (error instanceof ForgeError) {
+        throw error;
+      }
+      const endTime = new Date();
+      const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
+      const errMsg = error instanceof Error ? error.message : 'Unknown error';
+      const forgeResult: ForgeResult = {
+        startedAt: startTime.toISOString(),
+        completedAt: endTime.toISOString(),
+        durationSeconds,
+        status: 'error_execution',
+        prompt: config.prompt,
+        model: modelName,
+        cwd: workingDir,
+        sessionId,
+        error: errMsg,
+      };
+      await saveResult(workingDir, forgeResult, `Error:\n${errMsg}`).catch(() => {});
+      throw new ForgeError(errMsg, forgeResult);
+    }
+  }
+
+  // Should not reach here — success returns, errors throw
+  throw new ForgeError('Query completed without result');
+}
+
+// ── runSingleSpec ────────────────────────────────────────────
+
 async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string }): Promise<ForgeResult> {
   const { prompt, specPath, specContent, cwd, model = 'opus', maxTurns = 250, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, fork, _silent = false, _onActivity, _runId } = options;
   const effectiveResume = fork || resume;
@@ -324,10 +712,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
   let verifyAttempt = 0;
   let currentPrompt = workflowPrompt;
 
-  // SDK accepts shorthand model names
   const modelName = model;
-
-  // Track timing
   const startTime = new Date();
 
   // Run the query
@@ -340,252 +725,41 @@ Focus on delivering working code that meets the acceptance criteria.`;
     }
   }
 
-  // Track current agent for progress output
-  let currentAgent: string | null = null;
-  // Streaming state
-  let currentToolName: string | null = null;
-  let toolInputJson = '';
-  // Session tracking
-  let sessionId: string | undefined;
-  // Inline spinner for non-verbose single-spec runs
-  const useSpinner = !_silent && !verbose && !quiet;
-  let agentSpinner: ReturnType<typeof createInlineSpinner> | null = null;
-  let toolCount = 0;
-
-  // Hook: Bash command guardrails
-  const blockedCommands: Array<{ pattern: RegExp; reason: string }> = [
-    { pattern: /rm\s+-[^\s]*r[^\s]*\s+\/(?:\s|$)/, reason: 'Recursive delete of root' },
-    { pattern: /rm\s+-[^\s]*r[^\s]*\s+~/, reason: 'Recursive delete of home' },
-    { pattern: /git\s+push\s.*--force/, reason: 'Git force push' },
-    { pattern: /git\s+push\s.*\s-f\b/, reason: 'Git force push' },
-    { pattern: /git\s+reset\s+--hard/, reason: 'Git hard reset' },
-    { pattern: /git\s+clean\s.*-[^\s]*f/, reason: 'Git clean with force' },
-    { pattern: /mkfs/, reason: 'Filesystem format' },
-    { pattern: /dd\s+if=\/dev\//, reason: 'Raw device operation' },
-    { pattern: /:\(\)\s*\{/, reason: 'Fork bomb' },
-  ];
-  const bashGuardrail: HookCallback = async (input) => {
-    const command = ((input as Record<string, unknown>).tool_input as Record<string, unknown>)?.command as string || '';
-    for (const { pattern, reason } of blockedCommands) {
-      if (pattern.test(command)) {
-        if (!quiet) console.log(`${DIM}[forge]${RESET} Blocked: ${reason}`);
-        return {
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse' as const,
-            permissionDecision: 'deny' as const,
-            permissionDecisionReason: `[forge] ${reason}`,
-          },
-        };
-      }
-    }
-    return {};
-  };
-
-  // Hook: Stop handler - persist session state for resume on interrupt
-  const latestSessionPath = path.join(workingDir, '.forge', 'latest-session.json');
-  const persistSession = async () => {
-    const state = { sessionId, startedAt: startTime.toISOString(), prompt, model: modelName, cwd: workingDir, ...(isFork && { forkedFrom: fork }) };
-    await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
-    await fs.writeFile(latestSessionPath, JSON.stringify(state, null, 2));
-  };
-  const stopHandler: HookCallback = async () => {
-    try { await persistSession(); } catch {}
-    return {};
-  };
-
-  // Hook: Tool call audit log
-  const auditPath = path.join(workingDir, '.forge', 'audit.jsonl');
-  const auditLog: HookCallback = async (input, toolUseID) => {
-    try {
-      const inp = input as Record<string, unknown>;
-      const entry = {
-        ts: new Date().toISOString(),
-        spec: specPath ? path.basename(specPath) : undefined,
-        sessionId,
-        tool: inp.tool_name,
-        toolUseId: toolUseID,
-        input: inp.tool_input,
-      };
-      await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
-      await fs.appendFile(auditPath, JSON.stringify(entry) + '\n');
-    } catch {
-      // Never crash on audit failures
-    }
-    return {};
-  };
-
-  // Retry configuration
-  const maxRetries = 3;
-  const baseDelayMs = 5000; // 5 seconds, doubles each retry
-
   // Main execution + verification loop
   while (verifyAttempt < maxVerifyAttempts) {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      for await (const message of sdkQuery({
+    const qr = await runQuery({
       prompt: currentPrompt,
-      options: {
-        cwd: workingDir,
-        model: modelName,
-        tools: { type: 'preset', preset: 'claude_code' },
-        settingSources: ['user', 'project'],
-        allowedTools: [
-          'Skill', 'Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob',
-          'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'
-        ],
-        permissionMode: 'default',
-        includePartialMessages: true,
-        hooks: {
-          PreToolUse: [{ matcher: 'Bash', hooks: [bashGuardrail] }],
-          PostToolUse: [{ hooks: [auditLog] }],
-          Stop: [{ hooks: [stopHandler] }],
-        },
-        maxTurns: dryRun ? 20 : maxTurns,
-        maxBudgetUsd: dryRun ? 5.00 : 50.00,
-        ...(effectiveResume && { resume: effectiveResume }),
-        ...(isFork && { forkSession: true })
-      }
-    })) {
-      // Capture session ID from init message
-      if (message.type === 'system' && message.subtype === 'init') {
-        sessionId = message.session_id;
-        if (!quiet) console.log(`${DIM}[forge]${RESET} Session: ${DIM}${sessionId}${RESET}`);
-        if (!quiet && isFork) console.log(`${DIM}[forge]${RESET} Forked from: ${DIM}${fork}${RESET}`);
-        persistSession().catch(() => {});
-        if (useSpinner && !agentSpinner) {
-          agentSpinner = createInlineSpinner(`${DIM}[forge]${RESET}`);
-          agentSpinner.update(`${CMD}${AGENT_VERBS[0]}...${RESET}`);
-          agentSpinner.start();
-        }
-      }
+      workingDir,
+      model: modelName,
+      maxTurns: dryRun ? 20 : maxTurns,
+      maxBudgetUsd: dryRun ? 5.00 : 50.00,
+      verbose,
+      quiet,
+      silent: _silent,
+      onActivity: _onActivity,
+      auditLogExtra: specPath ? { spec: path.basename(specPath) } : {},
+      sessionExtra: { prompt, ...(isFork && { forkedFrom: fork }) },
+      resume: effectiveResume,
+      forkSession: isFork,
+    });
 
-      // Stream real-time progress via partial messages
-      if (message.type === 'stream_event' && (!quiet || _onActivity)) {
-        const event = message.event;
+    const endTime = new Date();
+    const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
 
-        if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
-          currentToolName = event.content_block.name;
-          toolInputJson = '';
-        } else if (event.type === 'content_block_delta') {
-          if (event.delta.type === 'text_delta' && verbose && !_silent) {
-            process.stdout.write(event.delta.text);
-          } else if (event.delta.type === 'input_json_delta') {
-            toolInputJson += event.delta.partial_json;
+    // Run verification (unless dry-run or plan-only)
+    if (!dryRun && !planOnly) {
+      if (!quiet) console.log(`${DIM}[forge]${RESET} Running verification...`);
+      const verification = await runVerification(workingDir, quiet);
+
+      if (!verification.passed) {
+        verifyAttempt++;
+        if (verifyAttempt < maxVerifyAttempts) {
+          if (!quiet) {
+            console.log(`\n${DIM}[forge]${RESET} \x1b[33mVerification failed\x1b[0m (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
+            console.log(`${DIM}[forge]${RESET} Sending errors back to agent for fixes...\n`);
           }
-        } else if (event.type === 'content_block_stop' && currentToolName) {
-          try {
-            const input = JSON.parse(toolInputJson || '{}') as Record<string, unknown>;
-
-            // Derive activity description for parallel display
-            let activity: string | undefined;
-            if (currentToolName === 'Edit' || currentToolName === 'Write') {
-              const filePath = input.file_path as string;
-              if (filePath) activity = `Editing ${filePath.split('/').pop()}`;
-            } else if (currentToolName === 'Read') {
-              const filePath = input.file_path as string;
-              if (filePath) activity = `Reading ${filePath.split('/').pop()}`;
-            } else if (currentToolName === 'Bash') {
-              const cmd = input.command as string;
-              if (cmd) {
-                const shortCmd = cmd.length > 40 ? cmd.substring(0, 37) + '...' : cmd;
-                activity = `$ ${shortCmd}`;
-              }
-            } else if (currentToolName === 'Grep') {
-              const pattern = input.pattern as string;
-              if (pattern) activity = `Grep: ${pattern.substring(0, 30)}`;
-            } else if (currentToolName === 'Glob') {
-              const pattern = input.pattern as string;
-              if (pattern) activity = `Glob: ${pattern.substring(0, 30)}`;
-            } else if (currentToolName === 'TaskCreate') {
-              const subject = input.subject as string;
-              if (subject) activity = `Task: ${subject.substring(0, 35)}`;
-            }
-
-            if (_onActivity && activity) {
-              _onActivity(activity);
-            }
-
-            // Console output for non-silent mode
-            if (!_silent) {
-              if (agentSpinner) {
-                // Spinner mode: update single line
-                if (currentToolName === 'Task') {
-                  const agentType = input.subagent_type as string;
-                  const description = input.description as string;
-                  if (agentType && agentType !== currentAgent) {
-                    currentAgent = agentType;
-                    const desc = description ? `: ${description}` : '';
-                    toolCount++;
-                    const verb = AGENT_VERBS[toolCount % AGENT_VERBS.length];
-                    agentSpinner.update(`${CMD}${verb}...${RESET}  ${desc.substring(2)}`);
-                  }
-                } else if (activity) {
-                  toolCount++;
-                  const verb = AGENT_VERBS[toolCount % AGENT_VERBS.length];
-                  agentSpinner.update(`${CMD}${verb}...${RESET}  ${activity}`);
-                }
-              } else if (currentToolName === 'Task') {
-                const agentType = input.subagent_type as string;
-                const description = input.description as string;
-                if (agentType && agentType !== currentAgent) {
-                  currentAgent = agentType;
-                  const desc = description ? `: ${description}` : '';
-                  console.log(formatProgress(currentAgent, `Starting${desc}`));
-                }
-              } else if (!verbose) {
-                if (currentToolName === 'TaskCreate') {
-                  const subject = input.subject as string;
-                  if (subject) console.log(formatProgress(currentAgent, `Creating task: ${subject}`));
-                } else if (currentToolName === 'TaskUpdate') {
-                  const status = input.status as string;
-                  if (status === 'completed') console.log(formatProgress(currentAgent, 'Task completed'));
-                } else if (currentToolName === 'Edit' || currentToolName === 'Write') {
-                  const filePath = input.file_path as string;
-                  if (filePath) {
-                    const fileName = filePath.split('/').pop();
-                    console.log(formatProgress(currentAgent, `Editing ${fileName}`));
-                  }
-                } else if (currentToolName === 'Bash') {
-                  const cmd = input.command as string;
-                  if (cmd) {
-                    const shortCmd = cmd.length > 50 ? cmd.substring(0, 47) + '...' : cmd;
-                    console.log(formatProgress(currentAgent, `Running: ${shortCmd}`));
-                  }
-                }
-              }
-            }
-          } catch {
-            // JSON parse failed - skip progress for this tool
-          }
-          currentToolName = null;
-          toolInputJson = '';
-        }
-      }
-
-      if (message.type === 'result') {
-        // Stop agent spinner before any result output
-        if (agentSpinner) { agentSpinner.stop(); agentSpinner = null; }
-
-        const endTime = new Date();
-        const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
-
-        if (message.subtype === 'success') {
-          const resultText = message.result || '';
-
-          // Run verification (unless dry-run or plan-only)
-          if (!dryRun && !planOnly) {
-            if (!quiet) console.log(`${DIM}[forge]${RESET} Running verification...`);
-            const verification = await runVerification(workingDir, quiet);
-
-            if (!verification.passed) {
-              verifyAttempt++;
-              if (verifyAttempt < maxVerifyAttempts) {
-                if (!quiet) {
-                  console.log(`\n${DIM}[forge]${RESET} \x1b[33mVerification failed\x1b[0m (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
-                  console.log(`${DIM}[forge]${RESET} Sending errors back to agent for fixes...\n`);
-                }
-                // Update prompt with errors for next iteration
-                currentPrompt = `## Previous Work
+          // Update prompt with errors for next iteration
+          currentPrompt = `## Previous Work
 
 The implementation is mostly complete but verification failed.
 
@@ -596,189 +770,88 @@ ${verification.errors}
 ## Instructions
 
 Fix these errors. The code should compile and build successfully.`;
-                break; // Break out of message loop to start new query
-              } else {
-                if (!quiet) {
-                  console.log(`\n${DIM}[forge]${RESET} \x1b[31mVerification failed after ${maxVerifyAttempts} attempts\x1b[0m`);
-                  console.log(`${DIM}[forge]${RESET} Errors:\n` + verification.errors);
-                }
-              }
-            } else {
-              if (!quiet) console.log(`${DIM}[forge]${RESET} \x1b[32mVerification passed!\x1b[0m\n`);
-            }
+          continue; // Next verification attempt
+        } else {
+          if (!quiet) {
+            console.log(`\n${DIM}[forge]${RESET} \x1b[31mVerification failed after ${maxVerifyAttempts} attempts\x1b[0m`);
+            console.log(`${DIM}[forge]${RESET} Errors:\n` + verification.errors);
           }
-
-          // Save result to .forge/results/
-          const forgeResult: ForgeResult = {
-            startedAt: startTime.toISOString(),
-            completedAt: endTime.toISOString(),
-            durationSeconds,
-            status: 'success',
-            costUsd: message.total_cost_usd,
-            specPath,
-            prompt,
-            model: modelName,
-            cwd: workingDir,
-            sessionId,
-            forkedFrom: isFork ? fork : undefined,
-            runId: _runId
-          };
-
-          const resultsDir = await saveResult(workingDir, forgeResult, resultText);
-
-          if (_silent) {
-            // Silent: no output at all (parallel mode)
-          } else if (quiet) {
-            // Quiet mode: just show results path
-            console.log(resultsDir);
-          } else {
-            // Display result (full, no truncation)
-            console.log('\n---\nResult:\n');
-            console.log(resultText);
-
-            // Display summary
-            console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
-            console.log(`  Duration: ${BOLD}${durationSeconds.toFixed(1)}s${RESET}`);
-            if (message.total_cost_usd !== undefined) {
-              console.log(`  Cost:     ${BOLD}$${message.total_cost_usd.toFixed(4)}${RESET}`);
-            }
-            console.log(`  Results:  ${DIM}${resultsDir}${RESET}`);
-            if (sessionId) {
-              console.log(`  Session:  ${DIM}${sessionId}${RESET}`);
-              console.log(`  Resume:   ${CMD}forge run --resume ${sessionId} "continue"${RESET}`);
-              console.log(`  Fork:     ${CMD}forge run --fork ${sessionId} "try different approach"${RESET}`);
-            }
-          }
-
-          // Dry run: show cost estimates
-          if (dryRun && !quiet) {
-            const taskCountMatch = resultText.match(/Total tasks:\s*(\d+)/i);
-            const taskCount = taskCountMatch ? parseInt(taskCountMatch[1], 10) : 0;
-
-            const planningCost = message.total_cost_usd || 0;
-            const minExecCost = taskCount * 1.50;
-            const maxExecCost = taskCount * 2.50;
-            const minTotal = planningCost + minExecCost;
-            const maxTotal = planningCost + maxExecCost;
-
-            console.log('\n===== DRY RUN ESTIMATE =====');
-            console.log(`Planning cost: $${planningCost.toFixed(2)}`);
-            if (taskCount > 0) {
-              console.log(`Tasks: ${taskCount}`);
-              console.log(`Estimated execution: $${minExecCost.toFixed(2)} - $${maxExecCost.toFixed(2)}`);
-              console.log(`Estimated total: $${minTotal.toFixed(2)} - $${maxTotal.toFixed(2)}`);
-            } else {
-              console.log('Could not determine task count from output');
-            }
-            console.log(`\nRun without ${CMD}--dry-run${RESET} to execute.`);
-            console.log('================================');
-          }
-
-          // If we got here without breaking, we're done
-          return forgeResult;
-        } else if (message.subtype === 'error_during_execution' || message.subtype === 'error_max_turns' || message.subtype === 'error_max_budget_usd') {
-          const status: ForgeResult['status'] =
-            message.subtype === 'error_max_turns' ? 'error_max_turns' :
-            message.subtype === 'error_max_budget_usd' ? 'error_budget' :
-            'error_execution';
-
-          const label =
-            message.subtype === 'error_max_turns' ? 'Hit maximum turns limit' :
-            message.subtype === 'error_max_budget_usd' ? 'Exceeded budget limit' :
-            'Execution error';
-
-          const errors = message.errors || [];
-          const errorDetail = errors.length > 0 ? errors.join('\n') : label;
-
-          const resultText = `# ${label}
-
-**Turns used**: ${message.num_turns}
-**Cost**: $${message.total_cost_usd?.toFixed(4) ?? 'N/A'}
-**Session**: ${message.session_id || sessionId || 'N/A'}
-
-## Errors
-
-${errors.length > 0 ? errors.map(e => `- ${e}`).join('\n') : '_No error details from SDK._'}
-
-## Resume
-
-\`\`\`bash
-forge run --resume ${message.session_id || sessionId} "continue"
-\`\`\``;
-
-          const forgeResult: ForgeResult = {
-            startedAt: startTime.toISOString(),
-            completedAt: endTime.toISOString(),
-            durationSeconds,
-            status,
-            costUsd: message.total_cost_usd,
-            specPath,
-            prompt,
-            model: modelName,
-            cwd: workingDir,
-            sessionId: message.session_id || sessionId,
-            forkedFrom: isFork ? fork : undefined,
-            error: errorDetail,
-            runId: _runId
-          };
-
-          await saveResult(workingDir, forgeResult, resultText);
-
-          throw new ForgeError(label, forgeResult);
         }
+      } else {
+        if (!quiet) console.log(`${DIM}[forge]${RESET} \x1b[32mVerification passed!\x1b[0m\n`);
       }
     }
-    // If we reach here without error, break out of retry loop
-    break;
-  } catch (error) {
-    // Stop spinner if still running
-    if (agentSpinner) { agentSpinner.stop(); agentSpinner = null; }
 
-    if (error instanceof Error && error.message.includes('not installed')) {
-      throw new Error('Agent SDK not properly installed. Run: bun install @anthropic-ai/claude-agent-sdk');
-    }
-
-    // Check if error is transient and we have retries left
-    if (isTransientError(error) && attempt < maxRetries) {
-      const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
-      if (!quiet) {
-        console.log(`\n${DIM}[forge]${RESET} \x1b[33mTransient error:\x1b[0m ${error instanceof Error ? error.message : 'Unknown error'}`);
-        console.log(`${DIM}[forge]${RESET} Retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
-      }
-      await sleep(delayMs);
-      continue;
-    }
-
-    // Non-transient error or out of retries — save result before throwing
-    // If it's already a ForgeError (from the result handlers above), just re-throw
-    if (error instanceof ForgeError) {
-      throw error;
-    }
-    const endTime = new Date();
-    const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
-    const errMsg = error instanceof Error ? error.message : 'Unknown error';
+    // Save result to .forge/results/
     const forgeResult: ForgeResult = {
       startedAt: startTime.toISOString(),
       completedAt: endTime.toISOString(),
       durationSeconds,
-      status: 'error_execution',
+      status: 'success',
+      costUsd: qr.costUsd,
       specPath,
       prompt,
       model: modelName,
       cwd: workingDir,
-      sessionId,
+      sessionId: qr.sessionId,
       forkedFrom: isFork ? fork : undefined,
-      error: errMsg,
       runId: _runId
     };
-    await saveResult(workingDir, forgeResult, `Error:\n${errMsg}`).catch(() => {});
-    throw new ForgeError(errMsg, forgeResult);
+
+    const resultsDir = await saveResult(workingDir, forgeResult, qr.resultText);
+
+    if (_silent) {
+      // Silent: no output at all (parallel mode)
+    } else if (quiet) {
+      // Quiet mode: just show results path
+      console.log(resultsDir);
+    } else {
+      // Display result (full, no truncation)
+      console.log('\n---\nResult:\n');
+      console.log(qr.resultText);
+
+      // Display summary
+      console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+      console.log(`  Duration: ${BOLD}${durationSeconds.toFixed(1)}s${RESET}`);
+      if (qr.costUsd !== undefined) {
+        console.log(`  Cost:     ${BOLD}$${qr.costUsd.toFixed(4)}${RESET}`);
+      }
+      console.log(`  Results:  ${DIM}${resultsDir}${RESET}`);
+      if (qr.sessionId) {
+        console.log(`  Session:  ${DIM}${qr.sessionId}${RESET}`);
+        console.log(`  Resume:   ${CMD}forge run --resume ${qr.sessionId} "continue"${RESET}`);
+        console.log(`  Fork:     ${CMD}forge run --fork ${qr.sessionId} "try different approach"${RESET}`);
+      }
+    }
+
+    // Dry run: show cost estimates
+    if (dryRun && !quiet) {
+      const taskCountMatch = qr.resultText.match(/Total tasks:\s*(\d+)/i);
+      const taskCount = taskCountMatch ? parseInt(taskCountMatch[1], 10) : 0;
+
+      const planningCost = qr.costUsd || 0;
+      const minExecCost = taskCount * 1.50;
+      const maxExecCost = taskCount * 2.50;
+      const minTotal = planningCost + minExecCost;
+      const maxTotal = planningCost + maxExecCost;
+
+      console.log('\n===== DRY RUN ESTIMATE =====');
+      console.log(`Planning cost: $${planningCost.toFixed(2)}`);
+      if (taskCount > 0) {
+        console.log(`Tasks: ${taskCount}`);
+        console.log(`Estimated execution: $${minExecCost.toFixed(2)} - $${maxExecCost.toFixed(2)}`);
+        console.log(`Estimated total: $${minTotal.toFixed(2)} - $${maxTotal.toFixed(2)}`);
+      } else {
+        console.log('Could not determine task count from output');
+      }
+      console.log(`\nRun without ${CMD}--dry-run${RESET} to execute.`);
+      console.log('================================');
+    }
+
+    return forgeResult;
   }
-  } // end retry loop
-  } // end verification loop
 
   // All verification attempts exhausted — should not normally reach here
-  // (the success path returns, error paths throw)
   throw new ForgeError('Verification failed after all attempts');
 }
 
@@ -1269,7 +1342,6 @@ function printBatchSummary(
     results.forEach(r => {
       const icon = r.status === 'success' ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
       const cost = r.cost !== undefined ? `$${r.cost.toFixed(2)}` : '   -';
-      const statusText = r.status === 'success' ? `${DIM}success${RESET}` : `\x1b[31m${r.status}\x1b[0m`;
       console.log(`  ${icon} ${r.spec.padEnd(30)} ${r.duration.toFixed(1).padStart(6)}s  ${cost}`);
     });
     console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
@@ -1376,286 +1448,60 @@ ${prompt ? `## Additional Context\n\n${prompt}\n` : ''}
 - If fully implemented, produce no output specs
 - Output specs written to: ${outputDir}/`;
 
-  const modelName = model;
   const startTime = new Date();
 
-  // Streaming / spinner state
-  let sessionId: string | undefined;
-  let currentToolName: string | null = null;
-  let toolInputJson = '';
-  let toolCount = 0;
-  const useSpinner = !verbose && !quiet;
-  let agentSpinner: ReturnType<typeof createInlineSpinner> | null = null;
+  const qr = await runQuery({
+    prompt: auditPrompt,
+    workingDir,
+    model,
+    maxTurns,
+    maxBudgetUsd: 10.00,
+    verbose,
+    quiet,
+    silent: false,
+    auditLogExtra: { type: 'audit' },
+    sessionExtra: { type: 'audit' },
+  });
 
-  // Hook: Bash command guardrails (same as runSingleSpec)
-  const blockedCommands: Array<{ pattern: RegExp; reason: string }> = [
-    { pattern: /rm\s+-[^\s]*r[^\s]*\s+\/(?:\s|$)/, reason: 'Recursive delete of root' },
-    { pattern: /rm\s+-[^\s]*r[^\s]*\s+~/, reason: 'Recursive delete of home' },
-    { pattern: /git\s+push\s.*--force/, reason: 'Git force push' },
-    { pattern: /git\s+push\s.*\s-f\b/, reason: 'Git force push' },
-    { pattern: /git\s+reset\s+--hard/, reason: 'Git hard reset' },
-    { pattern: /git\s+clean\s.*-[^\s]*f/, reason: 'Git clean with force' },
-    { pattern: /mkfs/, reason: 'Filesystem format' },
-    { pattern: /dd\s+if=\/dev\//, reason: 'Raw device operation' },
-    { pattern: /:\(\)\s*\{/, reason: 'Fork bomb' },
-  ];
-  const bashGuardrail: HookCallback = async (input) => {
-    const command = ((input as Record<string, unknown>).tool_input as Record<string, unknown>)?.command as string || '';
-    for (const { pattern, reason } of blockedCommands) {
-      if (pattern.test(command)) {
-        if (!quiet) console.log(`${DIM}[forge]${RESET} Blocked: ${reason}`);
-        return {
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse' as const,
-            permissionDecision: 'deny' as const,
-            permissionDecisionReason: `[forge] ${reason}`,
-          },
-        };
-      }
+  const endTime = new Date();
+  const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
+
+  const forgeResult: ForgeResult = {
+    startedAt: startTime.toISOString(),
+    completedAt: endTime.toISOString(),
+    durationSeconds,
+    status: 'success',
+    costUsd: qr.costUsd,
+    prompt: '(audit)',
+    model,
+    cwd: workingDir,
+    sessionId: qr.sessionId,
+    type: 'audit',
+  };
+
+  await saveResult(workingDir, forgeResult, qr.resultText);
+
+  // Post-query: list generated spec files
+  let outputSpecs: string[] = [];
+  try {
+    const files = await fs.readdir(outputDir);
+    outputSpecs = files.filter(f => f.endsWith('.md')).sort();
+  } catch {}
+
+  if (!quiet) {
+    console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+    console.log(`  Duration: ${BOLD}${durationSeconds.toFixed(1)}s${RESET}`);
+    if (qr.costUsd !== undefined) {
+      console.log(`  Cost:     ${BOLD}$${qr.costUsd.toFixed(4)}${RESET}`);
     }
-    return {};
-  };
 
-  // Hook: Stop handler
-  const latestSessionPath = path.join(workingDir, '.forge', 'latest-session.json');
-  const persistSession = async () => {
-    const state = { sessionId, startedAt: startTime.toISOString(), type: 'audit', model: modelName, cwd: workingDir };
-    await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
-    await fs.writeFile(latestSessionPath, JSON.stringify(state, null, 2));
-  };
-  const stopHandler: HookCallback = async () => {
-    try { await persistSession(); } catch {}
-    return {};
-  };
-
-  // Hook: Audit log
-  const auditPath = path.join(workingDir, '.forge', 'audit.jsonl');
-  const auditLog: HookCallback = async (input, toolUseID) => {
-    try {
-      const inp = input as Record<string, unknown>;
-      const entry = {
-        ts: new Date().toISOString(),
-        type: 'audit',
-        sessionId,
-        tool: inp.tool_name,
-        toolUseId: toolUseID,
-        input: inp.tool_input,
-      };
-      await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
-      await fs.appendFile(auditPath, JSON.stringify(entry) + '\n');
-    } catch {}
-    return {};
-  };
-
-  // Retry configuration
-  const maxRetries = 3;
-  const baseDelayMs = 5000;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      for await (const message of sdkQuery({
-        prompt: auditPrompt,
-        options: {
-          cwd: workingDir,
-          model: modelName,
-          tools: { type: 'preset', preset: 'claude_code' },
-          settingSources: ['user', 'project'],
-          allowedTools: [
-            'Skill', 'Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob',
-            'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'
-          ],
-          permissionMode: 'default',
-          includePartialMessages: true,
-          hooks: {
-            PreToolUse: [{ matcher: 'Bash', hooks: [bashGuardrail] }],
-            PostToolUse: [{ hooks: [auditLog] }],
-            Stop: [{ hooks: [stopHandler] }],
-          },
-          maxTurns,
-          maxBudgetUsd: 10.00,
-        }
-      })) {
-        // Capture session ID
-        if (message.type === 'system' && message.subtype === 'init') {
-          sessionId = message.session_id;
-          if (!quiet) console.log(`${DIM}[forge]${RESET} Session: ${DIM}${sessionId}${RESET}`);
-          persistSession().catch(() => {});
-          if (useSpinner && !agentSpinner) {
-            agentSpinner = createInlineSpinner(`${DIM}[forge]${RESET}`);
-            agentSpinner.update(`${CMD}${AGENT_VERBS[0]}...${RESET}`);
-            agentSpinner.start();
-          }
-        }
-
-        // Stream progress
-        if (message.type === 'stream_event' && !quiet) {
-          const event = message.event;
-
-          if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
-            currentToolName = event.content_block.name;
-            toolInputJson = '';
-          } else if (event.type === 'content_block_delta') {
-            if (event.delta.type === 'text_delta' && verbose) {
-              process.stdout.write(event.delta.text);
-            } else if (event.delta.type === 'input_json_delta') {
-              toolInputJson += event.delta.partial_json;
-            }
-          } else if (event.type === 'content_block_stop' && currentToolName) {
-            try {
-              const input = JSON.parse(toolInputJson || '{}') as Record<string, unknown>;
-              let activity: string | undefined;
-              if (currentToolName === 'Write') {
-                const filePath = input.file_path as string;
-                if (filePath) activity = `Writing ${filePath.split('/').pop()}`;
-              } else if (currentToolName === 'Read') {
-                const filePath = input.file_path as string;
-                if (filePath) activity = `Reading ${filePath.split('/').pop()}`;
-              } else if (currentToolName === 'Grep') {
-                const pattern = input.pattern as string;
-                if (pattern) activity = `Grep: ${pattern.substring(0, 30)}`;
-              } else if (currentToolName === 'Glob') {
-                const pattern = input.pattern as string;
-                if (pattern) activity = `Glob: ${pattern.substring(0, 30)}`;
-              } else if (currentToolName === 'Bash') {
-                const cmd = input.command as string;
-                if (cmd) {
-                  const shortCmd = cmd.length > 40 ? cmd.substring(0, 37) + '...' : cmd;
-                  activity = `$ ${shortCmd}`;
-                }
-              }
-
-              if (agentSpinner && activity) {
-                toolCount++;
-                const verb = AGENT_VERBS[toolCount % AGENT_VERBS.length];
-                agentSpinner.update(`${CMD}${verb}...${RESET}  ${activity}`);
-              }
-            } catch {}
-            currentToolName = null;
-            toolInputJson = '';
-          }
-        }
-
-        // Handle result
-        if (message.type === 'result') {
-          if (agentSpinner) { agentSpinner.stop(); agentSpinner = null; }
-
-          const endTime = new Date();
-          const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
-
-          const resultText = message.subtype === 'success' ? (message.result || '') : '';
-
-          const status: ForgeResult['status'] =
-            message.subtype === 'success' ? 'success' :
-            message.subtype === 'error_max_turns' ? 'error_max_turns' :
-            message.subtype === 'error_max_budget_usd' ? 'error_budget' :
-            'error_execution';
-
-          const forgeResult: ForgeResult = {
-            startedAt: startTime.toISOString(),
-            completedAt: endTime.toISOString(),
-            durationSeconds,
-            status,
-            costUsd: message.total_cost_usd,
-            prompt: '(audit)',
-            model: modelName,
-            cwd: workingDir,
-            sessionId,
-            type: 'audit',
-          };
-
-          if (message.subtype !== 'success') {
-            const label =
-              message.subtype === 'error_max_turns' ? 'Hit maximum turns limit' :
-              message.subtype === 'error_max_budget_usd' ? 'Exceeded budget limit' :
-              'Execution error';
-            const errors = message.errors || [];
-            const errorDetail = errors.length > 0 ? errors.join('\n') : label;
-
-            const errorResultText = `# ${label}
-
-**Turns used**: ${message.num_turns}
-**Cost**: $${message.total_cost_usd?.toFixed(4) ?? 'N/A'}
-**Session**: ${message.session_id || sessionId || 'N/A'}
-
-## Errors
-
-${errors.length > 0 ? errors.map((e: string) => `- ${e}`).join('\n') : '_No error details from SDK._'}
-
-## Resume
-
-\`\`\`bash
-forge run --resume ${message.session_id || sessionId} "continue"
-\`\`\``;
-
-            forgeResult.error = errorDetail;
-            forgeResult.sessionId = message.session_id || sessionId;
-            await saveResult(workingDir, forgeResult, errorResultText);
-            throw new ForgeError(label, forgeResult);
-          }
-
-          await saveResult(workingDir, forgeResult, resultText);
-
-          // Post-query: list generated spec files
-          let outputSpecs: string[] = [];
-          try {
-            const files = await fs.readdir(outputDir);
-            outputSpecs = files.filter(f => f.endsWith('.md')).sort();
-          } catch {}
-
-          if (!quiet) {
-            console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
-            console.log(`  Duration: ${BOLD}${durationSeconds.toFixed(1)}s${RESET}`);
-            if (message.total_cost_usd !== undefined) {
-              console.log(`  Cost:     ${BOLD}$${message.total_cost_usd.toFixed(4)}${RESET}`);
-            }
-
-            if (outputSpecs.length === 0) {
-              console.log(`\n  \x1b[32mAll specs fully implemented — no remaining work.\x1b[0m`);
-            } else {
-              console.log(`\n  ${BOLD}${outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
-              outputSpecs.forEach((f, i) => console.log(`    ${DIM}${i + 1}.${RESET} ${f}`));
-              console.log(`\n  Next step:\n    ${CMD}forge run --spec-dir ${outputDir} -C ${workingDir} "implement remaining work"${RESET}`);
-            }
-            console.log('');
-          }
-
-          return;
-        }
-      }
-      // If we reach here without error, break out of retry loop
-      break;
-    } catch (error) {
-      if (agentSpinner) { agentSpinner.stop(); agentSpinner = null; }
-
-      if (error instanceof ForgeError) throw error;
-
-      if (isTransientError(error) && attempt < maxRetries) {
-        const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
-        if (!quiet) {
-          console.log(`\n${DIM}[forge]${RESET} \x1b[33mTransient error:\x1b[0m ${error instanceof Error ? error.message : 'Unknown error'}`);
-          console.log(`${DIM}[forge]${RESET} Retrying in ${delayMs / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
-        }
-        await sleep(delayMs);
-        continue;
-      }
-
-      const endTime = new Date();
-      const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
-      const errMsg = error instanceof Error ? error.message : 'Unknown error';
-      const forgeResult: ForgeResult = {
-        startedAt: startTime.toISOString(),
-        completedAt: endTime.toISOString(),
-        durationSeconds,
-        status: 'error_execution',
-        prompt: '(audit)',
-        model: modelName,
-        cwd: workingDir,
-        sessionId,
-        type: 'audit',
-        error: errMsg,
-      };
-      await saveResult(workingDir, forgeResult, `Error:\n${errMsg}`).catch(() => {});
-      throw new ForgeError(errMsg, forgeResult);
+    if (outputSpecs.length === 0) {
+      console.log(`\n  \x1b[32mAll specs fully implemented — no remaining work.\x1b[0m`);
+    } else {
+      console.log(`\n  ${BOLD}${outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
+      outputSpecs.forEach((f, i) => console.log(`    ${DIM}${i + 1}.${RESET} ${f}`));
+      console.log(`\n  Next step:\n    ${CMD}forge run --spec-dir ${outputDir} -C ${workingDir} "implement remaining work"${RESET}`);
     }
+    console.log('');
   }
 }
