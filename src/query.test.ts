@@ -5,8 +5,8 @@ import {
   formatElapsed,
   formatProgress,
   autoDetectConcurrency,
-} from '../query.js';
-import type { ForgeResult } from '../types.js';
+} from './query.js';
+import type { ForgeResult } from './types.js';
 
 // ── isTransientError ─────────────────────────────────────────
 
