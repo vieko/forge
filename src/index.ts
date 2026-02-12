@@ -4,7 +4,7 @@ import { program } from 'commander';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { runForge, showStatus, runAudit } from './query.js';
+import { runForge, showStatus, runAudit, runReview } from './query.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -23,6 +23,7 @@ program
   .option('-C, --cwd <path>', 'Working directory (target repo)')
   .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'opus')
   .option('-t, --max-turns <n>', 'Maximum turns per spec (default: 250)', '250')
+  .option('-b, --max-budget <usd>', 'Maximum budget in USD')
   .option('--plan-only', 'Only create tasks, do not implement')
   .option('--dry-run', 'Preview tasks and estimate cost without executing')
   .option('-v, --verbose', 'Show detailed output')
@@ -39,6 +40,7 @@ program
     cwd?: string;
     model?: string;
     maxTurns?: string;
+    maxBudget?: string;
     planOnly?: boolean;
     dryRun?: boolean;
     verbose?: boolean;
@@ -54,6 +56,13 @@ program
       console.error('Error: --resume and --fork are mutually exclusive. Use one or the other.');
       process.exit(1);
     }
+    if (options.maxBudget !== undefined) {
+      const budget = parseFloat(options.maxBudget);
+      if (isNaN(budget) || budget <= 0) {
+        console.error('Error: --max-budget must be a positive number.');
+        process.exit(1);
+      }
+    }
     try {
       await runForge({
         prompt,
@@ -62,6 +71,7 @@ program
         cwd: options.cwd,
         model: options.model,
         maxTurns: options.maxTurns ? parseInt(options.maxTurns, 10) : 250,
+        maxBudgetUsd: options.maxBudget ? parseFloat(options.maxBudget) : undefined,
         planOnly: options.planOnly,
         dryRun: options.dryRun,
         verbose: options.verbose,
@@ -107,16 +117,33 @@ program
   .option('-C, --cwd <path>', 'Working directory (target repo)')
   .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'opus')
   .option('-t, --max-turns <n>', 'Maximum turns (default: 250)', '250')
+  .option('-b, --max-budget <usd>', 'Maximum budget in USD')
   .option('-v, --verbose', 'Show detailed output')
   .option('-q, --quiet', 'Suppress progress output')
+  .option('-r, --resume <session>', 'Resume a previous session')
+  .option('-f, --fork <session>', 'Fork from a previous session')
   .action(async (specDir: string, prompt: string | undefined, options: {
     outputDir?: string;
     cwd?: string;
     model?: string;
     maxTurns?: string;
+    maxBudget?: string;
     verbose?: boolean;
     quiet?: boolean;
+    resume?: string;
+    fork?: string;
   }) => {
+    if (options.resume && options.fork) {
+      console.error('Error: --resume and --fork are mutually exclusive. Use one or the other.');
+      process.exit(1);
+    }
+    if (options.maxBudget !== undefined) {
+      const budget = parseFloat(options.maxBudget);
+      if (isNaN(budget) || budget <= 0) {
+        console.error('Error: --max-budget must be a positive number.');
+        process.exit(1);
+      }
+    }
     try {
       await runAudit({
         specDir,
@@ -125,8 +152,58 @@ program
         cwd: options.cwd,
         model: options.model,
         maxTurns: options.maxTurns ? parseInt(options.maxTurns, 10) : 250,
+        maxBudgetUsd: options.maxBudget ? parseFloat(options.maxBudget) : undefined,
         verbose: options.verbose,
         quiet: options.quiet,
+        resume: options.resume,
+        fork: options.fork,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('review')
+  .description('Review recent changes for quality issues')
+  .argument('[diff]', 'Git diff range (default: main...HEAD)')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'sonnet')
+  .option('-t, --max-turns <n>', 'Maximum turns (default: 50)', '50')
+  .option('-b, --max-budget <usd>', 'Maximum budget in USD')
+  .option('-v, --verbose', 'Show detailed output')
+  .option('-q, --quiet', 'Suppress progress output')
+  .option('--dry-run', 'Report findings without applying fixes')
+  .option('-o, --output <path>', 'Write findings to file')
+  .action(async (diff: string | undefined, options: {
+    cwd?: string;
+    model?: string;
+    maxTurns?: string;
+    maxBudget?: string;
+    verbose?: boolean;
+    quiet?: boolean;
+    dryRun?: boolean;
+    output?: string;
+  }) => {
+    if (options.maxBudget !== undefined) {
+      const budget = parseFloat(options.maxBudget);
+      if (isNaN(budget) || budget <= 0) {
+        console.error('Error: --max-budget must be a positive number.');
+        process.exit(1);
+      }
+    }
+    try {
+      await runReview({
+        diff,
+        cwd: options.cwd,
+        model: options.model,
+        maxTurns: options.maxTurns ? parseInt(options.maxTurns, 10) : 50,
+        maxBudgetUsd: options.maxBudget ? parseFloat(options.maxBudget) : undefined,
+        verbose: options.verbose,
+        quiet: options.quiet,
+        dryRun: options.dryRun,
+        output: options.output,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);
@@ -136,7 +213,7 @@ program
 
 // Quick alias: `forge "do something"` = `forge run "do something"`
 const args = process.argv.slice(2);
-if (args.length > 0 && !args[0].startsWith('-') && args[0] !== 'run' && args[0] !== 'status' && args[0] !== 'audit' && args[0] !== 'help' && args[0] !== '--help' && args[0] !== '-h' && args[0] !== '--version' && args[0] !== '-V') {
+if (args.length > 0 && !args[0].startsWith('-') && args[0] !== 'run' && args[0] !== 'status' && args[0] !== 'audit' && args[0] !== 'review' && args[0] !== 'help' && args[0] !== '--help' && args[0] !== '-h' && args[0] !== '--version' && args[0] !== '-V') {
   process.argv.splice(2, 0, 'run');
 }
 

@@ -14,6 +14,8 @@ export interface ForgeOptions {
   model?: string;
   /** Maximum turns per spec (default: 100) */
   maxTurns?: number;
+  /** Maximum budget in USD (default: $50 run, $5 dry-run) */
+  maxBudgetUsd?: number;
   /** Only create tasks, don't implement */
   planOnly?: boolean;
   /** Preview tasks and estimate cost without executing */
@@ -86,8 +88,38 @@ export interface AuditOptions {
   model?: string;
   /** Maximum turns (default: 100) */
   maxTurns?: number;
+  /** Maximum budget in USD (default: $10) */
+  maxBudgetUsd?: number;
   /** Show detailed output */
   verbose?: boolean;
   /** Suppress progress output */
   quiet?: boolean;
+  /** Resume a previous session */
+  resume?: string;
+  /** Fork from a previous session (new session, same history) */
+  fork?: string;
+}
+
+/**
+ * Options for running a review.
+ */
+export interface ReviewOptions {
+  /** Git diff range (default: main...HEAD) */
+  diff?: string;
+  /** Working directory (target repo) */
+  cwd?: string;
+  /** Model to use (shorthand like 'opus'/'sonnet' or full ID) */
+  model?: string;
+  /** Maximum turns (default: 50) */
+  maxTurns?: number;
+  /** Maximum budget in USD */
+  maxBudgetUsd?: number;
+  /** Show detailed output */
+  verbose?: boolean;
+  /** Suppress progress output */
+  quiet?: boolean;
+  /** Report findings without applying fixes */
+  dryRun?: boolean;
+  /** Write findings to file */
+  output?: string;
 }

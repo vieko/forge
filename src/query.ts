@@ -1,5 +1,5 @@
 import { query as sdkQuery, type HookCallback } from '@anthropic-ai/claude-agent-sdk';
-import type { ForgeOptions, ForgeResult, AuditOptions } from './types.js';
+import type { ForgeOptions, ForgeResult, AuditOptions, ReviewOptions } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
@@ -17,6 +17,24 @@ export class ForgeError extends Error {
 }
 
 const execAsync = promisify(exec);
+
+// ── Config ───────────────────────────────────────────────────
+
+interface ForgeConfig {
+  model?: string;
+  maxBudgetUsd?: number;
+  maxTurns?: number;
+  verify?: string[];
+}
+
+async function loadConfig(workingDir: string): Promise<ForgeConfig> {
+  try {
+    const configPath = path.join(workingDir, '.forge', 'config.json');
+    return JSON.parse(await fs.readFile(configPath, 'utf-8')) as ForgeConfig;
+  } catch {
+    return {};
+  }
+}
 
 // ── ANSI Colors ──────────────────────────────────────────────
 const RESET = '\x1b[0m';
@@ -167,7 +185,12 @@ function sleep(ms: number): Promise<void> {
 }
 
 // Detect project type and return verification commands
-async function detectVerification(workingDir: string): Promise<string[]> {
+async function detectVerification(workingDir: string, configVerify?: string[]): Promise<string[]> {
+  // If config specifies verify commands, use them (empty array = no verification)
+  if (configVerify !== undefined) {
+    return configVerify;
+  }
+
   const commands: string[] = [];
 
   try {
@@ -207,8 +230,8 @@ async function detectVerification(workingDir: string): Promise<string[]> {
 }
 
 // Run verification and return errors if any
-async function runVerification(workingDir: string, quiet: boolean): Promise<{ passed: boolean; errors: string }> {
-  const commands = await detectVerification(workingDir);
+async function runVerification(workingDir: string, quiet: boolean, configVerify?: string[]): Promise<{ passed: boolean; errors: string }> {
+  const commands = await detectVerification(workingDir, configVerify);
 
   if (commands.length === 0) {
     if (!quiet) console.log(`${DIM}[Verify]${RESET} No verification commands detected`);
@@ -292,6 +315,12 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
   const startTime = new Date();
   let sessionId: string | undefined;
 
+  // Stream log for session visibility (fire-and-forget writes)
+  // Using an object wrapper to avoid TypeScript narrowing issues with async closures
+  const sessionDir = path.join(workingDir, '.forge', 'sessions');
+  interface StreamLog { write: (line: string) => void; close: () => void }
+  const streamLog: { current: StreamLog | null } = { current: null };
+
   // Streaming state
   let currentAgent: string | null = null;
   let currentToolName: string | null = null;
@@ -326,7 +355,8 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
   // Hook: Stop handler — persist session state for resume on interrupt
   const latestSessionPath = path.join(workingDir, '.forge', 'latest-session.json');
   const persistSession = async () => {
-    const state = { sessionId, startedAt: startTime.toISOString(), model: modelName, cwd: workingDir, ...sessionExtra };
+    const logPath = sessionId ? path.join(sessionDir, sessionId, 'stream.log') : undefined;
+    const state = { sessionId, startedAt: startTime.toISOString(), model: modelName, cwd: workingDir, logPath, ...sessionExtra };
     await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
     await fs.writeFile(latestSessionPath, JSON.stringify(state, null, 2));
   };
@@ -424,6 +454,21 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
             agentSpinner.update(`${CMD}${AGENT_VERBS[0]}...${RESET}`);
             agentSpinner.start();
           }
+
+          // Initialize stream log for this session
+          if (sessionId) {
+            const logDir = path.join(sessionDir, sessionId);
+            fs.mkdir(logDir, { recursive: true }).then(() => {
+              const logPath = path.join(logDir, 'stream.log');
+              fs.open(logPath, 'a').then(fd => {
+                streamLog.current = {
+                  write: (line: string) => { fd.write(line + '\n').catch(() => {}); },
+                  close: () => { fd.close().catch(() => {}); },
+                };
+                streamLog.current.write(`[${new Date().toISOString()}] Session started (model: ${modelName}, maxTurns: ${maxTurns})`);
+              }).catch(() => {});
+            }).catch(() => {});
+          }
         }
 
         // Stream real-time progress via partial messages
@@ -446,6 +491,12 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
 
               if (onActivity && activity) {
                 onActivity(activity);
+              }
+
+              // Write to stream log (fire-and-forget)
+              const log = streamLog.current;
+              if (log && activity) {
+                log.write(`[${new Date().toISOString()}] ${activity}`);
               }
 
               // Console output based on progress mode
@@ -523,6 +574,12 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
           const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
 
           if (message.subtype === 'success') {
+            // Log success and close stream
+            const log = streamLog.current;
+            if (log) {
+              log.write(`[${new Date().toISOString()}] Result: success (${message.num_turns} turns, $${message.total_cost_usd?.toFixed(2) ?? 'N/A'})`);
+              log.close();
+            }
             return {
               resultText: message.result || '',
               costUsd: message.total_cost_usd,
@@ -575,6 +632,15 @@ forge run --resume ${message.session_id || sessionId} "continue"
             error: errorDetail,
           };
 
+          // Log error result and close stream
+          {
+            const log = streamLog.current;
+            if (log) {
+              log.write(`[${new Date().toISOString()}] Result: ${message.subtype} (${message.num_turns} turns)`);
+              log.close();
+            }
+          }
+
           await saveResult(workingDir, forgeResult, errorResultText);
           throw new ForgeError(label, forgeResult);
         }
@@ -585,7 +651,16 @@ forge run --resume ${message.session_id || sessionId} "continue"
       // Stop spinner if still running
       if (agentSpinner) { agentSpinner.stop(); agentSpinner = null; }
 
+      // Log error to stream
+      {
+        const log = streamLog.current;
+        if (log) {
+          log.write(`[${new Date().toISOString()}] Error: ${error instanceof Error ? error.message : 'Unknown'}`);
+        }
+      }
+
       if (error instanceof Error && error.message.includes('not installed')) {
+        streamLog.current?.close();
         throw new Error('Agent SDK not properly installed. Run: bun install @anthropic-ai/claude-agent-sdk');
       }
 
@@ -602,6 +677,7 @@ forge run --resume ${message.session_id || sessionId} "continue"
 
       // Non-transient error or out of retries — save result before throwing
       if (error instanceof ForgeError) {
+        streamLog.current?.close();
         throw error;
       }
       const endTime = new Date();
@@ -619,18 +695,20 @@ forge run --resume ${message.session_id || sessionId} "continue"
         error: errMsg,
       };
       await saveResult(workingDir, forgeResult, `Error:\n${errMsg}`).catch(() => {});
+      streamLog.current?.close();
       throw new ForgeError(errMsg, forgeResult);
     }
   }
 
   // Should not reach here — success returns, errors throw
+  streamLog.current?.close();
   throw new ForgeError('Query completed without result');
 }
 
 // ── runSingleSpec ────────────────────────────────────────────
 
 async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string }): Promise<ForgeResult> {
-  const { prompt, specPath, specContent, cwd, model = 'opus', maxTurns = 250, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, fork, _silent = false, _onActivity, _runId } = options;
+  const { prompt, specPath, specContent, cwd, model, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, fork, _silent = false, _onActivity, _runId } = options;
   const effectiveResume = fork || resume;
   const isFork = !!fork;
 
@@ -649,6 +727,12 @@ async function runSingleSpec(options: ForgeOptions & { specContent?: string; _si
     }
     throw err;
   }
+
+  // Load config and merge with defaults (CLI flags override config)
+  const config = await loadConfig(workingDir);
+  const effectiveModel = model || config.model || 'opus';
+  const effectiveMaxTurns = maxTurns ?? config.maxTurns ?? 250;
+  const effectiveMaxBudgetUsd = maxBudgetUsd ?? config.maxBudgetUsd ?? (dryRun ? 5.00 : 50.00);
 
   // Read spec content if provided (and not already passed)
   let finalSpecContent: string | undefined = specContent;
@@ -712,7 +796,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
   let verifyAttempt = 0;
   let currentPrompt = workflowPrompt;
 
-  const modelName = model;
+  const modelName = effectiveModel;
   const startTime = new Date();
 
   // Run the query
@@ -731,8 +815,8 @@ Focus on delivering working code that meets the acceptance criteria.`;
       prompt: currentPrompt,
       workingDir,
       model: modelName,
-      maxTurns: dryRun ? 20 : maxTurns,
-      maxBudgetUsd: dryRun ? 5.00 : 50.00,
+      maxTurns: dryRun ? 20 : effectiveMaxTurns,
+      maxBudgetUsd: effectiveMaxBudgetUsd,
       verbose,
       quiet,
       silent: _silent,
@@ -749,7 +833,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
     // Run verification (unless dry-run or plan-only)
     if (!dryRun && !planOnly) {
       if (!quiet) console.log(`${DIM}[forge]${RESET} Running verification...`);
-      const verification = await runVerification(workingDir, quiet);
+      const verification = await runVerification(workingDir, quiet, config.verify);
 
       if (!verification.passed) {
         verifyAttempt++;
@@ -758,18 +842,24 @@ Focus on delivering working code that meets the acceptance criteria.`;
             console.log(`\n${DIM}[forge]${RESET} \x1b[33mVerification failed\x1b[0m (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
             console.log(`${DIM}[forge]${RESET} Sending errors back to agent for fixes...\n`);
           }
-          // Update prompt with errors for next iteration
-          currentPrompt = `## Previous Work
+          // Update prompt with errors for next iteration (outcome-driven, not procedural)
+          currentPrompt = `## Outcome
 
-The implementation is mostly complete but verification failed.
+The codebase must pass all verification checks.
 
-## Errors to Fix
+## Current State
+
+Verification attempt ${verifyAttempt} of ${maxVerifyAttempts} failed with the errors below.
+
+## Errors
 
 ${verification.errors}
 
-## Instructions
+## Acceptance Criteria
 
-Fix these errors. The code should compile and build successfully.`;
+- All verification commands pass (typecheck, build, tests)
+- No compilation or type errors
+- All imports resolve correctly`;
           continue; // Next verification attempt
         } else {
           if (!quiet) {
@@ -1356,8 +1446,13 @@ function printBatchSummary(
 
 // ── Audit ───────────────────────────────────────────────────
 
+// Internal exports for testing — not part of public API
+export { isTransientError, formatElapsed, formatProgress, autoDetectConcurrency };
+
 export async function runAudit(options: AuditOptions): Promise<void> {
-  const { specDir, prompt, model = 'opus', maxTurns = 250, verbose = false, quiet = false } = options;
+  const { specDir, prompt, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false, resume, fork } = options;
+  const effectiveResume = fork || resume;
+  const isFork = !!fork;
 
   if (!quiet) {
     showBanner('SHAPED BY PROMPTS ▲ TEMPERED BY FIRE.');
@@ -1374,6 +1469,12 @@ export async function runAudit(options: AuditOptions): Promise<void> {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`Directory not found: ${workingDir}`);
     throw err;
   }
+
+  // Load config and merge with defaults (CLI flags override config)
+  const config = await loadConfig(workingDir);
+  const effectiveModel = model || config.model || 'opus';
+  const effectiveMaxTurns = maxTurns ?? config.maxTurns ?? 250;
+  const effectiveMaxBudgetUsd = maxBudgetUsd ?? config.maxBudgetUsd ?? 10.00;
 
   // Read all .md files from specDir
   const resolvedSpecDir = path.resolve(specDir);
@@ -1450,17 +1551,23 @@ ${prompt ? `## Additional Context\n\n${prompt}\n` : ''}
 
   const startTime = new Date();
 
+  if (!quiet && isFork && effectiveResume) {
+    console.log(`${DIM}[forge]${RESET} Forking from: ${DIM}${effectiveResume}${RESET}`);
+  }
+
   const qr = await runQuery({
     prompt: auditPrompt,
     workingDir,
-    model,
-    maxTurns,
-    maxBudgetUsd: 10.00,
+    model: effectiveModel,
+    maxTurns: effectiveMaxTurns,
+    maxBudgetUsd: effectiveMaxBudgetUsd,
     verbose,
     quiet,
     silent: false,
     auditLogExtra: { type: 'audit' },
-    sessionExtra: { type: 'audit' },
+    sessionExtra: { type: 'audit', ...(isFork && { forkedFrom: fork }) },
+    resume: effectiveResume,
+    forkSession: isFork,
   });
 
   const endTime = new Date();
@@ -1473,9 +1580,10 @@ ${prompt ? `## Additional Context\n\n${prompt}\n` : ''}
     status: 'success',
     costUsd: qr.costUsd,
     prompt: '(audit)',
-    model,
+    model: effectiveModel,
     cwd: workingDir,
     sessionId: qr.sessionId,
+    forkedFrom: isFork ? fork : undefined,
     type: 'audit',
   };
 
@@ -1501,6 +1609,181 @@ ${prompt ? `## Additional Context\n\n${prompt}\n` : ''}
       console.log(`\n  ${BOLD}${outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
       outputSpecs.forEach((f, i) => console.log(`    ${DIM}${i + 1}.${RESET} ${f}`));
       console.log(`\n  Next step:\n    ${CMD}forge run --spec-dir ${outputDir} -C ${workingDir} "implement remaining work"${RESET}`);
+    }
+    console.log('');
+  }
+}
+
+// ── Review ──────────────────────────────────────────────────
+
+export async function runReview(options: ReviewOptions): Promise<void> {
+  const { diff, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false, dryRun = false, output } = options;
+
+  if (!quiet) {
+    showBanner('SHAPED BY PROMPTS ▲ TEMPERED BY FIRE.');
+  }
+
+  // Resolve working directory
+  const workingDir = options.cwd ? (await fs.realpath(options.cwd)) : process.cwd();
+
+  // Validate working directory
+  try {
+    const stat = await fs.stat(workingDir);
+    if (!stat.isDirectory()) throw new Error(`Not a directory: ${workingDir}`);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`Directory not found: ${workingDir}`);
+    throw err;
+  }
+
+  // Check if it's a git repository
+  try {
+    await execAsync('git rev-parse --git-dir', { cwd: workingDir });
+  } catch {
+    throw new Error('Not a git repository');
+  }
+
+  // Load config and merge with defaults (CLI flags override config)
+  const config = await loadConfig(workingDir);
+  const effectiveModel = model || config.model || 'sonnet';
+  const effectiveMaxTurns = maxTurns ?? config.maxTurns ?? 50;
+  const effectiveMaxBudgetUsd = maxBudgetUsd ?? config.maxBudgetUsd ?? 10.00;
+
+  // Determine diff range
+  let diffRange = diff;
+  if (!diffRange) {
+    // Auto-detect main branch (main or master)
+    try {
+      await execAsync('git rev-parse --verify main', { cwd: workingDir });
+      diffRange = 'main...HEAD';
+    } catch {
+      try {
+        await execAsync('git rev-parse --verify master', { cwd: workingDir });
+        diffRange = 'master...HEAD';
+      } catch {
+        // Check for detached HEAD
+        try {
+          const { stdout: headRef } = await execAsync('git symbolic-ref HEAD', { cwd: workingDir });
+          if (!headRef.trim()) {
+            throw new Error('Detached HEAD: specify a diff range (e.g., HEAD~10...HEAD) or checkout a branch');
+          }
+        } catch {
+          throw new Error('Detached HEAD: specify a diff range (e.g., HEAD~10...HEAD) or checkout a branch');
+        }
+        throw new Error('Neither main nor master branch exists. Specify a diff range explicitly.');
+      }
+    }
+  }
+
+  // Generate git diff
+  let diffOutput: string;
+  try {
+    const { stdout } = await execAsync(`git diff ${diffRange}`, { cwd: workingDir, maxBuffer: 10 * 1024 * 1024 });
+    diffOutput = stdout;
+  } catch (err) {
+    throw new Error(`Failed to generate diff: ${err instanceof Error ? err.message : 'Unknown error'}`);
+  }
+
+  // Handle empty diff
+  if (!diffOutput.trim()) {
+    if (!quiet) {
+      console.log('No changes to review.');
+    }
+    return;
+  }
+
+  // Truncate very large diffs to stay within context limits (~50KB)
+  const MAX_DIFF_SIZE = 50 * 1024;
+  let truncationNote = '';
+  if (diffOutput.length > MAX_DIFF_SIZE) {
+    diffOutput = diffOutput.substring(0, MAX_DIFF_SIZE);
+    truncationNote = '\n\n**Note**: Diff was truncated to ~50KB. Some changes may not be reviewed.';
+  }
+
+  if (!quiet) {
+    console.log(`${DIM}Diff:${RESET}        ${diffRange}`);
+    console.log(`${DIM}Working dir:${RESET} ${workingDir}`);
+    if (dryRun) {
+      console.log(`${DIM}Mode:${RESET}        dry-run (report only, no fixes applied)`);
+    }
+    console.log('');
+  }
+
+  // Construct review prompt
+  const reviewPrompt = `## Outcome
+
+Review the code changes below for quality issues, bugs, and blindspots.
+Categorize each finding by recommended action.
+
+## Changes
+
+\`\`\`diff
+${diffOutput}
+\`\`\`${truncationNote}
+
+## Finding Categories
+
+- **Fix Now**: Trivial effort, clear fix — apply the fix directly${dryRun ? ' (dry-run: describe fix only, do not apply)' : ''}
+- **Needs Spec**: Important but requires planning — describe what spec should cover
+- **Note**: Observation or suggestion, no action required
+
+## Acceptance Criteria
+
+- Every changed file reviewed
+- Each finding references specific file and line
+- Each finding has a category, description, and rationale
+- Fix Now items are ${dryRun ? 'described' : 'applied'} inline
+- Output format is a clean markdown list grouped by category`;
+
+  const startTime = new Date();
+
+  const qr = await runQuery({
+    prompt: reviewPrompt,
+    workingDir,
+    model: effectiveModel,
+    maxTurns: effectiveMaxTurns,
+    maxBudgetUsd: effectiveMaxBudgetUsd,
+    verbose,
+    quiet,
+    silent: false,
+    auditLogExtra: { type: 'review' },
+    sessionExtra: { type: 'review' },
+  });
+
+  const endTime = new Date();
+  const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
+
+  const forgeResult: ForgeResult = {
+    startedAt: startTime.toISOString(),
+    completedAt: endTime.toISOString(),
+    durationSeconds,
+    status: 'success',
+    costUsd: qr.costUsd,
+    prompt: `(review: ${diffRange})`,
+    model: effectiveModel,
+    cwd: workingDir,
+    sessionId: qr.sessionId,
+    type: 'run', // Using 'run' since review modifies code (Fix Now items)
+  };
+
+  await saveResult(workingDir, forgeResult, qr.resultText);
+
+  // Write findings to file if requested
+  if (output) {
+    const outputPath = path.resolve(output);
+    await fs.writeFile(outputPath, qr.resultText);
+    if (!quiet) {
+      console.log(`\n${DIM}[forge]${RESET} Findings written to: ${DIM}${outputPath}${RESET}`);
+    }
+  }
+
+  if (!quiet) {
+    console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+    console.log(`  Duration: ${BOLD}${durationSeconds.toFixed(1)}s${RESET}`);
+    if (qr.costUsd !== undefined) {
+      console.log(`  Cost:     ${BOLD}$${qr.costUsd.toFixed(4)}${RESET}`);
+    }
+    if (qr.sessionId) {
+      console.log(`  Session:  ${DIM}${qr.sessionId}${RESET}`);
     }
     console.log('');
   }
