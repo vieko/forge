@@ -4,7 +4,7 @@ import { program } from 'commander';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { runForge, showStatus, runAudit, runReview } from './query.js';
+import { runForge, showStatus, runAudit, runReview, runWatch } from './query.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -34,6 +34,7 @@ program
   .option('--concurrency <n>', 'Max concurrent specs in parallel mode (default: auto)')
   .option('--sequential-first <n>', 'Run first N specs sequentially before parallelizing')
   .option('--rerun-failed', 'Rerun only failed specs from latest batch')
+  .option('-w, --watch', 'Open a tmux pane with live session logs')
   .action(async (prompt: string, options: {
     spec?: string;
     specDir?: string;
@@ -51,6 +52,7 @@ program
     concurrency?: string;
     sequentialFirst?: string;
     rerunFailed?: boolean;
+    watch?: boolean;
   }) => {
     if (options.resume && options.fork) {
       console.error('Error: --resume and --fork are mutually exclusive. Use one or the other.');
@@ -63,6 +65,22 @@ program
         process.exit(1);
       }
     }
+    // --watch: open a tmux pane with live session logs
+    if (options.watch) {
+      if (process.env.TMUX) {
+        const watchCwd = options.cwd ? ` -C ${options.cwd}` : '';
+        const { exec: execCb } = await import('child_process');
+        execCb(`tmux split-window -h "forge watch${watchCwd}"`, (err) => {
+          if (err && !options.quiet) {
+            console.error('\x1b[2m[forge]\x1b[0m Could not open tmux watch pane:', err.message);
+          }
+        });
+      } else if (!options.quiet) {
+        console.log("\x1b[2m[forge]\x1b[0m Tip: Run '\x1b[36mforge watch\x1b[0m' in another terminal for live logs");
+        console.log("\x1b[2m[forge]\x1b[0m (or use --watch inside tmux for auto-split)\n");
+      }
+    }
+
     try {
       await runForge({
         prompt,
@@ -211,9 +229,26 @@ program
     }
   });
 
+program
+  .command('watch')
+  .description('Watch live session logs')
+  .argument('[session-id]', 'Session ID to watch (default: latest)')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .action(async (sessionId: string | undefined, options: { cwd?: string }) => {
+    try {
+      await runWatch({
+        sessionId,
+        cwd: options.cwd,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
 // Quick alias: `forge "do something"` = `forge run "do something"`
 const args = process.argv.slice(2);
-if (args.length > 0 && !args[0].startsWith('-') && args[0] !== 'run' && args[0] !== 'status' && args[0] !== 'audit' && args[0] !== 'review' && args[0] !== 'help' && args[0] !== '--help' && args[0] !== '-h' && args[0] !== '--version' && args[0] !== '-V') {
+if (args.length > 0 && !args[0].startsWith('-') && args[0] !== 'run' && args[0] !== 'status' && args[0] !== 'audit' && args[0] !== 'review' && args[0] !== 'watch' && args[0] !== 'help' && args[0] !== '--help' && args[0] !== '-h' && args[0] !== '--version' && args[0] !== '-V') {
   process.argv.splice(2, 0, 'run');
 }
 

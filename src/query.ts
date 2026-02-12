@@ -289,6 +289,12 @@ interface QueryResult {
   sessionId?: string;
   durationSeconds: number;
   numTurns?: number;
+  logPath?: string;
+}
+
+// Append a timestamped line to a stream log file (fire-and-forget)
+function streamLogAppend(logPath: string, message: string): void {
+  fs.appendFile(logPath, `[${new Date().toISOString()}] ${message}\n`).catch(() => {});
 }
 
 // Bash commands that are always blocked
@@ -318,7 +324,7 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
   // Stream log for session visibility (fire-and-forget writes)
   // Using an object wrapper to avoid TypeScript narrowing issues with async closures
   const sessionDir = path.join(workingDir, '.forge', 'sessions');
-  interface StreamLog { write: (line: string) => void; close: () => void }
+  interface StreamLog { write: (line: string) => void; close: () => void; logPath: string }
   const streamLog: { current: StreamLog | null } = { current: null };
 
   // Streaming state
@@ -459,13 +465,16 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
           if (sessionId) {
             const logDir = path.join(sessionDir, sessionId);
             fs.mkdir(logDir, { recursive: true }).then(() => {
-              const logPath = path.join(logDir, 'stream.log');
-              fs.open(logPath, 'a').then(fd => {
+              const logFilePath = path.join(logDir, 'stream.log');
+              fs.open(logFilePath, 'a').then(fd => {
                 streamLog.current = {
                   write: (line: string) => { fd.write(line + '\n').catch(() => {}); },
                   close: () => { fd.close().catch(() => {}); },
+                  logPath: logFilePath,
                 };
-                streamLog.current.write(`[${new Date().toISOString()}] Session started (model: ${modelName}, maxTurns: ${maxTurns})`);
+                // Spec metadata header
+                const specLabel = auditLogExtra.spec ? `, spec: ${auditLogExtra.spec}` : '';
+                streamLog.current.write(`[${new Date().toISOString()}] Session started (model: ${modelName}${specLabel})`);
               }).catch(() => {});
             }).catch(() => {});
           }
@@ -479,8 +488,15 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
             currentToolName = event.content_block.name;
             toolInputJson = '';
           } else if (event.type === 'content_block_delta') {
-            if (event.delta.type === 'text_delta' && progressMode === 'verbose') {
-              process.stdout.write(event.delta.text);
+            if (event.delta.type === 'text_delta') {
+              if (progressMode === 'verbose') {
+                process.stdout.write(event.delta.text);
+              }
+              // Log agent text blocks to stream log (reasoning visibility)
+              const log = streamLog.current;
+              if (log) {
+                log.write(`[${new Date().toISOString()}] Text: ${event.delta.text.replace(/\n/g, '\\n')}`);
+              }
             } else if (event.delta.type === 'input_json_delta') {
               toolInputJson += event.delta.partial_json;
             }
@@ -493,10 +509,21 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
                 onActivity(activity);
               }
 
-              // Write to stream log (fire-and-forget)
-              const log = streamLog.current;
-              if (log && activity) {
-                log.write(`[${new Date().toISOString()}] ${activity}`);
+              // Write enriched entry to stream log (fire-and-forget)
+              {
+                const log = streamLog.current;
+                if (log) {
+                  const ts = `[${new Date().toISOString()}]`;
+                  if (currentToolName === 'Edit' || currentToolName === 'Write') {
+                    const filePath = input.file_path as string;
+                    if (filePath) log.write(`${ts} ${currentToolName === 'Write' ? 'Writing' : 'Editing'} ${filePath}`);
+                  } else if (currentToolName === 'Bash') {
+                    const cmd = input.command as string;
+                    if (cmd) log.write(`${ts} $ ${cmd}`);
+                  } else if (activity) {
+                    log.write(`${ts} ${activity}`);
+                  }
+                }
               }
 
               // Console output based on progress mode
@@ -577,7 +604,7 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
             // Log success and close stream
             const log = streamLog.current;
             if (log) {
-              log.write(`[${new Date().toISOString()}] Result: success (${message.num_turns} turns, $${message.total_cost_usd?.toFixed(2) ?? 'N/A'})`);
+              log.write(`[${new Date().toISOString()}] Result: success (${message.num_turns} turns, $${message.total_cost_usd?.toFixed(2) ?? 'N/A'}, ${durationSeconds.toFixed(0)}s)`);
               log.close();
             }
             return {
@@ -586,6 +613,7 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
               sessionId: sessionId,
               durationSeconds,
               numTurns: message.num_turns,
+              logPath: streamLog.current?.logPath,
             };
           }
 
@@ -833,10 +861,12 @@ Focus on delivering working code that meets the acceptance criteria.`;
     // Run verification (unless dry-run or plan-only)
     if (!dryRun && !planOnly) {
       if (!quiet) console.log(`${DIM}[forge]${RESET} Running verification...`);
+      if (qr.logPath) streamLogAppend(qr.logPath, 'Verify: running verification...');
       const verification = await runVerification(workingDir, quiet, config.verify);
 
       if (!verification.passed) {
         verifyAttempt++;
+        if (qr.logPath) streamLogAppend(qr.logPath, `Verify: \u2717 failed (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
         if (verifyAttempt < maxVerifyAttempts) {
           if (!quiet) {
             console.log(`\n${DIM}[forge]${RESET} \x1b[33mVerification failed\x1b[0m (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
@@ -869,6 +899,7 @@ ${verification.errors}
         }
       } else {
         if (!quiet) console.log(`${DIM}[forge]${RESET} \x1b[32mVerification passed!\x1b[0m\n`);
+        if (qr.logPath) streamLogAppend(qr.logPath, 'Verify: \u2713 passed');
       }
     }
 
@@ -1441,6 +1472,195 @@ function printBatchSummary(
     }
     console.log(`  Cost:       ${BOLD}$${totalCost.toFixed(2)}${RESET}`);
     console.log(`  Result:     ${successCount === results.length ? '\x1b[32m' : '\x1b[33m'}${successCount}/${results.length} successful\x1b[0m`);
+  }
+}
+
+// ── Watch ────────────────────────────────────────────────────
+
+export interface WatchOptions {
+  sessionId?: string;
+  cwd?: string;
+}
+
+// ANSI color helpers for watch output
+function colorWatchLine(line: string): string {
+  // Extract the content after the timestamp prefix
+  const match = line.match(/^\[([^\]]+)\]\s(.*)$/);
+  if (!match) return line;
+
+  const ts = match[1];
+  const content = match[2];
+  const shortTs = ts.substring(11, 19); // HH:MM:SS from ISO string
+
+  // Session started
+  if (content.startsWith('Session started')) {
+    return `${DIM}${shortTs}${RESET} ${BOLD}${content}${RESET}`;
+  }
+
+  // Result line
+  if (content.startsWith('Result:')) {
+    return `${DIM}${shortTs}${RESET} ${BOLD}${content}${RESET}`;
+  }
+
+  // Verify lines
+  if (content.startsWith('Verify:')) {
+    if (content.includes('\u2713') || content.includes('passed')) {
+      return `${DIM}${shortTs}${RESET} \x1b[32m${content}\x1b[0m`;
+    }
+    if (content.includes('\u2717') || content.includes('failed')) {
+      return `${DIM}${shortTs}${RESET} \x1b[31m${content}\x1b[0m`;
+    }
+    return `${DIM}${shortTs}${RESET} ${content}`;
+  }
+
+  // Edit/Write — yellow filename
+  if (content.startsWith('Editing ') || content.startsWith('Writing ')) {
+    return `${DIM}${shortTs}${RESET} \x1b[33m${content}\x1b[0m`;
+  }
+
+  // Bash commands — cyan
+  if (content.startsWith('$ ')) {
+    return `${DIM}${shortTs}${RESET} ${CMD}${content}${RESET}`;
+  }
+
+  // Read/Grep/Glob — dim
+  if (content.startsWith('Reading ') || content.startsWith('Grep:') || content.startsWith('Glob:')) {
+    return `${DIM}${shortTs} ${content}${RESET}`;
+  }
+
+  // Text blocks — dim (agent reasoning)
+  if (content.startsWith('Text: ')) {
+    return `${DIM}${shortTs} ${content.substring(6)}${RESET}`;
+  }
+
+  // Error
+  if (content.startsWith('Error:')) {
+    return `${DIM}${shortTs}${RESET} \x1b[31m${content}\x1b[0m`;
+  }
+
+  // Default
+  return `${DIM}${shortTs}${RESET} ${content}`;
+}
+
+export async function runWatch(options: WatchOptions): Promise<void> {
+  const workingDir = options.cwd ? path.resolve(options.cwd) : process.cwd();
+  let logPath: string;
+
+  if (options.sessionId) {
+    // Watch a specific session
+    logPath = path.join(workingDir, '.forge', 'sessions', options.sessionId, 'stream.log');
+  } else {
+    // Watch latest session
+    const latestPath = path.join(workingDir, '.forge', 'latest-session.json');
+    try {
+      const data = JSON.parse(await fs.readFile(latestPath, 'utf-8'));
+      if (data.logPath) {
+        logPath = data.logPath;
+      } else if (data.sessionId) {
+        logPath = path.join(workingDir, '.forge', 'sessions', data.sessionId, 'stream.log');
+      } else {
+        console.error('No session found. Start a run first: forge run "task"');
+        process.exit(1);
+      }
+    } catch {
+      console.error('No session found. Start a run first: forge run "task"');
+      process.exit(1);
+    }
+  }
+
+  // Wait for the log file to exist (may not be created yet if watching a new run)
+  let waitAttempts = 0;
+  const maxWait = 300; // 30 seconds at 100ms intervals
+  while (waitAttempts < maxWait) {
+    try {
+      await fs.access(logPath);
+      break;
+    } catch {
+      waitAttempts++;
+      if (waitAttempts === 1) {
+        console.log(`${DIM}Waiting for session log...${RESET}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+
+  if (waitAttempts >= maxWait) {
+    console.error(`Timed out waiting for log file: ${logPath}`);
+    process.exit(1);
+  }
+
+  // Extract session ID from path for header
+  const sessionId = options.sessionId || path.basename(path.dirname(logPath));
+  console.log(`${DIM}Watching session ${sessionId} — Ctrl+C to detach${RESET}\n`);
+
+  // Read existing content and tail for new lines
+  let position = 0;
+  let sessionComplete = false;
+
+  async function readNewLines(): Promise<void> {
+    try {
+      const content = await fs.readFile(logPath, 'utf-8');
+      if (content.length > position) {
+        const newContent = content.substring(position);
+        const lines = newContent.split('\n');
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          console.log(colorWatchLine(line));
+
+          // Check for session completion
+          if (line.includes('Result:')) {
+            sessionComplete = true;
+          }
+        }
+        position = content.length;
+      }
+    } catch {
+      // File may be briefly unavailable during writes
+    }
+  }
+
+  // Initial read
+  await readNewLines();
+
+  if (sessionComplete) {
+    console.log(`\n${DIM}Session complete.${RESET}`);
+    return;
+  }
+
+  // Tail with fs.watch + periodic poll as fallback
+  const pollInterval = setInterval(readNewLines, 100);
+
+  let watcher: ReturnType<typeof import('fs').watch> | null = null;
+  try {
+    const fsSync = await import('fs');
+    watcher = fsSync.watch(logPath, () => {
+      readNewLines();
+    });
+  } catch {
+    // fs.watch not available, rely on polling
+  }
+
+  // Wait for completion or SIGINT
+  await new Promise<void>(resolve => {
+    const checkComplete = setInterval(() => {
+      if (sessionComplete) {
+        clearInterval(checkComplete);
+        resolve();
+      }
+    }, 200);
+
+    process.on('SIGINT', () => {
+      clearInterval(checkComplete);
+      resolve();
+    });
+  });
+
+  // Cleanup
+  clearInterval(pollInterval);
+  if (watcher) watcher.close();
+
+  if (sessionComplete) {
+    console.log(`\n${DIM}Session complete.${RESET}`);
   }
 }
 
