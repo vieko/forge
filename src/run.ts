@@ -1,0 +1,285 @@
+import type { ForgeOptions, ForgeResult } from './types.js';
+import { promises as fs } from 'fs';
+import path from 'path';
+import { ForgeError, resolveWorkingDir, resolveConfig, saveResult } from './utils.js';
+import { DIM, RESET, CMD, BOLD } from './display.js';
+import { runVerification } from './verify.js';
+import { runQuery, streamLogAppend } from './core.js';
+
+// Batch result type (used by parallel.ts)
+export interface BatchResult {
+  spec: string;
+  status: string;
+  cost?: number;
+  duration: number;
+}
+
+export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string }): Promise<ForgeResult> {
+  const { prompt, specPath, specContent, cwd, model, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, fork, _silent = false, _onActivity, _runId } = options;
+  const effectiveResume = fork || resume;
+  const isFork = !!fork;
+
+  // Resolve and validate working directory
+  const workingDir = await resolveWorkingDir(cwd);
+
+  // Load config and merge with defaults (CLI flags override config)
+  const resolved = await resolveConfig(workingDir, {
+    model,
+    maxTurns,
+    maxBudgetUsd,
+    defaultMaxBudgetUsd: dryRun ? 5.00 : 50.00,
+  });
+  const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd, config } = resolved;
+
+  // Read spec content if provided (and not already passed)
+  let finalSpecContent: string | undefined = specContent;
+  if (!finalSpecContent && specPath) {
+    try {
+      finalSpecContent = await fs.readFile(specPath, 'utf-8');
+    } catch {
+      throw new Error(`Spec file not found: ${specPath}`);
+    }
+  }
+
+  // Build the prompt
+  let fullPrompt = prompt;
+  if (finalSpecContent) {
+    fullPrompt = `## Specification\n\n${finalSpecContent}\n\n## Additional Context\n\n${prompt}`;
+  }
+
+  // Configure prompt - outcome-focused, not procedural
+  let workflowPrompt: string;
+  if (dryRun) {
+    workflowPrompt = `Analyze this work and create a task breakdown. Do NOT implement - this is a dry run for cost estimation.
+
+Output a structured summary:
+
+## Tasks
+
+[List each task with number, subject, and brief description]
+
+## Summary
+
+- Total tasks: [count]
+- Dependencies: [describe any task dependencies]
+
+${fullPrompt}`;
+  } else if (planOnly) {
+    workflowPrompt = `Analyze this work and create a task breakdown. Do NOT implement - planning only.\n\n${fullPrompt}`;
+  } else {
+    workflowPrompt = `## Outcome
+
+${fullPrompt}
+
+## Acceptance Criteria
+
+- Code compiles without errors
+- All imports resolve correctly
+- No TypeScript errors (if applicable)
+- UI elements are visible and functional
+
+## How to Work
+
+You decide the best approach. You may:
+- Work directly on the code
+- Break work into tasks if helpful
+- Use any tools available
+
+Focus on delivering working code that meets the acceptance criteria.`;
+  }
+
+  // Verification loop settings
+  const maxVerifyAttempts = 3;
+  let verifyAttempt = 0;
+  let currentPrompt = workflowPrompt;
+
+  const modelName = effectiveModel;
+  const startTime = new Date();
+
+  // Run the query
+  if (!quiet) {
+    if (cwd) {
+      console.log(`${DIM}Working directory:${RESET} ${workingDir}`);
+    }
+    if (dryRun) {
+      console.log(`${DIM}Mode: dry run (planning only)${RESET}\n`);
+    }
+  }
+
+  // Main execution + verification loop
+  while (verifyAttempt < maxVerifyAttempts) {
+    const qr = await runQuery({
+      prompt: currentPrompt,
+      workingDir,
+      model: modelName,
+      maxTurns: dryRun ? 20 : effectiveMaxTurns,
+      maxBudgetUsd: effectiveMaxBudgetUsd,
+      verbose,
+      quiet,
+      silent: _silent,
+      onActivity: _onActivity,
+      auditLogExtra: specPath ? { spec: path.basename(specPath) } : {},
+      sessionExtra: { prompt, ...(isFork && { forkedFrom: fork }) },
+      resume: effectiveResume,
+      forkSession: isFork,
+    });
+
+    const endTime = new Date();
+    const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
+
+    // Run verification (unless dry-run or plan-only)
+    if (!dryRun && !planOnly) {
+      if (!quiet) console.log(`${DIM}[forge]${RESET} Running verification...`);
+      if (qr.logPath) streamLogAppend(qr.logPath, 'Verify: running verification...');
+      const verification = await runVerification(workingDir, quiet, config.verify);
+
+      if (!verification.passed) {
+        verifyAttempt++;
+        if (qr.logPath) streamLogAppend(qr.logPath, `Verify: \u2717 failed (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
+        if (verifyAttempt < maxVerifyAttempts) {
+          if (!quiet) {
+            console.log(`\n${DIM}[forge]${RESET} \x1b[33mVerification failed\x1b[0m (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
+            console.log(`${DIM}[forge]${RESET} Sending errors back to agent for fixes...\n`);
+          }
+          // Update prompt with errors for next iteration (outcome-driven, not procedural)
+          currentPrompt = `## Outcome
+
+The codebase must pass all verification checks.
+
+## Current State
+
+Verification attempt ${verifyAttempt} of ${maxVerifyAttempts} failed with the errors below.
+
+## Errors
+
+${verification.errors}
+
+## Acceptance Criteria
+
+- All verification commands pass (typecheck, build, tests)
+- No compilation or type errors
+- All imports resolve correctly`;
+          continue; // Next verification attempt
+        } else {
+          // Final verification failure — save result and throw error
+          if (!quiet) {
+            console.log(`\n${DIM}[forge]${RESET} \x1b[31mVerification failed after ${maxVerifyAttempts} attempts\x1b[0m`);
+            console.log(`${DIM}[forge]${RESET} Errors:\n` + verification.errors);
+          }
+
+          const endTime = new Date();
+          const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
+
+          const forgeResult: ForgeResult = {
+            startedAt: startTime.toISOString(),
+            completedAt: endTime.toISOString(),
+            durationSeconds,
+            status: 'error_execution',
+            costUsd: qr.costUsd,
+            specPath,
+            prompt,
+            model: modelName,
+            cwd: workingDir,
+            sessionId: qr.sessionId,
+            forkedFrom: isFork ? fork : undefined,
+            runId: _runId,
+            error: `Verification failed after ${maxVerifyAttempts} attempts:\n${verification.errors}`,
+          };
+
+          const errorResultText = `# Verification Failed
+
+**Attempts**: ${maxVerifyAttempts}/${maxVerifyAttempts}
+**Cost**: $${qr.costUsd?.toFixed(4) ?? 'N/A'}
+**Session**: ${qr.sessionId || 'N/A'}
+
+## Errors
+
+${verification.errors}
+
+## Resume
+
+\`\`\`bash
+forge run --resume ${qr.sessionId} "fix verification errors"
+\`\`\``;
+
+          await saveResult(workingDir, forgeResult, errorResultText);
+          throw new ForgeError(`Verification failed after ${maxVerifyAttempts} attempts`, forgeResult);
+        }
+      } else {
+        if (!quiet) console.log(`${DIM}[forge]${RESET} \x1b[32mVerification passed!\x1b[0m\n`);
+        if (qr.logPath) streamLogAppend(qr.logPath, 'Verify: \u2713 passed');
+      }
+    }
+
+    // Save result to .forge/results/
+    const forgeResult: ForgeResult = {
+      startedAt: startTime.toISOString(),
+      completedAt: endTime.toISOString(),
+      durationSeconds,
+      status: 'success',
+      costUsd: qr.costUsd,
+      specPath,
+      prompt,
+      model: modelName,
+      cwd: workingDir,
+      sessionId: qr.sessionId,
+      forkedFrom: isFork ? fork : undefined,
+      runId: _runId
+    };
+
+    const resultsDir = await saveResult(workingDir, forgeResult, qr.resultText);
+
+    if (_silent) {
+      // Silent: no output at all (parallel mode)
+    } else if (quiet) {
+      // Quiet mode: just show results path
+      console.log(resultsDir);
+    } else {
+      // Display result (full, no truncation)
+      console.log('\n---\nResult:\n');
+      console.log(qr.resultText);
+
+      // Display summary
+      console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+      console.log(`  Duration: ${BOLD}${durationSeconds.toFixed(1)}s${RESET}`);
+      if (qr.costUsd !== undefined) {
+        console.log(`  Cost:     ${BOLD}$${qr.costUsd.toFixed(4)}${RESET}`);
+      }
+      console.log(`  Results:  ${DIM}${resultsDir}${RESET}`);
+      if (qr.sessionId) {
+        console.log(`  Session:  ${DIM}${qr.sessionId}${RESET}`);
+        console.log(`  Resume:   ${CMD}forge run --resume ${qr.sessionId} "continue"${RESET}`);
+        console.log(`  Fork:     ${CMD}forge run --fork ${qr.sessionId} "try different approach"${RESET}`);
+      }
+    }
+
+    // Dry run: show cost estimates
+    if (dryRun && !quiet) {
+      const taskCountMatch = qr.resultText.match(/Total tasks:\s*(\d+)/i);
+      const taskCount = taskCountMatch ? parseInt(taskCountMatch[1], 10) : 0;
+
+      const planningCost = qr.costUsd || 0;
+      const minExecCost = taskCount * 1.50;
+      const maxExecCost = taskCount * 2.50;
+      const minTotal = planningCost + minExecCost;
+      const maxTotal = planningCost + maxExecCost;
+
+      console.log('\n===== DRY RUN ESTIMATE =====');
+      console.log(`Planning cost: $${planningCost.toFixed(2)}`);
+      if (taskCount > 0) {
+        console.log(`Tasks: ${taskCount}`);
+        console.log(`Estimated execution: $${minExecCost.toFixed(2)} - $${maxExecCost.toFixed(2)}`);
+        console.log(`Estimated total: $${minTotal.toFixed(2)} - $${maxTotal.toFixed(2)}`);
+      } else {
+        console.log('Could not determine task count from output');
+      }
+      console.log(`\nRun without ${CMD}--dry-run${RESET} to execute.`);
+      console.log('================================');
+    }
+
+    return forgeResult;
+  }
+
+  // All verification attempts exhausted — should not normally reach here
+  throw new ForgeError('Verification failed after all attempts');
+}

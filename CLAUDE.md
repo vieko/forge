@@ -96,9 +96,20 @@ System-level verification                │ braille spinner display,
 
 ```
 src/
-├── index.ts    # CLI entry + arg parsing (~160 lines)
-├── query.ts    # SDK wrapper, verification, streaming, parallel, audit (~1510 lines)
-└── types.ts    # TypeScript types (~95 lines)
+├── index.ts       # CLI entry + arg parsing
+├── display.ts     # ANSI constants, banner, spinners, formatProgress, formatElapsed
+├── utils.ts       # ForgeError, execAsync, config, isTransientError, sleep, saveResult
+├── verify.ts      # detectVerification, runVerification
+├── core.ts        # QueryConfig, QueryResult, runQuery (SDK wrapper with hooks/streaming)
+├── run.ts         # runSingleSpec, BatchResult
+├── parallel.ts    # workerPool, autoDetectConcurrency, spec display, runForge
+├── watch.ts       # WatchOptions, colorWatchLine, runWatch
+├── audit.ts       # runAudit
+├── review.ts      # runReview
+├── status.ts      # showStatus
+├── types.ts       # TypeScript types
+├── query.test.ts  # Tests for core utilities
+└── types.test.ts  # Type validation tests
 
 .forge/
 ├── audit.jsonl   # Tool call audit log (with spec filename)

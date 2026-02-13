@@ -1,11 +1,7 @@
 import { describe, test, expect } from 'bun:test';
-import {
-  ForgeError,
-  isTransientError,
-  formatElapsed,
-  formatProgress,
-  autoDetectConcurrency,
-} from './query.js';
+import { ForgeError, isTransientError } from './utils.js';
+import { formatElapsed, formatProgress } from './display.js';
+import { autoDetectConcurrency } from './parallel.js';
 import type { ForgeResult } from './types.js';
 
 // ── isTransientError ─────────────────────────────────────────

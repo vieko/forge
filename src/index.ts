@@ -4,7 +4,11 @@ import { program } from 'commander';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { runForge, showStatus, runAudit, runReview, runWatch } from './query.js';
+import { runForge } from './parallel.js';
+import { showStatus } from './status.js';
+import { runAudit } from './audit.js';
+import { runReview } from './review.js';
+import { runWatch } from './watch.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
