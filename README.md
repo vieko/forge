@@ -1,5 +1,7 @@
 # Forge
 
+<img src="forge.png" alt="Forge" width="200" />
+
 A verification boundary for autonomous agents. Define outcomes, not procedures.
 
 One agent, one prompt, full autonomy. Forge doesn't tell the agent what to do — it verifies whether the outcome was met. Verification is external, objective, and automatic.
