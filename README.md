@@ -4,7 +4,7 @@ Outcome-driven development with agents. Shaped by prompts, Tempered by fire.
 
 ## The Problem
 
-Complex features require multiple steps: reading code, planning tasks, implementing changes, verifying results. Doing this manually with an Claude Code means constant back-and-forth.
+Complex features require multiple steps: reading code, planning tasks, implementing changes, verifying results. Doing this manually with Claude Code means constant back-and-forth.
 
 ## The Solution
 
@@ -40,6 +40,10 @@ $ forge run -C ~/dev/arkanoid-game --spec specs/power-ups.md "implement power-up
 ## Installation
 
 ```bash
+# From npm
+npm install -g @vieko/forge
+
+# From source
 git clone https://github.com/vieko/forge.git
 cd forge
 bun install
@@ -79,6 +83,15 @@ forge run -C ~/other-repo "add tests"
 # Resume interrupted session
 forge run --resume <session-id> "continue"
 
+# Fork from a previous session (new session, same history)
+forge run --fork <session-id> "try different approach"
+
+# Watch agent work in a tmux split pane
+forge run --watch "implement feature X"
+
+# Set a cost ceiling
+forge run --max-budget 5.00 "implement feature X"
+
 # Plan only (no implementation)
 forge run --plan-only "design API for Y"
 
@@ -93,12 +106,47 @@ forge run -v "debug issue Z"
 
 # Quiet mode (for CI, minimal output)
 forge run -q "implement feature X"
+```
 
-# View run results
-forge status                    # Latest run
-forge status --all              # All runs
-forge status -n 5               # Last 5 runs
-forge status -C ~/other-repo    # Different repo
+### Audit
+
+Review a codebase against spec acceptance criteria. Produces new specs for any remaining work — output feeds directly into `forge run --spec-dir`.
+
+```bash
+forge audit specs/                          # Audit, output to specs/audit/
+forge audit specs/ -C ~/target-repo         # Audit a different repo
+forge audit specs/ -o ./remediation/        # Custom output directory
+forge audit specs/ "focus on auth module"   # With additional context
+```
+
+### Review
+
+Review uncommitted git changes for issues, blindspots, and suggestions.
+
+```bash
+forge review                                # Review current changes
+forge review -C ~/other-repo               # Review a different repo
+```
+
+### Watch
+
+Live-tail a running session's stream log with ANSI-colored output.
+
+```bash
+forge watch                                 # Watch latest session
+forge watch <session-id>                    # Watch specific session
+forge watch -C ~/other-repo                # Watch session in another repo
+```
+
+### Status
+
+View results from recent runs.
+
+```bash
+forge status                                # Latest run
+forge status --all                          # All runs
+forge status -n 5                           # Last 5 runs
+forge status -C ~/other-repo               # Different repo
 ```
 
 ## How It Works
@@ -109,11 +157,11 @@ forge status -C ~/other-repo    # Different repo
 4. **Parallel execution** — worker pool runs specs concurrently with auto-tuned concurrency, braille spinner showing per-spec status and live tool activity
 5. **Sequential-first** — optionally run foundation specs sequentially before parallelizing the rest (`--sequential-first N`)
 6. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
-7. **Cost tracking** — per-spec and total cost in batch summary
+7. **Cost tracking** — per-spec and total cost in batch summary, with optional `--max-budget` ceiling
 8. **Result persistence** — saves structured metadata and full result text to `.forge/results/`
-9. **Rerun failed** — `--rerun-failed` finds and reruns only failed specs from the latest batch
-10. **Status** — `forge status` shows results from recent runs grouped by batch
-11. **Safety** — bash guardrails block destructive commands, audit log tracks all tool calls (includes spec filename)
+9. **Session persistence** — stream logs in `.forge/sessions/` enable resume, fork, and live tailing
+10. **Rerun failed** — `--rerun-failed` finds and reruns only failed specs from the latest batch
+11. **Safety** — bash guardrails block destructive commands, audit log tracks all tool calls
 12. **Resilience** — auto-retries rate limits and network errors with exponential backoff; session persistence for resume on interrupt
 
 ## Configuration
@@ -127,6 +175,15 @@ export VERCEL_AI_GATEWAY_URL=https://...
 export VERCEL_AI_GATEWAY_KEY=vck_...
 ```
 
+Project-level configuration in `.forge/config.json`:
+
+```json
+{
+  "maxTurns": 100,
+  "maxBudgetUsd": 10.00
+}
+```
+
 ## Works With
 
 - [Bonfire](https://github.com/vieko/bonfire) — Session context persistence. Use `/bonfire spec` to create specs, then run them with Forge.
@@ -137,6 +194,7 @@ export VERCEL_AI_GATEWAY_KEY=vck_...
 bun run src/index.ts run "test task"  # Dev mode
 bun run typecheck                      # Type check
 bun run build                          # Build
+bun test                               # Run tests
 ```
 
 ## License
