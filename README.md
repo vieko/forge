@@ -1,6 +1,6 @@
 # Forge
 
-<img src="forge.png" alt="Forge" width="200" />
+<p align="center"><img src="forge.png" alt="Forge" width="200" /></p>
 
 A verification boundary for autonomous agents. Define outcomes, not procedures.
 
