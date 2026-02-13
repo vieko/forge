@@ -1,6 +1,6 @@
 {
   "name": "@vieko/forge",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "A verification boundary for autonomous agents",
   "type": "module",
   "main": "./dist/index.js",
@@ -31,9 +31,9 @@
     "access": "public"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.31",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.42",
     "commander": "^12.0.0",
-    "zod": "^3.22.4"
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.5",
