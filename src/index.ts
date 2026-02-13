@@ -247,16 +247,35 @@ program
   });
 
 // Quick alias: `forge "do something"` = `forge run "do something"`
+const COMMANDS = new Set(['run', 'status', 'audit', 'review', 'watch', 'help']);
 const args = process.argv.slice(2);
-if (args.length > 0 && !args[0].startsWith('-') && args[0] !== 'run' && args[0] !== 'status' && args[0] !== 'audit' && args[0] !== 'review' && args[0] !== 'watch' && args[0] !== 'help' && args[0] !== '--help' && args[0] !== '-h' && args[0] !== '--version' && args[0] !== '-V') {
+if (args.length > 0 && !args[0].startsWith('-') && !COMMANDS.has(args[0])) {
   process.argv.splice(2, 0, 'run');
+}
+
+// Parse -C/--cwd early for SIGINT handler (before commander parses)
+function getTargetCwd(): string {
+  const args = process.argv;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-C' || args[i] === '--cwd') {
+      return args[i + 1] || process.cwd();
+    }
+    if (args[i].startsWith('-C=')) {
+      return args[i].slice(3);
+    }
+    if (args[i].startsWith('--cwd=')) {
+      return args[i].slice(6);
+    }
+  }
+  return process.cwd();
 }
 
 // Handle SIGINT gracefully
 process.on('SIGINT', () => {
   console.log('\nInterrupted.');
   try {
-    const data = JSON.parse(readFileSync(join(process.cwd(), '.forge', 'latest-session.json'), 'utf-8'));
+    const targetCwd = getTargetCwd();
+    const data = JSON.parse(readFileSync(join(targetCwd, '.forge', 'latest-session.json'), 'utf-8'));
     if (data.sessionId) {
       console.log(`Session: ${data.sessionId}`);
       console.log(`Resume: \x1b[36mforge run --resume ${data.sessionId} "continue"\x1b[0m`);

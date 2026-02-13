@@ -36,6 +36,60 @@ async function loadConfig(workingDir: string): Promise<ForgeConfig> {
   }
 }
 
+// ── Shared helpers ───────────────────────────────────────────
+
+// Resolve and validate working directory
+async function resolveWorkingDir(cwd?: string): Promise<string> {
+  const workingDir = cwd ? (await fs.realpath(cwd)) : process.cwd();
+  try {
+    const stat = await fs.stat(workingDir);
+    if (!stat.isDirectory()) {
+      throw new Error(`Not a directory: ${workingDir}`);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Directory not found: ${workingDir}`);
+    }
+    throw err;
+  }
+  return workingDir;
+}
+
+// Load config and merge with per-command defaults
+interface ConfigOverrides {
+  model?: string;
+  maxTurns?: number;
+  maxBudgetUsd?: number;
+  defaultModel?: string;
+  defaultMaxTurns?: number;
+  defaultMaxBudgetUsd?: number;
+}
+
+interface ResolvedConfig {
+  model: string;
+  maxTurns: number;
+  maxBudgetUsd: number;
+  config: ForgeConfig;
+}
+
+async function resolveConfig(workingDir: string, overrides: ConfigOverrides): Promise<ResolvedConfig> {
+  const config = await loadConfig(workingDir);
+  return {
+    model: overrides.model || config.model || overrides.defaultModel || 'opus',
+    maxTurns: overrides.maxTurns ?? config.maxTurns ?? overrides.defaultMaxTurns ?? 250,
+    maxBudgetUsd: overrides.maxBudgetUsd ?? config.maxBudgetUsd ?? overrides.defaultMaxBudgetUsd ?? 50.00,
+    config,
+  };
+}
+
+// Batch result type (internal)
+interface BatchResult {
+  spec: string;
+  status: string;
+  cost?: number;
+  duration: number;
+}
+
 // ── ANSI Colors ──────────────────────────────────────────────
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -84,6 +138,9 @@ const AGENT_VERBS = [
   'Alloying',
 ];
 
+// Braille spinner frames for inline and multi-line displays
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 // Single-line spinner that overwrites itself in place
 // prefix: fixed left portion (e.g. "[forge]"), frame renders after it
 function createInlineSpinner(prefix: string) {
@@ -96,7 +153,7 @@ function createInlineSpinner(prefix: string) {
     const frame = SPINNER_FRAMES[frameIndex % SPINNER_FRAMES.length];
     const line = `${prefix} ${CMD}${frame}${RESET}${text ? ` ${text}` : ''}`;
     const truncated = line.length > cols() ? line.substring(0, cols() - 1) : line;
-    process.stdout.write(`\x1B[2K\r${truncated}`);
+    process.stdout.write(`\x1b[2K\r${truncated}`);
     frameIndex++;
   }
 
@@ -105,7 +162,7 @@ function createInlineSpinner(prefix: string) {
     update(newText: string) { text = newText; },
     stop(finalLine?: string) {
       if (interval) clearInterval(interval);
-      process.stdout.write('\x1B[2K\r');
+      process.stdout.write('\x1b[2K\r');
       if (finalLine) console.log(finalLine);
     },
   };
@@ -332,6 +389,7 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
   let currentToolName: string | null = null;
   let toolInputJson = '';
   let toolCount = 0;
+  let textDeltaBuffer = ''; // Accumulate text deltas for batched logging
 
   // Spinner
   const useSpinner = !silent && !verbose && !quiet;
@@ -373,6 +431,7 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
 
   // Hook: Tool call audit log
   const auditPath = path.join(workingDir, '.forge', 'audit.jsonl');
+  let forgeDirCreated = false;
   const auditLog: HookCallback = async (input, toolUseID) => {
     try {
       const inp = input as Record<string, unknown>;
@@ -384,7 +443,10 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
         toolUseId: toolUseID,
         input: inp.tool_input,
       };
-      await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
+      if (!forgeDirCreated) {
+        await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
+        forgeDirCreated = true;
+      }
       await fs.appendFile(auditPath, JSON.stringify(entry) + '\n');
     } catch {
       // Never crash on audit failures
@@ -484,23 +546,34 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
         if (message.type === 'stream_event' && (!quiet || onActivity)) {
           const event = message.event;
 
-          if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
-            currentToolName = event.content_block.name;
-            toolInputJson = '';
+          if (event.type === 'content_block_start') {
+            if (event.content_block.type === 'tool_use') {
+              currentToolName = event.content_block.name;
+              toolInputJson = '';
+            } else if (event.content_block.type === 'text') {
+              textDeltaBuffer = ''; // Reset buffer for new text block
+            }
           } else if (event.type === 'content_block_delta') {
             if (event.delta.type === 'text_delta') {
               if (progressMode === 'verbose') {
                 process.stdout.write(event.delta.text);
               }
-              // Log agent text blocks to stream log (reasoning visibility)
-              const log = streamLog.current;
-              if (log) {
-                log.write(`[${new Date().toISOString()}] Text: ${event.delta.text.replace(/\n/g, '\\n')}`);
-              }
+              // Accumulate text deltas (logged at content_block_stop)
+              textDeltaBuffer += event.delta.text;
             } else if (event.delta.type === 'input_json_delta') {
               toolInputJson += event.delta.partial_json;
             }
-          } else if (event.type === 'content_block_stop' && currentToolName) {
+          } else if (event.type === 'content_block_stop') {
+            // Flush accumulated text delta buffer to stream log
+            if (textDeltaBuffer) {
+              const log = streamLog.current;
+              if (log) {
+                log.write(`[${new Date().toISOString()}] Text: ${textDeltaBuffer.replace(/\n/g, '\\n')}`);
+              }
+              textDeltaBuffer = '';
+            }
+
+            if (!currentToolName) continue; // No tool to process
             try {
               const input = JSON.parse(toolInputJson || '{}') as Record<string, unknown>;
               const activity = deriveActivity(currentToolName, input);
@@ -533,10 +606,9 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
                   const description = input.description as string;
                   if (agentType && agentType !== currentAgent) {
                     currentAgent = agentType;
-                    const desc = description ? `: ${description}` : '';
                     toolCount++;
                     const verb = AGENT_VERBS[toolCount % AGENT_VERBS.length];
-                    agentSpinner.update(`${CMD}${verb}...${RESET}  ${desc.substring(2)}`);
+                    agentSpinner.update(`${CMD}${verb}...${RESET}  ${description || ''}`);
                   }
                 } else if (activity) {
                   toolCount++;
@@ -554,35 +626,6 @@ async function runQuery(config: QueryConfig): Promise<QueryResult> {
                   }
                 }
                 // In verbose mode, text deltas already stream above
-              } else if (progressMode === 'spinner' && !agentSpinner) {
-                // Non-spinner fallback (quiet=false but spinner not yet started)
-                if (currentToolName === 'Task') {
-                  const agentType = input.subagent_type as string;
-                  const description = input.description as string;
-                  if (agentType && agentType !== currentAgent) {
-                    currentAgent = agentType;
-                    const desc = description ? `: ${description}` : '';
-                    console.log(formatProgress(currentAgent, `Starting${desc}`));
-                  }
-                } else if (currentToolName === 'TaskCreate') {
-                  const subject = input.subject as string;
-                  if (subject) console.log(formatProgress(currentAgent, `Creating task: ${subject}`));
-                } else if (currentToolName === 'TaskUpdate') {
-                  const status = input.status as string;
-                  if (status === 'completed') console.log(formatProgress(currentAgent, 'Task completed'));
-                } else if (currentToolName === 'Edit' || currentToolName === 'Write') {
-                  const filePath = input.file_path as string;
-                  if (filePath) {
-                    const fileName = filePath.split('/').pop();
-                    console.log(formatProgress(currentAgent, `Editing ${fileName}`));
-                  }
-                } else if (currentToolName === 'Bash') {
-                  const cmd = input.command as string;
-                  if (cmd) {
-                    const shortCmd = cmd.length > 50 ? cmd.substring(0, 47) + '...' : cmd;
-                    console.log(formatProgress(currentAgent, `Running: ${shortCmd}`));
-                  }
-                }
               }
               // progressMode === 'silent': no output
             } catch {
@@ -740,27 +783,17 @@ async function runSingleSpec(options: ForgeOptions & { specContent?: string; _si
   const effectiveResume = fork || resume;
   const isFork = !!fork;
 
-  // Resolve working directory
-  const workingDir = cwd ? (await fs.realpath(cwd)) : process.cwd();
-
-  // Validate working directory exists
-  try {
-    const stat = await fs.stat(workingDir);
-    if (!stat.isDirectory()) {
-      throw new Error(`Not a directory: ${workingDir}`);
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error(`Directory not found: ${workingDir}`);
-    }
-    throw err;
-  }
+  // Resolve and validate working directory
+  const workingDir = await resolveWorkingDir(cwd);
 
   // Load config and merge with defaults (CLI flags override config)
-  const config = await loadConfig(workingDir);
-  const effectiveModel = model || config.model || 'opus';
-  const effectiveMaxTurns = maxTurns ?? config.maxTurns ?? 250;
-  const effectiveMaxBudgetUsd = maxBudgetUsd ?? config.maxBudgetUsd ?? (dryRun ? 5.00 : 50.00);
+  const resolved = await resolveConfig(workingDir, {
+    model,
+    maxTurns,
+    maxBudgetUsd,
+    defaultMaxBudgetUsd: dryRun ? 5.00 : 50.00,
+  });
+  const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd, config } = resolved;
 
   // Read spec content if provided (and not already passed)
   let finalSpecContent: string | undefined = specContent;
@@ -892,10 +925,49 @@ ${verification.errors}
 - All imports resolve correctly`;
           continue; // Next verification attempt
         } else {
+          // Final verification failure — save result and throw error
           if (!quiet) {
             console.log(`\n${DIM}[forge]${RESET} \x1b[31mVerification failed after ${maxVerifyAttempts} attempts\x1b[0m`);
             console.log(`${DIM}[forge]${RESET} Errors:\n` + verification.errors);
           }
+
+          const endTime = new Date();
+          const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
+
+          const forgeResult: ForgeResult = {
+            startedAt: startTime.toISOString(),
+            completedAt: endTime.toISOString(),
+            durationSeconds,
+            status: 'error_execution',
+            costUsd: qr.costUsd,
+            specPath,
+            prompt,
+            model: modelName,
+            cwd: workingDir,
+            sessionId: qr.sessionId,
+            forkedFrom: isFork ? fork : undefined,
+            runId: _runId,
+            error: `Verification failed after ${maxVerifyAttempts} attempts:\n${verification.errors}`,
+          };
+
+          const errorResultText = `# Verification Failed
+
+**Attempts**: ${maxVerifyAttempts}/${maxVerifyAttempts}
+**Cost**: $${qr.costUsd?.toFixed(4) ?? 'N/A'}
+**Session**: ${qr.sessionId || 'N/A'}
+
+## Errors
+
+${verification.errors}
+
+## Resume
+
+\`\`\`bash
+forge run --resume ${qr.sessionId} "fix verification errors"
+\`\`\``;
+
+          await saveResult(workingDir, forgeResult, errorResultText);
+          throw new ForgeError(`Verification failed after ${maxVerifyAttempts} attempts`, forgeResult);
         }
       } else {
         if (!quiet) console.log(`${DIM}[forge]${RESET} \x1b[32mVerification passed!\x1b[0m\n`);
@@ -1006,8 +1078,6 @@ function formatElapsed(ms: number): string {
 }
 
 // Multi-line spinner display for parallel spec execution
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
 type SpecStatus = 'waiting' | 'running' | 'success' | 'failed';
 
 interface SpecState {
@@ -1031,7 +1101,7 @@ function createSpecDisplay(specFiles: string[]) {
 
     // Move cursor up to overwrite previous render (cursor is ON last line, not below it)
     if (linesDrawn > 0) {
-      process.stdout.write(`\x1B[${linesDrawn}A`);
+      process.stdout.write(`\x1b[${linesDrawn}A`);
     }
 
     const prefixWidth = nameWidth + 14; // "X " + name + " elapsed(10)"
@@ -1063,14 +1133,14 @@ function createSpecDisplay(specFiles: string[]) {
           break;
         }
         case 'success':
-          lines.push(`\x1B[32m✓\x1B[0m ${padName} \x1B[32m${formatElapsed(s.duration! * 1000)}\x1B[0m`);
+          lines.push(`\x1b[32m✓\x1b[0m ${padName} \x1b[32m${formatElapsed(s.duration! * 1000)}\x1b[0m`);
           break;
         case 'failed': {
           const errMax = Math.max(0, cols - prefixWidth - 10); // "failed" + spacing
           const errDetail = s.error && errMax > 5
             ? `  ${DIM}${s.error.substring(0, errMax)}${RESET}`
             : '';
-          lines.push(`\x1B[31m✗\x1B[0m ${padName} \x1B[31mfailed\x1B[0m${errDetail}`);
+          lines.push(`\x1b[31m✗\x1b[0m ${padName} \x1b[31mfailed\x1b[0m${errDetail}`);
           break;
         }
       }
@@ -1079,7 +1149,7 @@ function createSpecDisplay(specFiles: string[]) {
     // Clear and write each line; no trailing \n on last line to prevent scroll
     for (let i = 0; i < lines.length; i++) {
       const eol = i < lines.length - 1 ? '\n' : '';
-      process.stdout.write(`\x1B[2K\r${lines[i]}${eol}`);
+      process.stdout.write(`\x1b[2K\r${lines[i]}${eol}`);
     }
     linesDrawn = lines.length - 1; // cursor is ON last line, move up N-1 to reach first
     frameIndex++;
@@ -1129,8 +1199,8 @@ async function runSpecBatch(
   options: ForgeOptions,
   concurrency: number,
   runId: string,
-): Promise<{ spec: string; status: string; cost?: number; duration: number }[]> {
-  const results: { spec: string; status: string; cost?: number; duration: number }[] = [];
+): Promise<BatchResult[]> {
+  const results: BatchResult[] = [];
   const { quiet, parallel, sequentialFirst = 0 } = options;
 
   // Split into sequential-first and parallel portions
@@ -1240,16 +1310,19 @@ async function findFailedSpecs(workingDir: string): Promise<{ runId: string; spe
     throw new Error('No results found in .forge/results/');
   }
 
-  // Find the latest runId by scanning summaries
+  // Single pass: read all summaries, find latest runId, collect failures
+  const summaries: ForgeResult[] = [];
   let latestRunId: string | undefined;
+
   for (const dir of dirs) {
     try {
       const summary: ForgeResult = JSON.parse(
         await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
       );
-      if (summary.runId) {
+      summaries.push(summary);
+      // First result with a runId is the latest (dirs sorted newest first)
+      if (!latestRunId && summary.runId) {
         latestRunId = summary.runId;
-        break;
       }
     } catch { continue; }
   }
@@ -1258,18 +1331,10 @@ async function findFailedSpecs(workingDir: string): Promise<{ runId: string; spe
     throw new Error('No batch runs found (no runId in results). Run with --spec-dir first.');
   }
 
-  // Collect all results with this runId
-  const failedPaths: string[] = [];
-  for (const dir of dirs) {
-    try {
-      const summary: ForgeResult = JSON.parse(
-        await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
-      );
-      if (summary.runId === latestRunId && summary.status !== 'success' && summary.specPath) {
-        failedPaths.push(summary.specPath);
-      }
-    } catch { continue; }
-  }
+  // Filter failures from the same batch
+  const failedPaths = summaries
+    .filter(s => s.runId === latestRunId && s.status !== 'success' && s.specPath)
+    .map(s => s.specPath!);
 
   return { runId: latestRunId, specPaths: failedPaths };
 }
@@ -1340,7 +1405,7 @@ export async function showStatus(options: { cwd?: string; all?: boolean; last?: 
 
     for (const s of specs) {
       const name = s.specPath ? path.basename(s.specPath) : '(no spec)';
-      const statusIcon = s.status === 'success' ? '\x1B[32m✓\x1B[0m' : '\x1B[31m✗\x1B[0m';
+      const statusIcon = s.status === 'success' ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
       const cost = s.costUsd !== undefined ? `$${s.costUsd.toFixed(2)}` : '   -';
       console.log(`  ${statusIcon} ${name.padEnd(35)} ${s.durationSeconds.toFixed(0).padStart(4)}s  ${cost}`);
     }
@@ -1447,7 +1512,7 @@ export async function runForge(options: ForgeOptions): Promise<void> {
 
 // Print batch summary with cost tracking
 function printBatchSummary(
-  results: { spec: string; status: string; cost?: number; duration: number }[],
+  results: BatchResult[],
   wallClockDuration: number,
   parallel: boolean,
   quiet: boolean,
@@ -1559,12 +1624,13 @@ export async function runWatch(options: WatchOptions): Promise<void> {
       } else if (data.sessionId) {
         logPath = path.join(workingDir, '.forge', 'sessions', data.sessionId, 'stream.log');
       } else {
-        console.error('No session found. Start a run first: forge run "task"');
-        process.exit(1);
+        throw new Error('No session found. Start a run first: forge run "task"');
       }
-    } catch {
-      console.error('No session found. Start a run first: forge run "task"');
-      process.exit(1);
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('No session found')) {
+        throw err;
+      }
+      throw new Error('No session found. Start a run first: forge run "task"');
     }
   }
 
@@ -1585,8 +1651,7 @@ export async function runWatch(options: WatchOptions): Promise<void> {
   }
 
   if (waitAttempts >= maxWait) {
-    console.error(`Timed out waiting for log file: ${logPath}`);
-    process.exit(1);
+    throw new Error(`Timed out waiting for log file: ${logPath}`);
   }
 
   // Extract session ID from path for header
@@ -1594,14 +1659,32 @@ export async function runWatch(options: WatchOptions): Promise<void> {
   console.log(`${DIM}Watching session ${sessionId} — Ctrl+C to detach${RESET}\n`);
 
   // Read existing content and tail for new lines
-  let position = 0;
+  let byteOffset = 0; // Track position as byte offset, not string length
   let sessionComplete = false;
+  let reading = false; // Concurrency guard to prevent duplicate reads
 
   async function readNewLines(): Promise<void> {
+    // Concurrency guard: skip if already reading
+    if (reading) return;
+    reading = true;
+
     try {
-      const content = await fs.readFile(logPath, 'utf-8');
-      if (content.length > position) {
-        const newContent = content.substring(position);
+      // Check if file has grown before reading
+      const stat = await fs.stat(logPath);
+      if (stat.size <= byteOffset) {
+        reading = false;
+        return;
+      }
+
+      // Read only new bytes from the file
+      const fd = await fs.open(logPath, 'r');
+      try {
+        const bytesToRead = stat.size - byteOffset;
+        const buffer = Buffer.alloc(bytesToRead);
+        await fd.read(buffer, 0, bytesToRead, byteOffset);
+        byteOffset = stat.size;
+
+        const newContent = buffer.toString('utf-8');
         const lines = newContent.split('\n');
         for (const line of lines) {
           if (!line.trim()) continue;
@@ -1612,10 +1695,13 @@ export async function runWatch(options: WatchOptions): Promise<void> {
             sessionComplete = true;
           }
         }
-        position = content.length;
+      } finally {
+        await fd.close();
       }
     } catch {
       // File may be briefly unavailable during writes
+    } finally {
+      reading = false;
     }
   }
 
@@ -1678,23 +1764,17 @@ export async function runAudit(options: AuditOptions): Promise<void> {
     showBanner('SHAPED BY PROMPTS ▲ TEMPERED BY FIRE.');
   }
 
-  // Resolve working directory
-  const workingDir = options.cwd ? (await fs.realpath(options.cwd)) : process.cwd();
-
-  // Validate working directory
-  try {
-    const stat = await fs.stat(workingDir);
-    if (!stat.isDirectory()) throw new Error(`Not a directory: ${workingDir}`);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`Directory not found: ${workingDir}`);
-    throw err;
-  }
+  // Resolve and validate working directory
+  const workingDir = await resolveWorkingDir(options.cwd);
 
   // Load config and merge with defaults (CLI flags override config)
-  const config = await loadConfig(workingDir);
-  const effectiveModel = model || config.model || 'opus';
-  const effectiveMaxTurns = maxTurns ?? config.maxTurns ?? 250;
-  const effectiveMaxBudgetUsd = maxBudgetUsd ?? config.maxBudgetUsd ?? 10.00;
+  const resolved = await resolveConfig(workingDir, {
+    model,
+    maxTurns,
+    maxBudgetUsd,
+    defaultMaxBudgetUsd: 10.00,
+  });
+  const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd } = resolved;
 
   // Read all .md files from specDir
   const resolvedSpecDir = path.resolve(specDir);
@@ -1843,17 +1923,8 @@ export async function runReview(options: ReviewOptions): Promise<void> {
     showBanner('SHAPED BY PROMPTS ▲ TEMPERED BY FIRE.');
   }
 
-  // Resolve working directory
-  const workingDir = options.cwd ? (await fs.realpath(options.cwd)) : process.cwd();
-
-  // Validate working directory
-  try {
-    const stat = await fs.stat(workingDir);
-    if (!stat.isDirectory()) throw new Error(`Not a directory: ${workingDir}`);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`Directory not found: ${workingDir}`);
-    throw err;
-  }
+  // Resolve and validate working directory
+  const workingDir = await resolveWorkingDir(options.cwd);
 
   // Check if it's a git repository
   try {
@@ -1863,10 +1934,15 @@ export async function runReview(options: ReviewOptions): Promise<void> {
   }
 
   // Load config and merge with defaults (CLI flags override config)
-  const config = await loadConfig(workingDir);
-  const effectiveModel = model || config.model || 'sonnet';
-  const effectiveMaxTurns = maxTurns ?? config.maxTurns ?? 50;
-  const effectiveMaxBudgetUsd = maxBudgetUsd ?? config.maxBudgetUsd ?? 10.00;
+  const resolved = await resolveConfig(workingDir, {
+    model,
+    maxTurns,
+    maxBudgetUsd,
+    defaultModel: 'sonnet',
+    defaultMaxTurns: 50,
+    defaultMaxBudgetUsd: 10.00,
+  });
+  const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd } = resolved;
 
   // Determine diff range
   let diffRange = diff;
@@ -1982,7 +2058,7 @@ ${diffOutput}
     model: effectiveModel,
     cwd: workingDir,
     sessionId: qr.sessionId,
-    type: 'run', // Using 'run' since review modifies code (Fix Now items)
+    type: 'review',
   };
 
   await saveResult(workingDir, forgeResult, qr.resultText);

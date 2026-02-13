@@ -12,7 +12,7 @@ export interface ForgeOptions {
   cwd?: string;
   /** Model to use (shorthand like 'opus'/'sonnet' or full ID like 'claude-opus-4-6') */
   model?: string;
-  /** Maximum turns per spec (default: 100) */
+  /** Maximum turns per spec (default: 250) */
   maxTurns?: number;
   /** Maximum budget in USD (default: $50 run, $5 dry-run) */
   maxBudgetUsd?: number;
@@ -69,7 +69,7 @@ export interface ForgeResult {
   /** Batch run ID for grouping specs in the same run */
   runId?: string;
   /** Type of run */
-  type?: 'run' | 'audit';
+  type?: 'run' | 'audit' | 'review';
 }
 
 /**
