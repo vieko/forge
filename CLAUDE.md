@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Forge is an outcome-driven development tool built on Anthropic's Agent SDK. Define the outcome, the agent builds and verifies.
+Forge is a verification boundary for autonomous agents, built on Anthropic's Agent SDK. Define outcomes, not procedures.
 
 **Key Architecture**: Single Agent SDK `query()` call with outcome-based prompts. No procedural agent pipeline — the agent decides its own approach. System-level verification catches errors and loops back for fixes.
 

@@ -15,7 +15,7 @@ const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-
 
 program
   .name('forge')
-  .description('Outcome-driven development with agents')
+  .description('A verification boundary for autonomous agents')
   .version(pkg.version);
 
 program

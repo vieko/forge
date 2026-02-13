@@ -1,7 +1,7 @@
 {
   "name": "@vieko/forge",
   "version": "2.6.0",
-  "description": "Outcome-driven development with agents",
+  "description": "A verification boundary for autonomous agents",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
@@ -17,7 +17,7 @@
   "keywords": [
     "claude",
     "agent-sdk",
-    "outcome-driven",
+    "verification-boundary",
     "code-generation",
     "ai"
   ],

@@ -1,8 +1,7 @@
 ---
 name: forge
 description: >-
-  Outcome-driven development CLI that delegates tasks to AI agents with
-  automatic verification. Use when the user wants to run forge, execute specs,
+  Verification boundary CLI that delegates tasks to autonomous agents. Use when the user wants to run forge, execute specs,
   run specs in parallel, audit code against specs, review changes, watch live
   logs, check run status, resume a session, or delegate complex multi-step work
   to an autonomous agent. Triggers include "forge run", "run this spec",
