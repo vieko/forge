@@ -1,14 +1,14 @@
 # Forge
 
-Outcome-driven development with agents. Shaped by prompts, Tempered by fire.
+A verification boundary for autonomous agents. Define outcomes, not procedures.
 
 ## The Problem
 
-Complex features require multiple steps: reading code, planning tasks, implementing changes, verifying results. Doing this manually with Claude Code means constant back-and-forth.
+Over-instruction makes agents worse. More detail means more fragility. Most agent tooling solves this by adding orchestration — planning phases, multi-step coordination, task pipelines. That's the wrong default.
 
 ## The Solution
 
-Define the outcome. The agent builds and verifies. Forge wraps Claude Code in an outcome-focused prompt, runs it, checks the output, and loops back until it passes.
+Define the outcome, not the procedure. One agent, one prompt, full autonomy. Forge doesn't tell the agent what to do — it verifies whether the outcome was met. The agent decides its own approach. Verification is external, objective, and automatic.
 
 ```
 User Prompt
@@ -18,9 +18,9 @@ Outcome-focused prompt construction
 Agent SDK query()  ──────────────────────┐
     ↓                                    │ parallel mode:
 Agent works autonomously                 │ worker pool with
-    ↓                                    │ auto-tuned concurrency,
-System-level verification                │ braille spinner display,
-    ├── Auto-detect project (Node/Cargo/Go)  live tool activity
+    ↓                                    │ auto-tuned concurrency
+Verification boundary
+    ├── Auto-detect project (Node/Cargo/Go)
     ├── Run: tsc --noEmit, npm run build, npm test
     ├── Pass → save results
     └── Fail → feed errors back (up to 3 attempts)
@@ -152,11 +152,11 @@ forge status -C ~/other-repo               # Different repo
 ## How It Works
 
 1. **Prompt construction** — wraps user prompt in outcome-focused template with acceptance criteria
-2. **Agent execution** — single SDK `query()` call; the agent decides its own approach
+2. **Agent execution** — single agent call with full autonomy — no orchestration, no choreography
 3. **Streaming** — real-time progress output via `includePartialMessages`
 4. **Parallel execution** — worker pool runs specs concurrently with auto-tuned concurrency, braille spinner showing per-spec status and live tool activity
 5. **Sequential-first** — optionally run foundation specs sequentially before parallelizing the rest (`--sequential-first N`)
-6. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
+6. **Verification boundary** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts. The system says "done" or "not done" — the agent can't talk its way around it
 7. **Cost tracking** — per-spec and total cost in batch summary, with optional `--max-budget` ceiling
 8. **Result persistence** — saves structured metadata and full result text to `.forge/results/`
 9. **Session persistence** — stream logs in `.forge/sessions/` enable resume, fork, and live tailing
@@ -187,6 +187,10 @@ Project-level configuration in `.forge/config.json`:
 ## Works With
 
 - [Bonfire](https://github.com/vieko/bonfire) — Session context persistence. Use `/bonfire spec` to create specs, then run them with Forge.
+
+## Read More
+
+- [The Orchestrator I Didn't Build](https://vieko.dev/outcomes) — the pattern behind Forge
 
 ## Development
 
