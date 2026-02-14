@@ -5,6 +5,7 @@ import os from 'os';
 import { ForgeError } from './utils.js';
 import { DIM, RESET, BOLD, CMD, AGENT_VERBS, SPINNER_FRAMES, formatElapsed, showBanner } from './display.js';
 import { runSingleSpec, type BatchResult } from './run.js';
+import { loadSpecDeps, topoSort, hasDependencies, type SpecDep, type DepLevel } from './deps.js';
 
 // Worker pool: runs tasks with bounded concurrency
 async function workerPool<T, R>(
@@ -142,32 +143,22 @@ export function autoDetectConcurrency(): number {
   return Math.max(1, Math.min(memBased, cpuBased));
 }
 
-// Run a batch of spec files (shared by specDir and rerunFailed paths)
-async function runSpecBatch(
-  specFilePaths: string[],
-  specFileNames: string[],
+// Run specs sequentially
+async function runSpecsSequential(
+  specs: Array<{ name: string; path: string }>,
   options: ForgeOptions,
-  concurrency: number,
   runId: string,
+  label?: string,
 ): Promise<BatchResult[]> {
   const results: BatchResult[] = [];
-  const { quiet, parallel, sequentialFirst = 0 } = options;
+  const { quiet } = options;
 
-  // Split into sequential-first and parallel portions
-  const seqCount = parallel ? Math.min(sequentialFirst, specFileNames.length) : specFileNames.length;
-  const seqNames = specFileNames.slice(0, seqCount);
-  const seqPaths = specFilePaths.slice(0, seqCount);
-  const parNames = specFileNames.slice(seqCount);
-  const parPaths = specFilePaths.slice(seqCount);
-
-  // Sequential phase
-  for (let i = 0; i < seqNames.length; i++) {
-    const specFile = seqNames[i];
-    const specFilePath = seqPaths[i];
+  for (let i = 0; i < specs.length; i++) {
+    const { name: specFile, path: specFilePath } = specs[i];
 
     if (!quiet) {
       console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
-      console.log(`Running spec ${i + 1}/${seqNames.length}${parNames.length > 0 ? ' (sequential)' : ''}: ${BOLD}${specFile}${RESET}`);
+      console.log(`Running spec ${i + 1}/${specs.length}${label ? ` (${label})` : ''}: ${BOLD}${specFile}${RESET}`);
       console.log(`${DIM}${'─'.repeat(60)}${RESET}\n`);
     }
 
@@ -202,48 +193,135 @@ async function runSpecBatch(
     }
   }
 
-  // Parallel phase
-  if (parNames.length > 0) {
-    const display = createSpecDisplay(parNames);
+  return results;
+}
 
-    await workerPool(parNames, concurrency, async (specFile, i) => {
-      const specFilePath = parPaths[i];
-      display.start(i);
+// Run specs in parallel with a spinner display
+async function runSpecsParallel(
+  specs: Array<{ name: string; path: string }>,
+  options: ForgeOptions,
+  concurrency: number,
+  runId: string,
+): Promise<BatchResult[]> {
+  const results: BatchResult[] = [];
+  const names = specs.map(s => s.name);
+  const display = createSpecDisplay(names);
 
-      const startTime = Date.now();
-      try {
-        const specContent = await fs.readFile(specFilePath, 'utf-8');
+  await workerPool(names, concurrency, async (specFile, i) => {
+    const specFilePath = specs[i].path;
+    display.start(i);
 
-        const result = await runSingleSpec({
-          ...options,
-          specPath: specFilePath,
-          specContent,
-          specDir: undefined,
-          parallel: undefined,
-          quiet: true,
-          _silent: true,
-          _onActivity: (detail) => display.activity(i, detail),
-          _runId: runId,
-        });
+    const startTime = Date.now();
+    try {
+      const specContent = await fs.readFile(specFilePath, 'utf-8');
 
-        const duration = (Date.now() - startTime) / 1000;
-        display.done(i, duration);
-        results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration });
-      } catch (err) {
-        const duration = (Date.now() - startTime) / 1000;
-        const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
-        const errMsg = err instanceof Error ? err.message : 'Unknown error';
-        display.fail(i, errMsg);
-        results.push({
-          spec: specFile,
-          status: `failed: ${errMsg}`,
-          cost,
-          duration
-        });
+      const result = await runSingleSpec({
+        ...options,
+        specPath: specFilePath,
+        specContent,
+        specDir: undefined,
+        parallel: undefined,
+        quiet: true,
+        _silent: true,
+        _onActivity: (detail) => display.activity(i, detail),
+        _runId: runId,
+      });
+
+      const duration = (Date.now() - startTime) / 1000;
+      display.done(i, duration);
+      results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration });
+    } catch (err) {
+      const duration = (Date.now() - startTime) / 1000;
+      const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
+      const errMsg = err instanceof Error ? err.message : 'Unknown error';
+      display.fail(i, errMsg);
+      results.push({
+        spec: specFile,
+        status: `failed: ${errMsg}`,
+        cost,
+        duration
+      });
+    }
+  });
+
+  display.stop();
+  return results;
+}
+
+// Run a batch of spec files with dependency-aware execution
+async function runSpecBatch(
+  specFilePaths: string[],
+  specFileNames: string[],
+  options: ForgeOptions,
+  concurrency: number,
+  runId: string,
+): Promise<BatchResult[]> {
+  const results: BatchResult[] = [];
+  const { quiet, parallel, sequentialFirst = 0 } = options;
+
+  // Load dependency metadata from spec frontmatter
+  const specDeps = await loadSpecDeps(specFilePaths, specFileNames);
+  const useDeps = hasDependencies(specDeps);
+
+  // Dependency-aware execution: topological levels
+  if (useDeps && parallel) {
+    const levels = topoSort(specDeps);
+
+    if (!quiet) {
+      console.log(`${DIM}[dependency graph: ${levels.length} level(s)]${RESET}\n`);
+      for (let i = 0; i < levels.length; i++) {
+        const names = levels[i].specs.map(s => s.name).join(', ');
+        console.log(`  ${DIM}Level ${i + 1}:${RESET} ${names}`);
       }
-    });
+      console.log('');
+    }
 
-    display.stop();
+    for (let i = 0; i < levels.length; i++) {
+      const level = levels[i];
+      const levelSpecs = level.specs.map(s => ({ name: s.name, path: s.path }));
+
+      if (levelSpecs.length === 1) {
+        // Single spec in level — run sequentially (no spinner overhead)
+        const levelResults = await runSpecsSequential(
+          levelSpecs, options, runId,
+          `level ${i + 1}/${levels.length}`,
+        );
+        results.push(...levelResults);
+      } else {
+        // Multiple specs in level — run in parallel
+        if (!quiet) {
+          console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+          console.log(`Level ${i + 1}/${levels.length}: ${BOLD}${levelSpecs.length} specs${RESET} ${DIM}(parallel)${RESET}`);
+          console.log(`${DIM}${'─'.repeat(60)}${RESET}\n`);
+        }
+        const levelResults = await runSpecsParallel(levelSpecs, options, concurrency, runId);
+        results.push(...levelResults);
+      }
+    }
+
+    return results;
+  }
+
+  // Default behavior: sequential-first + parallel split
+  const seqCount = parallel ? Math.min(sequentialFirst, specFileNames.length) : specFileNames.length;
+  const seqSpecs = specFileNames.slice(0, seqCount).map((name, i) => ({
+    name, path: specFilePaths[i],
+  }));
+  const parSpecs = specFileNames.slice(seqCount).map((name, i) => ({
+    name, path: specFilePaths[seqCount + i],
+  }));
+
+  // Sequential phase
+  if (seqSpecs.length > 0) {
+    const label = parSpecs.length > 0 ? 'sequential' : undefined;
+    const seqResults = await runSpecsSequential(seqSpecs, options, runId, label);
+    results.push(...seqResults);
+  }
+
+  // Parallel phase
+  if (parSpecs.length > 0) {
+    const parResults = await runSpecsParallel(parSpecs, options, concurrency, runId);
+    results.push(...parResults);
   }
 
   return results;
