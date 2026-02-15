@@ -244,6 +244,31 @@ export async function reconcileSpecs(workingDir: string): Promise<number> {
   return reconciled;
 }
 
+/** Remove orphaned entries (file missing) from the manifest. */
+export async function pruneSpecs(workingDir: string): Promise<number> {
+  let pruned = 0;
+  await withManifestLock(workingDir, async (manifest) => {
+    const kept: typeof manifest.specs = [];
+    for (const entry of manifest.specs) {
+      if (entry.source === 'pipe') {
+        kept.push(entry);
+        continue;
+      }
+      const absPath = path.isAbsolute(entry.spec)
+        ? entry.spec
+        : path.join(workingDir, entry.spec);
+      try {
+        await fs.access(absPath);
+        kept.push(entry);
+      } catch {
+        pruned++;
+      }
+    }
+    manifest.specs = kept;
+  });
+  return pruned;
+}
+
 // ── showSpecs command ────────────────────────────────────────
 
 export interface ShowSpecsOptions {
@@ -254,6 +279,7 @@ export interface ShowSpecsOptions {
   orphaned?: boolean;
   untracked?: boolean;
   reconcile?: boolean;
+  prune?: boolean;
 }
 
 export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
@@ -266,6 +292,16 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
       console.log(`${BOLD}Reconciled ${count} run(s) from .forge/results/${RESET}\n`);
     } else {
       console.log(`${DIM}No new runs to reconcile.${RESET}\n`);
+    }
+  }
+
+  // Prune orphaned entries if requested
+  if (options.prune) {
+    const count = await pruneSpecs(workingDir);
+    if (count > 0) {
+      console.log(`${BOLD}Pruned ${count} orphaned spec(s)${RESET}\n`);
+    } else {
+      console.log(`${DIM}No orphaned specs to prune.${RESET}\n`);
     }
   }
 
