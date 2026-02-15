@@ -5,6 +5,26 @@ import { ForgeError, resolveWorkingDir, resolveConfig, saveResult } from './util
 import { DIM, RESET, CMD, BOLD } from './display.js';
 import { runVerification } from './verify.js';
 import { runQuery, streamLogAppend } from './core.js';
+import { withManifestLock, findOrCreateEntry, updateEntryStatus, specKey, pipeSpecId } from './specs.js';
+import { parseSource } from './deps.js';
+
+import type { SpecEntry } from './types.js';
+
+// Determine source type from spec content and path
+function resolveSpecSource(specContent?: string, specPath?: string): SpecEntry['source'] {
+  if (!specPath && !specContent) return 'file';
+  if (!specPath && specContent) return 'pipe';
+
+  // Check frontmatter source field
+  if (specContent) {
+    const source = parseSource(specContent);
+    if (source && source.startsWith('github:')) {
+      return source as `github:${string}`;
+    }
+  }
+
+  return 'file';
+}
 
 // Batch result type (used by parallel.ts)
 export interface BatchResult {
@@ -202,7 +222,25 @@ ${verification.errors}
 forge run --resume ${qr.sessionId} "fix verification errors"
 \`\`\``;
 
-          await saveResult(workingDir, forgeResult, errorResultText);
+          const errorResultsDir = await saveResult(workingDir, forgeResult, errorResultText);
+
+          // Update spec manifest on failure
+          const failSpecId = specPath ? specKey(specPath, workingDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
+          if (failSpecId) {
+            await withManifestLock(workingDir, (manifest) => {
+              const entry = findOrCreateEntry(manifest, failSpecId, resolveSpecSource(finalSpecContent, specPath));
+              entry.runs.push({
+                runId: _runId || forgeResult.startedAt,
+                timestamp: forgeResult.startedAt,
+                resultPath: path.relative(workingDir, errorResultsDir),
+                status: 'failed',
+                costUsd: forgeResult.costUsd,
+                durationSeconds: forgeResult.durationSeconds,
+              });
+              updateEntryStatus(entry);
+            });
+          }
+
           throw new ForgeError(`Verification failed after ${maxVerifyAttempts} attempts`, forgeResult);
         }
       } else {
@@ -228,6 +266,23 @@ forge run --resume ${qr.sessionId} "fix verification errors"
     };
 
     const resultsDir = await saveResult(workingDir, forgeResult, qr.resultText);
+
+    // Update spec manifest on success
+    const successSpecId = specPath ? specKey(specPath, workingDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
+    if (successSpecId) {
+      await withManifestLock(workingDir, (manifest) => {
+        const entry = findOrCreateEntry(manifest, successSpecId, resolveSpecSource(finalSpecContent, specPath));
+        entry.runs.push({
+          runId: _runId || forgeResult.startedAt,
+          timestamp: forgeResult.startedAt,
+          resultPath: path.relative(workingDir, resultsDir),
+          status: 'passed',
+          costUsd: forgeResult.costUsd,
+          durationSeconds: forgeResult.durationSeconds,
+        });
+        updateEntryStatus(entry);
+      });
+    }
 
     if (_silent) {
       // Silent: no output at all (parallel mode)

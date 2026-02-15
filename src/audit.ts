@@ -4,6 +4,7 @@ import path from 'path';
 import { resolveWorkingDir, resolveConfig, saveResult } from './utils.js';
 import { DIM, RESET, BOLD, CMD, showBanner } from './display.js';
 import { runQuery } from './core.js';
+import { withManifestLock, findOrCreateEntry, specKey } from './specs.js';
 
 export async function runAudit(options: AuditOptions): Promise<void> {
   const { specDir, prompt, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false, resume, fork } = options;
@@ -145,6 +146,18 @@ ${prompt ? `## Additional Context\n\n${prompt}\n` : ''}
     const files = await fs.readdir(outputDir);
     outputSpecs = files.filter(f => f.endsWith('.md')).sort();
   } catch {}
+
+  // Register audit-generated specs in the manifest
+  if (outputSpecs.length > 0) {
+    const auditRunId = `audit:${forgeResult.startedAt}`;
+    await withManifestLock(workingDir, (manifest) => {
+      for (const specFile of outputSpecs) {
+        const specFilePath = path.join(outputDir, specFile);
+        const key = specKey(specFilePath, workingDir);
+        findOrCreateEntry(manifest, key, `audit:${auditRunId}` as `audit:${string}`);
+      }
+    });
+  }
 
   if (!quiet) {
     console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);

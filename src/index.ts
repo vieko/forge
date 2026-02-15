@@ -9,6 +9,7 @@ import { showStatus } from './status.js';
 import { runAudit } from './audit.js';
 import { runReview } from './review.js';
 import { runWatch } from './watch.js';
+import { showSpecs } from './specs.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -250,8 +251,40 @@ program
     }
   });
 
+program
+  .command('specs')
+  .description('List tracked specs with lifecycle status')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('--pending', 'Show only pending specs')
+  .option('--failed', 'Show only failed specs')
+  .option('--passed', 'Show only passed specs')
+  .option('--orphaned', 'Show specs in manifest but missing from filesystem')
+  .option('--untracked', 'Show .md files in spec dirs not in manifest')
+  .action(async (options: {
+    cwd?: string;
+    pending?: boolean;
+    failed?: boolean;
+    passed?: boolean;
+    orphaned?: boolean;
+    untracked?: boolean;
+  }) => {
+    try {
+      await showSpecs({
+        cwd: options.cwd,
+        pending: options.pending,
+        failed: options.failed,
+        passed: options.passed,
+        orphaned: options.orphaned,
+        untracked: options.untracked,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
 // Quick alias: `forge "do something"` = `forge run "do something"`
-const COMMANDS = new Set(['run', 'status', 'audit', 'review', 'watch', 'help']);
+const COMMANDS = new Set(['run', 'status', 'audit', 'review', 'watch', 'specs', 'help']);
 const args = process.argv.slice(2);
 if (args.length > 0 && !args[0].startsWith('-') && !COMMANDS.has(args[0])) {
   process.argv.splice(2, 0, 'run');

@@ -92,6 +92,18 @@ forge status --all                              # All runs
 forge status -n 5                               # Last 5 runs
 ```
 
+### forge specs
+
+List tracked specs with lifecycle status. Specs are registered in `.forge/specs.json` as they're run.
+
+```bash
+forge specs                                     # List all tracked specs
+forge specs --pending                           # Show only pending
+forge specs --failed                            # Show only failed
+forge specs --orphaned                          # Manifest entries with missing files
+forge specs --untracked                         # .md files not in manifest
+```
+
 ## Recipes
 
 ### Spec-driven development
@@ -106,9 +118,24 @@ forge run --rerun-failed -P "fix failures"
 forge status
 ```
 
+### Dependency-aware execution
+
+Specs can declare dependencies via YAML frontmatter. Independent specs run in parallel, dependent specs wait:
+
+```yaml
+---
+depends: [01-database-schema.md, 02-api-models.md]
+---
+```
+
+```bash
+forge run --spec-dir ./specs/ -P "implement all"
+# Automatically runs in topological order based on depends: declarations
+```
+
 ### Foundation specs first, then parallelize
 
-Number-prefix specs for ordering. Foundations run sequentially before the parallel phase:
+When not using `depends:`, number-prefix specs for ordering. Foundations run sequentially before the parallel phase:
 
 ```bash
 forge run --spec-dir ./specs/ -P --sequential-first 2 "implement"

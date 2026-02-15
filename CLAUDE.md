@@ -68,6 +68,15 @@ forge status                    # Latest run
 forge status --all              # All runs
 forge status -n 5               # Last 5 runs
 forge status -C ~/other-repo    # Different repo
+
+# Spec lifecycle tracking
+forge specs                     # List all tracked specs with status
+forge specs --pending           # Show only pending specs
+forge specs --failed            # Show only failed specs
+forge specs --passed            # Show only passed specs
+forge specs --orphaned          # Specs in manifest but file missing
+forge specs --untracked         # .md files in spec dirs not in manifest
+forge specs -C ~/other-repo     # Different working directory
 ```
 
 ## Architecture
@@ -102,6 +111,7 @@ src/
 ├── verify.ts      # detectVerification, runVerification
 ├── core.ts        # QueryConfig, QueryResult, runQuery (SDK wrapper with hooks/streaming)
 ├── run.ts         # runSingleSpec, BatchResult
+├── specs.ts       # Spec manifest (lifecycle tracking, showSpecs command)
 ├── parallel.ts    # workerPool, autoDetectConcurrency, spec display, runForge
 ├── watch.ts       # WatchOptions, colorWatchLine, runWatch
 ├── audit.ts       # runAudit
@@ -112,6 +122,7 @@ src/
 └── types.test.ts  # Type validation tests
 
 .forge/
+├── specs.json    # Spec lifecycle manifest (tracked specs, run history)
 ├── audit.jsonl   # Tool call audit log (with spec filename)
 ├── latest-session.json  # Session persistence for resume
 └── results/      # Run results (auto-created, gitignored)
@@ -133,6 +144,22 @@ src/
 9. **Status** — `forge status` shows results from recent runs grouped by batch
 10. **Retry on transient errors** — auto-retries rate limits and network errors (3 attempts, exponential backoff)
 11. **Audit** — `forge audit` reviews the codebase against specs via a single read-heavy `query()` call and produces new spec files for any remaining work; output feeds directly into `forge run --spec-dir`
+12. **Spec lifecycle** — `.forge/specs.json` manifest tracks every spec from registration through execution; `forge specs` shows status, run history, cost, and detects orphaned/untracked specs
+
+## Spec Naming
+
+- Prefer descriptive feature names: `dep-graph.md`, `spec-lifecycle.md`
+- Use subdirectories for grouping: `auth/login.md`, `auth/oauth.md`
+- Numeric prefixes are optional; use only when execution order matters and `depends:` is not in use
+- GitHub issue numbers go in the frontmatter `source:` field, not the filename
+- Keep names lowercase, hyphen-separated, `.md` extension
+
+```yaml
+---
+source: github:vieko/forge#42
+depends: [auth-base.md]
+---
+```
 
 ## Development
 

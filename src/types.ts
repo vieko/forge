@@ -100,6 +100,34 @@ export interface AuditOptions {
   fork?: string;
 }
 
+// ── Spec Lifecycle Tracking ──────────────────────────────────
+
+/** A single run record for a tracked spec. */
+export interface SpecRun {
+  runId: string;
+  timestamp: string;         // ISO 8601
+  resultPath: string;        // relative to workingDir, e.g. ".forge/results/2026-02-14T..."
+  status: 'passed' | 'failed';
+  costUsd?: number;
+  durationSeconds: number;
+}
+
+/** A tracked spec entry in the manifest. */
+export interface SpecEntry {
+  spec: string;              // relative path (e.g. "auth/login.md") or identifier for piped specs
+  status: 'pending' | 'running' | 'passed' | 'failed';
+  runs: SpecRun[];
+  source: 'file' | 'pipe' | `github:${string}` | `audit:${string}`;
+  createdAt: string;         // ISO 8601
+  updatedAt: string;         // ISO 8601
+}
+
+/** The .forge/specs.json manifest. */
+export interface SpecManifest {
+  version: 1;
+  specs: SpecEntry[];
+}
+
 /**
  * Options for running a review.
  */

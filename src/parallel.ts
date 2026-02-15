@@ -6,6 +6,8 @@ import { ForgeError } from './utils.js';
 import { DIM, RESET, BOLD, CMD, AGENT_VERBS, SPINNER_FRAMES, formatElapsed, showBanner } from './display.js';
 import { runSingleSpec, type BatchResult } from './run.js';
 import { loadSpecDeps, topoSort, hasDependencies, type SpecDep, type DepLevel } from './deps.js';
+import { withManifestLock, findOrCreateEntry, specKey } from './specs.js';
+import { resolveWorkingDir } from './utils.js';
 
 // Worker pool: runs tasks with bounded concurrency
 async function workerPool<T, R>(
@@ -262,6 +264,17 @@ async function runSpecBatch(
   // Load dependency metadata from spec frontmatter
   const specDeps = await loadSpecDeps(specFilePaths, specFileNames);
   const useDeps = hasDependencies(specDeps);
+
+  // Register all specs in the manifest as 'running' before execution
+  const batchWorkingDir = await resolveWorkingDir(options.cwd);
+  await withManifestLock(batchWorkingDir, (manifest) => {
+    for (const specFilePath of specFilePaths) {
+      const key = specKey(specFilePath, batchWorkingDir);
+      const entry = findOrCreateEntry(manifest, key, 'file');
+      entry.status = 'running';
+      entry.updatedAt = new Date().toISOString();
+    }
+  });
 
   // Dependency-aware execution: topological levels
   if (useDeps && parallel) {
