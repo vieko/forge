@@ -254,13 +254,19 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
 
     for (const dir of specDirs) {
       try {
-        const files = await fs.readdir(dir);
-        for (const file of files) {
-          if (!file.endsWith('.md')) continue;
-          const absFile = path.join(dir, file);
-          if (!trackedSpecs.has(absFile)) {
-            const rel = path.relative(workingDir, absFile);
-            untrackedEntries.push(rel.startsWith('..') ? absFile : rel);
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        const queue = [...entries.map(e => ({ entry: e, base: dir }))];
+        while (queue.length > 0) {
+          const { entry, base } = queue.shift()!;
+          const fullPath = path.join(base, entry.name);
+          if (entry.isDirectory()) {
+            try {
+              const sub = await fs.readdir(fullPath, { withFileTypes: true });
+              queue.push(...sub.map(e => ({ entry: e, base: fullPath })));
+            } catch {}
+          } else if (entry.name.endsWith('.md') && !trackedSpecs.has(fullPath)) {
+            const rel = path.relative(workingDir, fullPath);
+            untrackedEntries.push(rel.startsWith('..') ? fullPath : rel);
           }
         }
       } catch {}

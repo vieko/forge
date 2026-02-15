@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { parseDependencies, topoSort, detectCycle, validateDeps, hasDependencies, type SpecDep } from './deps.js';
+import { parseDependencies, parseSource, topoSort, detectCycle, validateDeps, hasDependencies, type SpecDep } from './deps.js';
 
 // ── parseDependencies ───────────────────────────────────────
 
@@ -91,6 +91,51 @@ priority: high
 
 # Content`;
     expect(parseDependencies(content)).toEqual(['01-database.md']);
+  });
+});
+
+// ── parseSource ──────────────────────────────────────────────
+
+describe('parseSource', () => {
+  test('no frontmatter → returns undefined', () => {
+    expect(parseSource('# Just a heading\nSome content')).toBeUndefined();
+  });
+
+  test('frontmatter without source field → returns undefined', () => {
+    const content = `---
+title: My Spec
+depends: [01-foo.md]
+---
+
+# Content`;
+    expect(parseSource(content)).toBeUndefined();
+  });
+
+  test('source: github:vieko/forge#42 → returns "github:vieko/forge#42"', () => {
+    const content = `---
+source: github:vieko/forge#42
+---
+
+# Content`;
+    expect(parseSource(content)).toBe('github:vieko/forge#42');
+  });
+
+  test('source: file → returns "file"', () => {
+    const content = `---
+source: file
+---
+
+# Content`;
+    expect(parseSource(content)).toBe('file');
+  });
+
+  test('source field with extra whitespace → trimmed correctly', () => {
+    const content = `---
+source:   github:vieko/forge#99
+---
+
+# Content`;
+    expect(parseSource(content)).toBe('github:vieko/forge#99');
   });
 });
 
