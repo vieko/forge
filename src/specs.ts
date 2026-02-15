@@ -403,28 +403,86 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
     }
   };
 
-  // Print tracked entries
-  for (const e of entries) {
-    const color = statusColor(e.status);
-    const statusPad = e.status.padEnd(10);
-    const runLabel = e.runs === 1 ? '1 run ' : `${e.runs} runs`;
-    const costStr = e.cost > 0 ? `$${e.cost.toFixed(2)}` : '';
-    const durStr = e.duration > 0 ? `${Math.round(e.duration)}s` : '';
-    const suffix = e.orphaned ? `  ${DIM}(file missing)${RESET}` : '';
-
-    if (e.runs > 0) {
-      console.log(`  ${color}${statusPad}${RESET} ${e.spec.padEnd(35)} ${runLabel.padEnd(8)} ${costStr.padStart(7)}   ${durStr.padStart(5)}${suffix}`);
-    } else {
-      console.log(`  ${color}${statusPad}${RESET} ${e.spec.padEnd(35)} ${DIM}${runLabel}${RESET}${suffix}`);
+  // Combine tracked + untracked for unified display
+  const allItems: Array<DisplayEntry & { untracked?: boolean }> = [...entries];
+  if (untrackedEntries.length > 0 && (!filterActive || options.untracked)) {
+    for (const u of untrackedEntries) {
+      allItems.push({ status: 'untracked', spec: u, runs: 0, cost: 0, duration: 0, orphaned: false, untracked: true });
     }
   }
 
-  // Print untracked entries
-  if (untrackedEntries.length > 0 && (!filterActive || options.untracked)) {
-    if (entries.length > 0) console.log('');
-    for (const u of untrackedEntries.sort()) {
-      console.log(`  ${DIM}untracked${RESET}  ${u}`);
+  // Find common prefix to strip
+  const allPaths = allItems.map(e => e.spec);
+  let commonPrefix = '';
+  if (allPaths.length > 1) {
+    const parts = allPaths[0].split('/');
+    for (let i = 0; i < parts.length - 1; i++) {
+      const candidate = parts.slice(0, i + 1).join('/') + '/';
+      if (allPaths.every(p => p.startsWith(candidate))) {
+        commonPrefix = candidate;
+      } else break;
     }
+  }
+
+  // Group by directory (after stripping prefix)
+  const groups = new Map<string, typeof allItems>();
+  for (const item of allItems) {
+    const stripped = commonPrefix ? item.spec.slice(commonPrefix.length) : item.spec;
+    const dir = stripped.includes('/') ? stripped.split('/').slice(0, -1).join('/') : '.';
+    if (!groups.has(dir)) groups.set(dir, []);
+    groups.get(dir)!.push(item);
+  }
+
+  // Compute dynamic column width for filenames
+  const nameWidth = Math.max(20, Math.min(40, ...allItems.map(e => {
+    const stripped = commonPrefix ? e.spec.slice(commonPrefix.length) : e.spec;
+    const name = stripped.includes('/') ? stripped.split('/').pop()! : stripped;
+    return name.length;
+  })));
+
+  // Print header with common prefix
+  if (commonPrefix) {
+    console.log(`${DIM}${commonPrefix}${RESET}\n`);
+  }
+
+  // Print groups
+  const sortedGroups = [...groups.entries()].sort((a, b) => {
+    // Root group first, then alphabetical
+    if (a[0] === '.') return -1;
+    if (b[0] === '.') return 1;
+    return a[0].localeCompare(b[0]);
+  });
+
+  let totalCost = 0;
+  let totalDuration = 0;
+
+  for (const [dir, items] of sortedGroups) {
+    if (sortedGroups.length > 1 && dir !== '.') {
+      console.log(`  ${BOLD}${dir}/${RESET}`);
+    }
+
+    for (const e of items) {
+      const stripped = commonPrefix ? e.spec.slice(commonPrefix.length) : e.spec;
+      const name = stripped.includes('/') ? stripped.split('/').pop()! : stripped;
+      const color = e.untracked ? DIM : statusColor(e.status);
+      const status = e.untracked ? 'untracked' : e.status;
+      const indent = sortedGroups.length > 1 && dir !== '.' ? '    ' : '  ';
+
+      totalCost += e.cost;
+      totalDuration += e.duration;
+
+      if (e.runs > 0) {
+        const runLabel = e.runs === 1 ? '1 run ' : `${e.runs} runs`;
+        const costStr = e.cost > 0 ? `$${e.cost.toFixed(2)}` : '';
+        const durStr = e.duration > 0 ? `${Math.round(e.duration)}s` : '';
+        const suffix = e.orphaned ? `  ${DIM}(file missing)${RESET}` : '';
+        console.log(`${indent}${color}${status.padEnd(10)}${RESET} ${name.padEnd(nameWidth)} ${runLabel.padEnd(8)} ${costStr.padStart(7)}   ${durStr.padStart(5)}${suffix}`);
+      } else {
+        console.log(`${indent}${color}${status.padEnd(10)}${RESET} ${name}`);
+      }
+    }
+
+    if (sortedGroups.length > 1) console.log('');
   }
 
   // Summary
@@ -433,7 +491,19 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
   const failed = manifest.specs.filter(e => e.status === 'failed').length;
   const pending = manifest.specs.filter(e => e.status === 'pending').length;
 
-  if (!filterActive && total > 0) {
-    console.log(`\n${DIM}${total} spec(s): ${RESET}${passed > 0 ? `\x1b[32m${passed} passed\x1b[0m` : ''}${passed > 0 && (failed > 0 || pending > 0) ? ', ' : ''}${failed > 0 ? `\x1b[31m${failed} failed\x1b[0m` : ''}${failed > 0 && pending > 0 ? ', ' : ''}${pending > 0 ? `${DIM}${pending} pending${RESET}` : ''}${untrackedEntries.length > 0 ? `, ${untrackedEntries.length} untracked` : ''}`);
+  const parts: string[] = [];
+  if (passed > 0) parts.push(`\x1b[32m${passed} passed\x1b[0m`);
+  if (failed > 0) parts.push(`\x1b[31m${failed} failed\x1b[0m`);
+  if (pending > 0) parts.push(`${DIM}${pending} pending${RESET}`);
+  if (untrackedEntries.length > 0 && (!filterActive || options.untracked)) {
+    parts.push(`${untrackedEntries.length} untracked`);
+  }
+
+  if (total > 0 || untrackedEntries.length > 0) {
+    const countLabel = total > 0 ? `${total} spec(s)` : '';
+    const costLabel = totalCost > 0 ? `$${totalCost.toFixed(2)}` : '';
+    const durLabel = totalDuration > 0 ? `${Math.round(totalDuration)}s` : '';
+    const meta = [costLabel, durLabel].filter(Boolean).join(', ');
+    console.log(`${DIM}${countLabel}${parts.length > 0 ? ': ' : ''}${RESET}${parts.join(', ')}${meta ? `  ${DIM}(${meta})${RESET}` : ''}`);
   }
 }
