@@ -1,6 +1,6 @@
 {
   "name": "@vieko/forge",
-  "version": "3.2.1",
+  "version": "3.2.2",
   "description": "A verification boundary for autonomous agents",
   "type": "module",
   "main": "./dist/index.js",
