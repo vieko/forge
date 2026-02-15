@@ -11,6 +11,7 @@ import {
   saveManifest,
   withManifestLock,
 } from './specs.js';
+import { parseSource } from './deps.js';
 import type { SpecManifest, SpecEntry, SpecRun } from './types.js';
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -497,5 +498,345 @@ describe('withManifestLock', () => {
       .then(() => true)
       .catch(() => false);
     expect(lockExists).toBe(false);
+  });
+});
+
+// ── Integration: manifest lifecycle ─────────────────────────
+
+describe('integration: run.ts manifest flow', () => {
+  // These tests exercise the building blocks as composed in runSingleSpec:
+  // resolveSpecSource logic + withManifestLock + findOrCreateEntry + push run + updateEntryStatus
+
+  function resolveSpecSource(specContent?: string, specPath?: string): SpecEntry['source'] {
+    if (!specPath && !specContent) return 'file';
+    if (!specPath && specContent) return 'pipe';
+    if (specContent) {
+      const source = parseSource(specContent);
+      if (source && source.startsWith('github:')) {
+        return source as `github:${string}`;
+      }
+    }
+    return 'file';
+  }
+
+  test('source resolution: frontmatter with github source', () => {
+    const content = '---\nsource: github:vieko/forge#42\n---\n# My Spec';
+    expect(resolveSpecSource(content, '/path/to/spec.md')).toBe('github:vieko/forge#42');
+  });
+
+  test('source resolution: frontmatter without source field → file', () => {
+    const content = '---\ndepends: [auth.md]\n---\n# My Spec';
+    expect(resolveSpecSource(content, '/path/to/spec.md')).toBe('file');
+  });
+
+  test('source resolution: no frontmatter → file', () => {
+    const content = '# Simple Spec\nJust content.';
+    expect(resolveSpecSource(content, '/path/to/spec.md')).toBe('file');
+  });
+
+  test('source resolution: pipe spec (no specPath, has content) → pipe', () => {
+    expect(resolveSpecSource('implement auth', undefined)).toBe('pipe');
+  });
+
+  test('source resolution: no specPath, no content → file', () => {
+    expect(resolveSpecSource(undefined, undefined)).toBe('file');
+  });
+
+  test('run record on success: entry status becomes passed', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'specs/auth.md', 'file');
+      entry.runs.push(makeRun({ runId: 'run-1', status: 'passed', costUsd: 1.5, durationSeconds: 30 }));
+      updateEntryStatus(entry);
+    });
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs).toHaveLength(1);
+    expect(loaded.specs[0].status).toBe('passed');
+    expect(loaded.specs[0].runs).toHaveLength(1);
+    expect(loaded.specs[0].runs[0].status).toBe('passed');
+  });
+
+  test('run record on failure: entry status becomes failed', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'specs/auth.md', 'file');
+      entry.runs.push(makeRun({ runId: 'run-1', status: 'failed', costUsd: 0.75, durationSeconds: 15 }));
+      updateEntryStatus(entry);
+    });
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('failed');
+    expect(loaded.specs[0].runs[0].status).toBe('failed');
+  });
+
+  test('batch runId grouping: multiple specs share same runId', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    const batchRunId = 'batch-abc123';
+
+    await withManifestLock(dir, (manifest) => {
+      for (const spec of ['auth.md', 'users.md', 'api.md']) {
+        const entry = findOrCreateEntry(manifest, spec, 'file');
+        entry.runs.push(makeRun({ runId: batchRunId, status: 'passed' }));
+        updateEntryStatus(entry);
+      }
+    });
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs).toHaveLength(3);
+    for (const entry of loaded.specs) {
+      expect(entry.runs[0].runId).toBe(batchRunId);
+    }
+  });
+
+  test('multiple runs accumulate: pass then fail → 2 runs, status failed', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    // First run: pass
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'feature.md', 'file');
+      entry.runs.push(makeRun({ runId: 'run-1', status: 'passed', timestamp: '2026-02-15T01:00:00Z' }));
+      updateEntryStatus(entry);
+    });
+
+    // Second run: fail
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'feature.md', 'file');
+      entry.runs.push(makeRun({ runId: 'run-2', status: 'failed', timestamp: '2026-02-15T02:00:00Z' }));
+      updateEntryStatus(entry);
+    });
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs).toHaveLength(1);
+    expect(loaded.specs[0].runs).toHaveLength(2);
+    expect(loaded.specs[0].status).toBe('failed');
+  });
+
+  test('pipe spec uses pipeSpecId as key with pipe source', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    const content = 'implement authentication';
+    const pipeId = pipeSpecId(content);
+
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, pipeId, 'pipe');
+      entry.runs.push(makeRun({ runId: 'run-1', status: 'passed' }));
+      updateEntryStatus(entry);
+    });
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].spec).toBe(pipeId);
+    expect(loaded.specs[0].source).toBe('pipe');
+    expect(loaded.specs[0].status).toBe('passed');
+  });
+});
+
+describe('integration: parallel.ts batch registration', () => {
+  test('mark specs as running: all entries get status running', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    const specFiles = ['specs/auth.md', 'specs/users.md', 'specs/api.md'];
+
+    await withManifestLock(dir, (manifest) => {
+      for (const specFile of specFiles) {
+        const entry = findOrCreateEntry(manifest, specFile, 'file');
+        entry.status = 'running';
+        entry.updatedAt = new Date().toISOString();
+      }
+    });
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs).toHaveLength(3);
+    for (const entry of loaded.specs) {
+      expect(entry.status).toBe('running');
+      expect(entry.updatedAt).toBeTruthy();
+    }
+  });
+
+  test('pre-existing entries preserved: runs array unchanged after marking running', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    // Pre-populate with a passed spec
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'specs/auth.md', 'file');
+      entry.runs.push(makeRun({ runId: 'old-run', status: 'passed', costUsd: 2.0 }));
+      updateEntryStatus(entry);
+    });
+
+    // Mark as running (as parallel.ts does before a new batch)
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'specs/auth.md', 'file');
+      entry.status = 'running';
+      entry.updatedAt = new Date().toISOString();
+    });
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs).toHaveLength(1);
+    expect(loaded.specs[0].status).toBe('running');
+    // Previous runs preserved
+    expect(loaded.specs[0].runs).toHaveLength(1);
+    expect(loaded.specs[0].runs[0].runId).toBe('old-run');
+    expect(loaded.specs[0].runs[0].costUsd).toBe(2.0);
+  });
+
+  test('concurrent lock access: both updates succeed with no data loss', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    // Two concurrent withManifestLock calls that each add a different spec
+    await Promise.all([
+      withManifestLock(dir, (manifest) => {
+        findOrCreateEntry(manifest, 'spec-a.md', 'file');
+      }),
+      withManifestLock(dir, (manifest) => {
+        findOrCreateEntry(manifest, 'spec-b.md', 'file');
+      }),
+    ]);
+
+    const loaded = await loadManifest(dir);
+    // Both specs should exist (lock serializes the two updates)
+    expect(loaded.specs).toHaveLength(2);
+    const specs = loaded.specs.map(e => e.spec).sort();
+    expect(specs).toEqual(['spec-a.md', 'spec-b.md']);
+  });
+});
+
+describe('integration: audit.ts spec registration', () => {
+  test('register audit specs: entries created with pending status and audit source', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    const auditTimestamp = '2026-02-15T10:00:00.000Z';
+    const auditRunId = `audit:${auditTimestamp}`;
+    const outputSpecs = ['fix-auth-flow.md', 'add-error-handling.md', 'update-tests.md'];
+
+    await withManifestLock(dir, (manifest) => {
+      for (const specFile of outputSpecs) {
+        const key = `specs/audit/${specFile}`;
+        findOrCreateEntry(manifest, key, `audit:${auditRunId}` as `audit:${string}`);
+      }
+    });
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs).toHaveLength(3);
+    for (const entry of loaded.specs) {
+      expect(entry.status).toBe('pending');
+      expect(entry.runs).toEqual([]);
+      expect(entry.source).toBe(`audit:${auditRunId}`);
+    }
+  });
+
+  test('audit source format: matches audit:audit:<timestamp> pattern', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    const startedAt = '2026-02-15T10:30:00.000Z';
+    const auditRunId = `audit:${startedAt}`;
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'fix-bug.md', `audit:${auditRunId}` as `audit:${string}`);
+    });
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].source).toMatch(/^audit:audit:\d{4}-\d{2}-\d{2}T/);
+  });
+});
+
+describe('integration: full lifecycle state machine', () => {
+  test('pending → running → passed', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    // Step 1: Create entry (pending)
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'lifecycle.md', 'file');
+    });
+    let loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('pending');
+
+    // Step 2: Mark running (as parallel.ts does)
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'lifecycle.md', 'file');
+      entry.status = 'running';
+      entry.updatedAt = new Date().toISOString();
+    });
+    loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('running');
+
+    // Step 3: Push passed run (as run.ts does on success)
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'lifecycle.md', 'file');
+      entry.runs.push(makeRun({ runId: 'run-1', status: 'passed' }));
+      updateEntryStatus(entry);
+    });
+    loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('passed');
+    expect(loaded.specs[0].runs).toHaveLength(1);
+  });
+
+  test('pending → running → failed → running → passed (rerun)', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    // Create + mark running
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'rerun.md', 'file');
+      entry.status = 'running';
+      entry.updatedAt = new Date().toISOString();
+    });
+
+    // First run: fail
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'rerun.md', 'file');
+      entry.runs.push(makeRun({ runId: 'run-1', status: 'failed', timestamp: '2026-02-15T01:00:00Z' }));
+      updateEntryStatus(entry);
+    });
+    let loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('failed');
+
+    // Mark running again (rerun)
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'rerun.md', 'file');
+      entry.status = 'running';
+      entry.updatedAt = new Date().toISOString();
+    });
+    loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('running');
+
+    // Second run: pass
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'rerun.md', 'file');
+      entry.runs.push(makeRun({ runId: 'run-2', status: 'passed', timestamp: '2026-02-15T02:00:00Z' }));
+      updateEntryStatus(entry);
+    });
+    loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('passed');
+    expect(loaded.specs[0].runs).toHaveLength(2);
+    expect(loaded.specs[0].runs[0].status).toBe('failed');
+    expect(loaded.specs[0].runs[1].status).toBe('passed');
+  });
+
+  test('specKey + findOrCreateEntry: relative path normalization', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    // Simulate what parallel.ts does: specKey(absolutePath, workingDir) → relative key
+    const absSpecPath = path.join(dir, 'specs', 'auth.md');
+    const key = specKey(absSpecPath, dir);
+    expect(key).toBe(path.join('specs', 'auth.md'));
+
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, key, 'file');
+      entry.status = 'running';
+      entry.updatedAt = new Date().toISOString();
+    });
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].spec).toBe(path.join('specs', 'auth.md'));
   });
 });

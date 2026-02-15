@@ -470,11 +470,11 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
   }
 
   // Compute dynamic column width for filenames
-  const nameWidth = Math.max(20, Math.min(40, ...allItems.map(e => {
+  const nameWidth = Math.max(20, ...allItems.map(e => {
     const stripped = commonPrefix ? e.spec.slice(commonPrefix.length) : e.spec;
     const name = stripped.includes('/') ? stripped.split('/').pop()! : stripped;
     return name.length;
-  })));
+  }));
 
   // Print header with common prefix
   if (commonPrefix) {
