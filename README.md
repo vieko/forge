@@ -1,6 +1,6 @@
 # Forge
 
-<p align="center"><img src="https://raw.githubusercontent.com/vieko/forge/main/forge.gif" alt="Forge" width="200" /></p>
+<p align="center"><img src="https://raw.githubusercontent.com/vieko/forge/main/forge.gif" alt="Forge" width="100%" /></p>
 
 A verification boundary for autonomous agents. Define outcomes, not procedures.
 
