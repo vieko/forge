@@ -63,6 +63,23 @@ export function parseDependencies(content: string): string[] {
   return [];
 }
 
+/**
+ * Parse YAML frontmatter `source:` field from a spec file's content.
+ * Supports: source: github:owner/repo#42
+ *
+ * Returns undefined if no frontmatter or no source field.
+ */
+export function parseSource(content: string): string | undefined {
+  const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fmMatch) return undefined;
+
+  const frontmatter = fmMatch[1];
+  const sourceMatch = frontmatter.match(/^source:\s*(.+)$/m);
+  if (!sourceMatch) return undefined;
+
+  return sourceMatch[1].trim();
+}
+
 // ── DAG construction ────────────────────────────────────────
 
 /**
