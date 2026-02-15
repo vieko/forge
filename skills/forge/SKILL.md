@@ -102,6 +102,7 @@ forge specs --pending                           # Show only pending
 forge specs --failed                            # Show only failed
 forge specs --orphaned                          # Manifest entries with missing files
 forge specs --untracked                         # .md files not in manifest
+forge specs --reconcile                         # Backfill from .forge/results/ history
 ```
 
 ## Recipes

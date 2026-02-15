@@ -156,6 +156,94 @@ export async function withManifestLock(
   }
 }
 
+// ── Reconcile from results history ───────────────────────────
+
+/** Scan .forge/results/ and backfill manifest entries from summary.json files. */
+export async function reconcileSpecs(workingDir: string): Promise<number> {
+  const resultsDir = path.join(workingDir, '.forge', 'results');
+  let resultDirs: string[];
+  try {
+    resultDirs = await fs.readdir(resultsDir);
+  } catch {
+    return 0;
+  }
+
+  // Collect all results with a specPath
+  interface ResultRecord {
+    specKey: string;
+    runId: string;
+    timestamp: string;
+    resultPath: string;
+    status: 'passed' | 'failed';
+    costUsd?: number;
+    durationSeconds: number;
+  }
+
+  const records: ResultRecord[] = [];
+  for (const dir of resultDirs) {
+    const summaryPath = path.join(resultsDir, dir, 'summary.json');
+    try {
+      const content = await fs.readFile(summaryPath, 'utf-8');
+      const summary = JSON.parse(content);
+      if (!summary.specPath || summary.specPath.startsWith('/dev/fd/')) continue;
+
+      // Normalize specPath to relative key
+      let key: string;
+      if (path.isAbsolute(summary.specPath)) {
+        const rel = path.relative(summary.cwd || workingDir, summary.specPath);
+        key = rel.startsWith('..') || path.isAbsolute(rel) ? summary.specPath : rel;
+      } else {
+        key = summary.specPath;
+      }
+
+      records.push({
+        specKey: key,
+        runId: summary.runId || summary.startedAt,
+        timestamp: summary.startedAt,
+        resultPath: path.relative(workingDir, path.join(resultsDir, dir)),
+        status: summary.status === 'success' ? 'passed' : 'failed',
+        costUsd: summary.costUsd,
+        durationSeconds: summary.durationSeconds || 0,
+      });
+    } catch {}
+  }
+
+  if (records.length === 0) return 0;
+
+  // Sort by timestamp so runs are appended in order
+  records.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+  let reconciled = 0;
+  await withManifestLock(workingDir, (manifest) => {
+    // Build set of already-tracked run keys to avoid duplicates
+    const existingRuns = new Set<string>();
+    for (const entry of manifest.specs) {
+      for (const run of entry.runs) {
+        existingRuns.add(`${entry.spec}::${run.timestamp}`);
+      }
+    }
+
+    for (const record of records) {
+      const runKey = `${record.specKey}::${record.timestamp}`;
+      if (existingRuns.has(runKey)) continue;
+
+      const entry = findOrCreateEntry(manifest, record.specKey, 'file');
+      entry.runs.push({
+        runId: record.runId,
+        timestamp: record.timestamp,
+        resultPath: record.resultPath,
+        status: record.status,
+        costUsd: record.costUsd,
+        durationSeconds: record.durationSeconds,
+      });
+      updateEntryStatus(entry);
+      reconciled++;
+    }
+  });
+
+  return reconciled;
+}
+
 // ── showSpecs command ────────────────────────────────────────
 
 export interface ShowSpecsOptions {
@@ -165,10 +253,22 @@ export interface ShowSpecsOptions {
   passed?: boolean;
   orphaned?: boolean;
   untracked?: boolean;
+  reconcile?: boolean;
 }
 
 export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
   const workingDir = options.cwd ? path.resolve(options.cwd) : process.cwd();
+
+  // Reconcile from results history if requested
+  if (options.reconcile) {
+    const count = await reconcileSpecs(workingDir);
+    if (count > 0) {
+      console.log(`${BOLD}Reconciled ${count} run(s) from .forge/results/${RESET}\n`);
+    } else {
+      console.log(`${DIM}No new runs to reconcile.${RESET}\n`);
+    }
+  }
+
   const manifest = await loadManifest(workingDir);
 
   const filterActive = !!(options.pending || options.failed || options.passed || options.orphaned || options.untracked);
@@ -252,7 +352,14 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
         : path.resolve(workingDir, e.spec);
     }));
 
-    for (const dir of specDirs) {
+    // Remove subdirectories already covered by a parent in specDirs
+    const sortedDirs = [...specDirs].sort();
+    const rootDirs = sortedDirs.filter((dir, _i, arr) =>
+      !arr.some(parent => parent !== dir && dir.startsWith(parent + path.sep)),
+    );
+
+    const seen = new Set<string>();
+    for (const dir of rootDirs) {
       try {
         const entries = await fs.readdir(dir, { withFileTypes: true });
         const queue = [...entries.map(e => ({ entry: e, base: dir }))];
@@ -264,7 +371,8 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
               const sub = await fs.readdir(fullPath, { withFileTypes: true });
               queue.push(...sub.map(e => ({ entry: e, base: fullPath })));
             } catch {}
-          } else if (entry.name.endsWith('.md') && !trackedSpecs.has(fullPath)) {
+          } else if (entry.name.endsWith('.md') && !trackedSpecs.has(fullPath) && !seen.has(fullPath)) {
+            seen.add(fullPath);
             const rel = path.relative(workingDir, fullPath);
             untrackedEntries.push(rel.startsWith('..') ? fullPath : rel);
           }

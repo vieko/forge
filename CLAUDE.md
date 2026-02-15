@@ -76,6 +76,7 @@ forge specs --failed            # Show only failed specs
 forge specs --passed            # Show only passed specs
 forge specs --orphaned          # Specs in manifest but file missing
 forge specs --untracked         # .md files in spec dirs not in manifest
+forge specs --reconcile         # Backfill manifest from .forge/results/ history
 forge specs -C ~/other-repo     # Different working directory
 ```
 

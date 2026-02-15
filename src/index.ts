@@ -260,6 +260,7 @@ program
   .option('--passed', 'Show only passed specs')
   .option('--orphaned', 'Show specs in manifest but missing from filesystem')
   .option('--untracked', 'Show .md files in spec dirs not in manifest')
+  .option('--reconcile', 'Backfill manifest from .forge/results/ history')
   .action(async (options: {
     cwd?: string;
     pending?: boolean;
@@ -267,6 +268,7 @@ program
     passed?: boolean;
     orphaned?: boolean;
     untracked?: boolean;
+    reconcile?: boolean;
   }) => {
     try {
       await showSpecs({
@@ -276,6 +278,7 @@ program
         passed: options.passed,
         orphaned: options.orphaned,
         untracked: options.untracked,
+        reconcile: options.reconcile,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);
