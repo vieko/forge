@@ -50,18 +50,35 @@ allowing normal usage. Limits are configurable per-route.
 - Follow existing middleware patterns in src/middleware/
 ```
 
+## Frontmatter
+
+Optional YAML frontmatter for dependency graph and source tracking:
+
+```yaml
+---
+depends: [database-schema.md, api-models.md]
+source: github:vieko/forge#42
+---
+```
+
+- **`depends:`** — List of spec filenames this spec depends on. Forge runs them in topological order: independent specs in parallel, dependent specs wait.
+- **`source:`** — Origin tracking (optional). Used by `forge specs` display. Format: `github:owner/repo#issue` or any string.
+
 ## Conventions
 
-**One concern per spec.** Each spec should be independently executable. Split large features:
+**One concern per spec.** Each spec should be independently executable. Split large features into focused specs.
+
+**Use `depends:` for ordering.** Declare dependencies explicitly in frontmatter. Forge builds a dependency graph and runs specs in topological levels — independent specs parallelize, dependent specs wait.
 
 ```
-01-database-schema.md
-02-api-endpoints.md
-03-frontend-components.md
-04-integration-tests.md
+database-schema.md           # Level 1 (no deps, runs first)
+api-models.md                # Level 1 (parallel with schema)
+api-endpoints.md             # Level 2 (depends: [database-schema.md, api-models.md])
+frontend-components.md       # Level 2 (depends: [api-models.md])
+integration-tests.md         # Level 3 (depends: [api-endpoints.md, frontend-components.md])
 ```
 
-**Number-prefix for ordering.** Specs sort alphabetically. Use `--sequential-first N` to run foundations before parallelizing the rest.
+**Number-prefix as fallback.** When not using `depends:`, number-prefix specs for alphabetical ordering. Use `--sequential-first N` to run foundations before parallelizing the rest.
 
 **Point to relevant files.** The Context section saves the agent exploration time. List specific paths, not vague descriptions.
 
