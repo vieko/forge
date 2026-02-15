@@ -50,10 +50,34 @@ SPEC BATCH SUMMARY
 
 Use `--dry-run` to estimate cost before committing to a full run.
 
+## Dependency Graph
+
+Specs can declare dependencies via `depends:` frontmatter. Forge builds a topological sort and executes in levels — independent specs run in parallel, dependent specs wait for their dependencies to complete.
+
+```yaml
+---
+depends: [auth-base.md]
+---
+# OAuth Integration
+...
+```
+
+Supports inline (`depends: [a.md, b.md]`) and block syntax:
+
+```yaml
+---
+depends:
+  - auth-base.md
+  - db-schema.md
+---
+```
+
+Forge detects cycles and errors before execution. Specs with no dependencies run first (level 0), then their dependents (level 1), and so on — each level runs in parallel.
+
 ## Key Behaviors
 
 - Each spec runs in its own isolated agent session — no shared context.
 - Verification (typecheck, build, test) runs independently per spec.
 - Transient errors (rate limits, network) auto-retry with exponential backoff.
-- Specs that write to the same files may conflict — use `--sequential-first` for dependencies.
+- Use `depends:` frontmatter for specs that must run after others. Use `--sequential-first` as a simpler fallback when one foundational spec must run before the rest.
 - Results are grouped by batch run ID. Use `forge run --rerun-failed -P` to retry failures.

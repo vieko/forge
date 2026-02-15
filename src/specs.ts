@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { DIM, RESET, BOLD } from './display.js';
+import { parseSource } from './deps.js';
 
 // ── Manifest path ────────────────────────────────────────────
 
@@ -134,6 +135,24 @@ export function specKey(specPath: string, workingDir: string): string {
     return specPath;
   }
   return rel;
+}
+
+// ── Source resolution ────────────────────────────────────────
+
+/** Determine source type from spec content and path. */
+export function resolveSpecSource(specContent?: string, specPath?: string): SpecEntry['source'] {
+  if (!specPath && !specContent) return 'file';
+  if (!specPath && specContent) return 'pipe';
+
+  // Check frontmatter source field
+  if (specContent) {
+    const source = parseSource(specContent);
+    if (source && source.startsWith('github:')) {
+      return source as `github:${string}`;
+    }
+  }
+
+  return 'file';
 }
 
 // ── Locked manifest update ───────────────────────────────────
@@ -269,6 +288,134 @@ export async function pruneSpecs(workingDir: string): Promise<number> {
   return pruned;
 }
 
+// ── Add specs to manifest ────────────────────────────────────
+
+/** Resolve a glob or file path to a list of absolute .md file paths. */
+async function resolveSpecPaths(pattern: string, workingDir: string): Promise<string[]> {
+  const resolved = path.resolve(workingDir, pattern);
+  const results: string[] = [];
+
+  // Check if it's a direct file
+  try {
+    const stat = await fs.stat(resolved);
+    if (stat.isFile()) {
+      if (resolved.endsWith('.md')) results.push(resolved);
+      return results;
+    }
+    if (stat.isDirectory()) {
+      // Recurse into directory for all .md files
+      return collectMdFiles(resolved);
+    }
+  } catch {
+    // Not a direct file/dir — treat as glob pattern
+  }
+
+  // Simple glob: expand from the base directory
+  // Find the first segment without glob characters to use as base
+  const parts = pattern.split('/');
+  let baseIdx = 0;
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].includes('*') || parts[i].includes('?') || parts[i].includes('[')) {
+      baseIdx = i;
+      break;
+    }
+    baseIdx = i + 1;
+  }
+
+  const baseDir = path.resolve(workingDir, parts.slice(0, baseIdx).join('/') || '.');
+  try {
+    await fs.access(baseDir);
+  } catch {
+    return results; // Base directory doesn't exist
+  }
+
+  // Collect all .md files under baseDir
+  const allFiles = await collectMdFiles(baseDir);
+
+  // Match against the pattern using simple glob matching
+  for (const file of allFiles) {
+    const rel = path.relative(workingDir, file);
+    if (matchGlob(pattern, rel)) {
+      results.push(file);
+    }
+  }
+
+  return results;
+}
+
+/** Recursively collect all .md files under a directory. */
+async function collectMdFiles(dir: string): Promise<string[]> {
+  const results: string[] = [];
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const queue = entries.map(e => ({ entry: e, base: dir }));
+
+  while (queue.length > 0) {
+    const { entry, base } = queue.shift()!;
+    const fullPath = path.join(base, entry.name);
+    if (entry.isDirectory()) {
+      try {
+        const sub = await fs.readdir(fullPath, { withFileTypes: true });
+        queue.push(...sub.map(e => ({ entry: e, base: fullPath })));
+      } catch {}
+    } else if (entry.name.endsWith('.md')) {
+      results.push(fullPath);
+    }
+  }
+
+  return results;
+}
+
+/** Simple glob matcher supporting * and ** patterns. */
+function matchGlob(pattern: string, filePath: string): boolean {
+  // Convert glob to regex
+  const regexStr = pattern
+    .split('/')
+    .map(segment => {
+      if (segment === '**') return '.*';
+      return segment
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&') // escape regex chars (except * and ?)
+        .replace(/\*\*/g, '.*')
+        .replace(/\*/g, '[^/]*')
+        .replace(/\?/g, '[^/]');
+    })
+    .join('/');
+
+  const regex = new RegExp(`^${regexStr}$`);
+  return regex.test(filePath);
+}
+
+/** Add spec files to the manifest by path or glob pattern. Returns count of newly added specs. */
+export async function addSpecs(patterns: string[], workingDir: string): Promise<number> {
+  // Resolve all patterns to absolute paths
+  const allPaths = new Set<string>();
+  for (const pattern of patterns) {
+    const resolved = await resolveSpecPaths(pattern, workingDir);
+    for (const p of resolved) allPaths.add(p);
+  }
+
+  if (allPaths.size === 0) return 0;
+
+  let added = 0;
+  await withManifestLock(workingDir, (manifest) => {
+    const trackedSpecs = new Set(manifest.specs.map(e => {
+      return path.isAbsolute(e.spec)
+        ? e.spec
+        : path.resolve(workingDir, e.spec);
+    }));
+
+    for (const absPath of allPaths) {
+      if (trackedSpecs.has(absPath)) continue;
+
+      const rel = path.relative(workingDir, absPath);
+      const key = rel.startsWith('..') || path.isAbsolute(rel) ? absPath : rel;
+      findOrCreateEntry(manifest, key, 'file');
+      added++;
+    }
+  });
+
+  return added;
+}
+
 // ── showSpecs command ────────────────────────────────────────
 
 export interface ShowSpecsOptions {
@@ -280,6 +427,7 @@ export interface ShowSpecsOptions {
   untracked?: boolean;
   reconcile?: boolean;
   prune?: boolean;
+  add?: string;
 }
 
 export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
@@ -303,6 +451,17 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
     } else {
       console.log(`${DIM}No orphaned specs to prune.${RESET}\n`);
     }
+  }
+
+  // Add specs from path/glob if requested
+  if (options.add) {
+    const count = await addSpecs([options.add], workingDir);
+    if (count > 0) {
+      console.log(`${BOLD}Added ${count} spec(s) to manifest${RESET}\n`);
+    } else {
+      console.log(`${DIM}No new specs to add (already tracked or no .md files found).${RESET}\n`);
+    }
+    return;
   }
 
   const manifest = await loadManifest(workingDir);

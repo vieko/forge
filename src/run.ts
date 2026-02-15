@@ -5,26 +5,7 @@ import { ForgeError, resolveWorkingDir, resolveConfig, saveResult } from './util
 import { DIM, RESET, CMD, BOLD } from './display.js';
 import { runVerification } from './verify.js';
 import { runQuery, streamLogAppend } from './core.js';
-import { withManifestLock, findOrCreateEntry, updateEntryStatus, specKey, pipeSpecId } from './specs.js';
-import { parseSource } from './deps.js';
-
-import type { SpecEntry } from './types.js';
-
-// Determine source type from spec content and path
-function resolveSpecSource(specContent?: string, specPath?: string): SpecEntry['source'] {
-  if (!specPath && !specContent) return 'file';
-  if (!specPath && specContent) return 'pipe';
-
-  // Check frontmatter source field
-  if (specContent) {
-    const source = parseSource(specContent);
-    if (source && source.startsWith('github:')) {
-      return source as `github:${string}`;
-    }
-  }
-
-  return 'file';
-}
+import { withManifestLock, findOrCreateEntry, updateEntryStatus, specKey, pipeSpecId, resolveSpecSource } from './specs.js';
 
 // Batch result type (used by parallel.ts)
 export interface BatchResult {

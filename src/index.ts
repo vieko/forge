@@ -262,6 +262,7 @@ program
   .option('--untracked', 'Show .md files in spec dirs not in manifest')
   .option('--reconcile', 'Backfill manifest from .forge/results/ history')
   .option('--prune', 'Remove orphaned entries (file missing) from manifest')
+  .option('--add <path>', 'Register spec file(s) by path or glob (e.g. specs/*.md)')
   .action(async (options: {
     cwd?: string;
     pending?: boolean;
@@ -271,6 +272,7 @@ program
     untracked?: boolean;
     reconcile?: boolean;
     prune?: boolean;
+    add?: string;
   }) => {
     try {
       await showSpecs({
@@ -282,6 +284,7 @@ program
         untracked: options.untracked,
         reconcile: options.reconcile,
         prune: options.prune,
+        add: options.add,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);
