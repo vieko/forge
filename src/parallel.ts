@@ -438,7 +438,7 @@ export async function runForge(options: ForgeOptions): Promise<void> {
   const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed, pendingOnly } = options;
 
   if (!quiet) {
-    showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS.');
+    showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS');
   }
 
   // Resolve concurrency: use provided value or auto-detect

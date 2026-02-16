@@ -11,7 +11,7 @@ export async function runAudit(options: AuditOptions): Promise<void> {
   const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
 
   if (!quiet) {
-    showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS.');
+    showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS');
   }
 
   // Resolve and validate working directory

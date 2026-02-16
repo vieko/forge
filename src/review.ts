@@ -9,7 +9,7 @@ export async function runReview(options: ReviewOptions): Promise<void> {
   const { diff, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false, dryRun = false, output } = options;
 
   if (!quiet) {
-    showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS.');
+    showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS');
   }
 
   // Resolve and validate working directory
