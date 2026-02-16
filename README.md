@@ -43,6 +43,7 @@ forge status                                             # View recent results
 forge specs                                              # List tracked specs with status
 forge specs --add                                        # Register all untracked specs
 forge specs --resolve game.md                            # Mark spec as passed
+forge specs --check                                      # Auto-resolve implemented specs
 ```
 
 See `forge --help` or `forge <command> --help` for all options.

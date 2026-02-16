@@ -64,6 +64,7 @@ Reviews codebase against specs. Produces new spec files for remaining work — f
 forge audit specs/                              # Audit, output to specs/audit/
 forge audit specs/ -o ./remediation/            # Custom output dir
 forge audit specs/ -C ~/target-repo             # Different repo
+forge audit specs/ --watch                      # Auto-split tmux pane with live logs
 ```
 
 ### forge define
@@ -116,6 +117,7 @@ forge specs --untracked                         # .md files not in manifest
 forge specs --add                               # Register all untracked specs
 forge specs --add specs/new.md                  # Register specific spec by path/glob
 forge specs --resolve game.md                   # Mark spec as passed without running
+forge specs --check                             # Auto-resolve implemented pending specs
 forge specs --reconcile                         # Backfill from .forge/results/ history
 forge specs --prune                             # Remove orphaned entries from manifest
 ```

@@ -170,6 +170,7 @@ program
   .option('-q, --quiet', 'Suppress progress output')
   .option('-r, --resume <session>', 'Resume a previous session')
   .option('-f, --fork <session>', 'Fork from a previous session')
+  .option('-w, --watch', 'Open a tmux pane with live session logs')
   .action(async (specDir: string, prompt: string | undefined, options: {
     outputDir?: string;
     cwd?: string;
@@ -180,9 +181,26 @@ program
     quiet?: boolean;
     resume?: string;
     fork?: string;
+    watch?: boolean;
   }) => {
     validateSession(options.resume, options.fork);
     validateBudget(options.maxBudget);
+
+    if (options.watch) {
+      if (process.env.TMUX) {
+        const watchCwd = options.cwd ? ` -C ${options.cwd}` : '';
+        const { exec: execCb } = await import('child_process');
+        execCb(`tmux split-window -h "forge watch${watchCwd}"`, (err) => {
+          if (err && !options.quiet) {
+            console.error('\x1b[2m[forge]\x1b[0m Could not open tmux watch pane:', err.message);
+          }
+        });
+      } else if (!options.quiet) {
+        console.log("\x1b[2m[forge]\x1b[0m Tip: Run '\x1b[36mforge watch\x1b[0m' in another terminal for live logs");
+        console.log("\x1b[2m[forge]\x1b[0m (or use --watch inside tmux for auto-split)\n");
+      }
+    }
+
     try {
       await runAudit({
         specDir,

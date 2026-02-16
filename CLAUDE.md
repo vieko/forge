@@ -70,6 +70,7 @@ forge audit specs/                              # Audit, output to specs/audit/
 forge audit specs/ -C ~/target-repo             # Audit a different repo
 forge audit specs/ -o ./remediation/            # Custom output directory
 forge audit specs/ "focus on auth module"       # With additional context
+forge audit specs/ --watch                      # Auto-split tmux pane with live logs
 
 # View run results
 forge status                    # Latest run
@@ -87,6 +88,7 @@ forge specs --untracked         # .md files in spec dirs not in manifest
 forge specs --add               # Register all untracked specs
 forge specs --add specs/new.md  # Register specific spec by path/glob
 forge specs --resolve game.md   # Mark a pending/failed spec as passed
+forge specs --check             # Auto-resolve already-implemented pending specs
 forge specs --reconcile         # Backfill manifest from .forge/results/ history
 forge specs --prune             # Remove orphaned entries from manifest
 forge specs -C ~/other-repo     # Different working directory
@@ -164,6 +166,7 @@ src/
 12. **Audit** — `forge audit` reviews the codebase against specs via a single read-heavy `query()` call and produces new spec files for any remaining work; output feeds directly into `forge run --spec-dir`
 13. **Spec lifecycle** — `.forge/specs.json` manifest tracks every spec from registration through execution; `forge specs` shows status, run history, cost, and detects orphaned/untracked specs
 14. **Resolve specs** — `forge specs --resolve` marks specs as passed without running (for manually completed work)
+15. **Check specs** — `forge specs --check` uses a Sonnet agent to triage pending specs against the codebase and auto-resolve implemented ones
 
 ## Spec Naming
 
