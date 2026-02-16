@@ -30,7 +30,7 @@ forge run --spec-dir ./specs/ -P --sequential-first 1 "implement these"
 # Rerun only failed specs from the latest batch
 forge run --rerun-failed -P -C ~/target-repo "fix failures"
 
-# Configurable max turns (default: 100)
+# Configurable max turns (default: 250)
 forge run --max-turns 150 "large task"
 
 # Plan only (no implementation)
@@ -88,7 +88,7 @@ forge specs -C ~/other-repo     # Different working directory
 ## Architecture
 
 ```
-~1760 lines total
+~4000 lines (source) + ~1500 lines (tests)
 
 User Prompt
     ↓
@@ -121,6 +121,7 @@ src/
 ├── parallel.ts    # workerPool, autoDetectConcurrency, spec display, runForge
 ├── watch.ts       # WatchOptions, colorWatchLine, runWatch
 ├── audit.ts       # runAudit
+├── define.ts      # runDefine
 ├── review.ts      # runReview
 ├── status.ts      # showStatus
 ├── types.ts       # TypeScript types

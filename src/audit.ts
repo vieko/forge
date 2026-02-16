@@ -1,15 +1,14 @@
 import type { AuditOptions, ForgeResult } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { resolveWorkingDir, resolveConfig, saveResult } from './utils.js';
-import { DIM, RESET, BOLD, CMD, showBanner } from './display.js';
+import { resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
+import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
 import { withManifestLock, findOrCreateEntry, specKey } from './specs.js';
 
 export async function runAudit(options: AuditOptions): Promise<void> {
-  const { specDir, prompt, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false, resume, fork } = options;
-  const effectiveResume = fork || resume;
-  const isFork = !!fork;
+  const { specDir, prompt, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false } = options;
+  const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
 
   if (!quiet) {
     showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS.');
@@ -49,9 +48,9 @@ export async function runAudit(options: AuditOptions): Promise<void> {
   }
   const allSpecContents = specContents.join('\n\n---\n\n');
 
-  // Resolve output directory
+  // Resolve output directory (relative to workingDir, not process.cwd())
   const outputDir = options.outputDir
-    ? path.resolve(options.outputDir)
+    ? path.resolve(workingDir, options.outputDir)
     : path.join(resolvedSpecDir, 'audit');
 
   // Warn if output dir is non-empty
@@ -59,7 +58,7 @@ export async function runAudit(options: AuditOptions): Promise<void> {
     const existing = await fs.readdir(outputDir);
     if (existing.length > 0 && !quiet) {
       console.log(`\x1b[33m[forge]\x1b[0m Output directory is non-empty: ${outputDir}`);
-      console.log(`${DIM}[forge]${RESET} Existing files may be overwritten. Use ${CMD}--output-dir${RESET} to write elsewhere.\n`);
+      console.log(`${DIM}[forge]${RESET} Existing files may be overwritten. Use ${CMD}-o${RESET} to write elsewhere.\n`);
     }
   } catch {
     // Directory doesn't exist yet — that's fine
@@ -70,7 +69,7 @@ export async function runAudit(options: AuditOptions): Promise<void> {
 
   if (!quiet) {
     console.log(`${DIM}Specs:${RESET}      ${specFiles.length} file(s) from ${DIM}${resolvedSpecDir}${RESET}`);
-    console.log(`${DIM}Output:${RESET}     ${DIM}${outputDir}${RESET}`);
+    console.log(`${DIM}Output:${RESET}      ${DIM}${outputDir}${RESET}`);
     console.log(`${DIM}Working dir:${RESET} ${workingDir}\n`);
   }
 
@@ -116,7 +115,7 @@ ${prompt ? `## Additional Context\n\n${prompt}\n` : ''}
     quiet,
     silent: false,
     auditLogExtra: { type: 'audit' },
-    sessionExtra: { type: 'audit', ...(isFork && { forkedFrom: fork }) },
+    sessionExtra: { type: 'audit', ...(isFork && { forkedFrom: options.fork }) },
     resume: effectiveResume,
     forkSession: isFork,
   });
@@ -134,7 +133,7 @@ ${prompt ? `## Additional Context\n\n${prompt}\n` : ''}
     model: effectiveModel,
     cwd: workingDir,
     sessionId: qr.sessionId,
-    forkedFrom: isFork ? fork : undefined,
+    forkedFrom: isFork ? options.fork : undefined,
     type: 'audit',
   };
 
@@ -149,22 +148,18 @@ ${prompt ? `## Additional Context\n\n${prompt}\n` : ''}
 
   // Register audit-generated specs in the manifest
   if (outputSpecs.length > 0) {
-    const auditRunId = `audit:${forgeResult.startedAt}`;
+    const auditSource = `audit:${forgeResult.startedAt}`;
     await withManifestLock(workingDir, (manifest) => {
       for (const specFile of outputSpecs) {
         const specFilePath = path.join(outputDir, specFile);
         const key = specKey(specFilePath, workingDir);
-        findOrCreateEntry(manifest, key, `audit:${auditRunId}` as `audit:${string}`);
+        findOrCreateEntry(manifest, key, auditSource as `audit:${string}`);
       }
     });
   }
 
   if (!quiet) {
-    console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
-    console.log(`  Duration: ${BOLD}${durationSeconds.toFixed(1)}s${RESET}`);
-    if (qr.costUsd !== undefined) {
-      console.log(`  Cost:     ${BOLD}$${qr.costUsd.toFixed(4)}${RESET}`);
-    }
+    printRunSummary({ durationSeconds, costUsd: qr.costUsd });
 
     if (outputSpecs.length === 0) {
       console.log(`\n  \x1b[32mAll specs fully implemented — no remaining work.\x1b[0m`);

@@ -82,6 +82,18 @@ export function formatProgress(agent: string | null, message: string): string {
   return `${DIM}[${name}]${RESET} ${message}`;
 }
 
+// Print run summary footer (duration + cost)
+export function printRunSummary(opts: { durationSeconds: number; costUsd?: number; sessionId?: string }): void {
+  console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+  console.log(`  Duration: ${BOLD}${opts.durationSeconds.toFixed(1)}s${RESET}`);
+  if (opts.costUsd !== undefined) {
+    console.log(`  Cost:     ${BOLD}$${opts.costUsd.toFixed(4)}${RESET}`);
+  }
+  if (opts.sessionId) {
+    console.log(`  Session:  ${DIM}${opts.sessionId}${RESET}`);
+  }
+}
+
 // Format elapsed time as "Xm Ys"
 export function formatElapsed(ms: number): string {
   const totalSec = Math.floor(ms / 1000);

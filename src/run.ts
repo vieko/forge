@@ -1,8 +1,8 @@
 import type { ForgeOptions, ForgeResult } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { ForgeError, resolveWorkingDir, resolveConfig, saveResult } from './utils.js';
-import { DIM, RESET, CMD, BOLD } from './display.js';
+import { ForgeError, resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
+import { DIM, RESET, CMD, BOLD, printRunSummary } from './display.js';
 import { runVerification } from './verify.js';
 import { runQuery, streamLogAppend } from './core.js';
 import { withManifestLock, findOrCreateEntry, updateEntryStatus, specKey, pipeSpecId, resolveSpecSource } from './specs.js';
@@ -16,9 +16,8 @@ export interface BatchResult {
 }
 
 export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string }): Promise<ForgeResult> {
-  const { prompt, specPath, specContent, cwd, model, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, resume, fork, _silent = false, _onActivity, _runId } = options;
-  const effectiveResume = fork || resume;
-  const isFork = !!fork;
+  const { prompt, specPath, specContent, cwd, model, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId } = options;
+  const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
 
   // Resolve and validate working directory
   const workingDir = await resolveWorkingDir(cwd);
@@ -120,7 +119,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
       silent: _silent,
       onActivity: _onActivity,
       auditLogExtra: specPath ? { spec: path.basename(specPath) } : {},
-      sessionExtra: { prompt, ...(isFork && { forkedFrom: fork }) },
+      sessionExtra: { prompt, ...(isFork && { forkedFrom: options.fork }) },
       resume: effectiveResume,
       forkSession: isFork,
     });
@@ -182,7 +181,7 @@ ${verification.errors}
             model: modelName,
             cwd: workingDir,
             sessionId: qr.sessionId,
-            forkedFrom: isFork ? fork : undefined,
+            forkedFrom: isFork ? options.fork : undefined,
             runId: _runId,
             error: `Verification failed after ${maxVerifyAttempts} attempts:\n${verification.errors}`,
           };
@@ -242,7 +241,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       model: modelName,
       cwd: workingDir,
       sessionId: qr.sessionId,
-      forkedFrom: isFork ? fork : undefined,
+      forkedFrom: isFork ? options.fork : undefined,
       runId: _runId
     };
 
@@ -276,14 +275,9 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       console.log(qr.resultText);
 
       // Display summary
-      console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
-      console.log(`  Duration: ${BOLD}${durationSeconds.toFixed(1)}s${RESET}`);
-      if (qr.costUsd !== undefined) {
-        console.log(`  Cost:     ${BOLD}$${qr.costUsd.toFixed(4)}${RESET}`);
-      }
+      printRunSummary({ durationSeconds, costUsd: qr.costUsd, sessionId: qr.sessionId });
       console.log(`  Results:  ${DIM}${resultsDir}${RESET}`);
       if (qr.sessionId) {
-        console.log(`  Session:  ${DIM}${qr.sessionId}${RESET}`);
         console.log(`  Resume:   ${CMD}forge run --resume ${qr.sessionId} "continue"${RESET}`);
         console.log(`  Fork:     ${CMD}forge run --fork ${qr.sessionId} "try different approach"${RESET}`);
       }

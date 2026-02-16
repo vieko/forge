@@ -15,6 +15,35 @@ import { runDefine } from './define.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
 
+// ── CLI Validators ───────────────────────────────────────────
+
+function validateBudget(value?: string): void {
+  if (value !== undefined) {
+    const budget = parseFloat(value);
+    if (isNaN(budget) || budget <= 0) {
+      console.error('Error: --max-budget must be a positive number.');
+      process.exit(1);
+    }
+  }
+}
+
+function validateSession(resume?: string, fork?: string): void {
+  if (resume && fork) {
+    console.error('Error: --resume and --fork are mutually exclusive. Use one or the other.');
+    process.exit(1);
+  }
+}
+
+function parseBudget(value?: string): number | undefined {
+  return value ? parseFloat(value) : undefined;
+}
+
+function parseTurns(value: string | undefined, fallback: number): number {
+  return value ? parseInt(value, 10) : fallback;
+}
+
+// ── Commands ─────────────────────────────────────────────────
+
 program
   .name('forge')
   .description('A verification boundary for autonomous agents')
@@ -60,17 +89,9 @@ program
     rerunFailed?: boolean;
     watch?: boolean;
   }) => {
-    if (options.resume && options.fork) {
-      console.error('Error: --resume and --fork are mutually exclusive. Use one or the other.');
-      process.exit(1);
-    }
-    if (options.maxBudget !== undefined) {
-      const budget = parseFloat(options.maxBudget);
-      if (isNaN(budget) || budget <= 0) {
-        console.error('Error: --max-budget must be a positive number.');
-        process.exit(1);
-      }
-    }
+    validateSession(options.resume, options.fork);
+    validateBudget(options.maxBudget);
+
     // --watch: open a tmux pane with live session logs
     if (options.watch) {
       if (process.env.TMUX) {
@@ -94,8 +115,8 @@ program
         specDir: options.specDir,
         cwd: options.cwd,
         model: options.model,
-        maxTurns: options.maxTurns ? parseInt(options.maxTurns, 10) : 250,
-        maxBudgetUsd: options.maxBudget ? parseFloat(options.maxBudget) : undefined,
+        maxTurns: parseTurns(options.maxTurns, 250),
+        maxBudgetUsd: parseBudget(options.maxBudget),
         planOnly: options.planOnly,
         dryRun: options.dryRun,
         verbose: options.verbose,
@@ -157,17 +178,8 @@ program
     resume?: string;
     fork?: string;
   }) => {
-    if (options.resume && options.fork) {
-      console.error('Error: --resume and --fork are mutually exclusive. Use one or the other.');
-      process.exit(1);
-    }
-    if (options.maxBudget !== undefined) {
-      const budget = parseFloat(options.maxBudget);
-      if (isNaN(budget) || budget <= 0) {
-        console.error('Error: --max-budget must be a positive number.');
-        process.exit(1);
-      }
-    }
+    validateSession(options.resume, options.fork);
+    validateBudget(options.maxBudget);
     try {
       await runAudit({
         specDir,
@@ -175,8 +187,8 @@ program
         prompt,
         cwd: options.cwd,
         model: options.model,
-        maxTurns: options.maxTurns ? parseInt(options.maxTurns, 10) : 250,
-        maxBudgetUsd: options.maxBudget ? parseFloat(options.maxBudget) : undefined,
+        maxTurns: parseTurns(options.maxTurns, 250),
+        maxBudgetUsd: parseBudget(options.maxBudget),
         verbose: options.verbose,
         quiet: options.quiet,
         resume: options.resume,
@@ -212,25 +224,16 @@ program
     resume?: string;
     fork?: string;
   }) => {
-    if (options.resume && options.fork) {
-      console.error('Error: --resume and --fork are mutually exclusive. Use one or the other.');
-      process.exit(1);
-    }
-    if (options.maxBudget !== undefined) {
-      const budget = parseFloat(options.maxBudget);
-      if (isNaN(budget) || budget <= 0) {
-        console.error('Error: --max-budget must be a positive number.');
-        process.exit(1);
-      }
-    }
+    validateSession(options.resume, options.fork);
+    validateBudget(options.maxBudget);
     try {
       await runDefine({
         prompt,
         outputDir: options.outputDir,
         cwd: options.cwd,
         model: options.model,
-        maxTurns: options.maxTurns ? parseInt(options.maxTurns, 10) : 100,
-        maxBudgetUsd: options.maxBudget ? parseFloat(options.maxBudget) : undefined,
+        maxTurns: parseTurns(options.maxTurns, 100),
+        maxBudgetUsd: parseBudget(options.maxBudget),
         verbose: options.verbose,
         quiet: options.quiet,
         resume: options.resume,
@@ -264,20 +267,14 @@ program
     dryRun?: boolean;
     output?: string;
   }) => {
-    if (options.maxBudget !== undefined) {
-      const budget = parseFloat(options.maxBudget);
-      if (isNaN(budget) || budget <= 0) {
-        console.error('Error: --max-budget must be a positive number.');
-        process.exit(1);
-      }
-    }
+    validateBudget(options.maxBudget);
     try {
       await runReview({
         diff,
         cwd: options.cwd,
         model: options.model,
-        maxTurns: options.maxTurns ? parseInt(options.maxTurns, 10) : 50,
-        maxBudgetUsd: options.maxBudget ? parseFloat(options.maxBudget) : undefined,
+        maxTurns: parseTurns(options.maxTurns, 50),
+        maxBudgetUsd: parseBudget(options.maxBudget),
         verbose: options.verbose,
         quiet: options.quiet,
         dryRun: options.dryRun,

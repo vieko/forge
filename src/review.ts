@@ -2,7 +2,7 @@ import type { ReviewOptions, ForgeResult } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { resolveWorkingDir, resolveConfig, saveResult, execAsync } from './utils.js';
-import { DIM, RESET, BOLD, CMD, showBanner } from './display.js';
+import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
 
 export async function runReview(options: ReviewOptions): Promise<void> {
@@ -162,14 +162,7 @@ ${diffOutput}
   }
 
   if (!quiet) {
-    console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
-    console.log(`  Duration: ${BOLD}${durationSeconds.toFixed(1)}s${RESET}`);
-    if (qr.costUsd !== undefined) {
-      console.log(`  Cost:     ${BOLD}$${qr.costUsd.toFixed(4)}${RESET}`);
-    }
-    if (qr.sessionId) {
-      console.log(`  Session:  ${DIM}${qr.sessionId}${RESET}`);
-    }
+    printRunSummary({ durationSeconds, costUsd: qr.costUsd, sessionId: qr.sessionId });
     console.log('');
   }
 }

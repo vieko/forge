@@ -1,15 +1,14 @@
 import type { DefineOptions, ForgeResult } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { resolveWorkingDir, resolveConfig, saveResult } from './utils.js';
-import { DIM, RESET, BOLD, CMD, showBanner } from './display.js';
+import { resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
+import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
 import { withManifestLock, findOrCreateEntry, specKey } from './specs.js';
 
 export async function runDefine(options: DefineOptions): Promise<void> {
-  const { prompt, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false, resume, fork } = options;
-  const effectiveResume = fork || resume;
-  const isFork = !!fork;
+  const { prompt, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false } = options;
+  const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
 
   if (!quiet) {
     showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS.');
@@ -24,13 +23,14 @@ export async function runDefine(options: DefineOptions): Promise<void> {
     maxTurns,
     maxBudgetUsd,
     defaultModel: 'sonnet',
+    defaultMaxTurns: 100,
     defaultMaxBudgetUsd: 10.00,
   });
   const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd } = resolved;
 
-  // Resolve output directory
+  // Resolve output directory (relative to workingDir, not process.cwd())
   const outputDir = options.outputDir
-    ? path.resolve(options.outputDir)
+    ? path.resolve(workingDir, options.outputDir)
     : path.join(workingDir, 'specs');
 
   // Warn if output dir is non-empty
@@ -49,7 +49,7 @@ export async function runDefine(options: DefineOptions): Promise<void> {
 
   if (!quiet) {
     console.log(`${DIM}Prompt:${RESET}      ${prompt}`);
-    console.log(`${DIM}Output:${RESET}     ${DIM}${outputDir}${RESET}`);
+    console.log(`${DIM}Output:${RESET}      ${DIM}${outputDir}${RESET}`);
     console.log(`${DIM}Working dir:${RESET} ${workingDir}\n`);
   }
 
@@ -125,7 +125,7 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
     quiet,
     silent: false,
     auditLogExtra: { type: 'define' },
-    sessionExtra: { type: 'define', ...(isFork && { forkedFrom: fork }) },
+    sessionExtra: { type: 'define', ...(isFork && { forkedFrom: options.fork }) },
     resume: effectiveResume,
     forkSession: isFork,
   });
@@ -143,7 +143,7 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
     model: effectiveModel,
     cwd: workingDir,
     sessionId: qr.sessionId,
-    forkedFrom: isFork ? fork : undefined,
+    forkedFrom: isFork ? options.fork : undefined,
     type: 'define',
   };
 
@@ -169,11 +169,7 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
   }
 
   if (!quiet) {
-    console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
-    console.log(`  Duration: ${BOLD}${durationSeconds.toFixed(1)}s${RESET}`);
-    if (qr.costUsd !== undefined) {
-      console.log(`  Cost:     ${BOLD}$${qr.costUsd.toFixed(4)}${RESET}`);
-    }
+    printRunSummary({ durationSeconds, costUsd: qr.costUsd });
 
     if (outputSpecs.length === 0) {
       console.log(`\n  ${DIM}No spec files generated.${RESET}`);

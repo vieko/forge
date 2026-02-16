@@ -78,6 +78,11 @@ export async function resolveConfig(workingDir: string, overrides: ConfigOverrid
   };
 }
 
+// Resolve resume/fork session options
+export function resolveSession(fork?: string, resume?: string): { effectiveResume?: string; isFork: boolean } {
+  return { effectiveResume: fork || resume, isFork: !!fork };
+}
+
 // Check if an error is transient and retryable
 export function isTransientError(error: unknown): boolean {
   if (error instanceof Error) {
