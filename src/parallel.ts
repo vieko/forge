@@ -6,7 +6,7 @@ import { ForgeError } from './utils.js';
 import { DIM, RESET, BOLD, CMD, AGENT_VERBS, SPINNER_FRAMES, formatElapsed, showBanner } from './display.js';
 import { runSingleSpec, type BatchResult } from './run.js';
 import { loadSpecDeps, topoSort, hasDependencies, type SpecDep, type DepLevel } from './deps.js';
-import { withManifestLock, findOrCreateEntry, specKey } from './specs.js';
+import { withManifestLock, findOrCreateEntry, specKey, loadManifest } from './specs.js';
 import { resolveWorkingDir } from './utils.js';
 
 // Worker pool: runs tasks with bounded concurrency
@@ -380,6 +380,29 @@ async function findFailedSpecs(workingDir: string): Promise<{ runId: string; spe
   return { runId: latestRunId, specPaths: failedPaths };
 }
 
+// Find pending specs from the manifest
+async function findPendingSpecs(workingDir: string): Promise<string[]> {
+  const manifest = await loadManifest(workingDir);
+  const pending: string[] = [];
+
+  for (const entry of manifest.specs) {
+    if (entry.status !== 'pending' && entry.status !== 'running') continue;
+    if (entry.source === 'pipe') continue;
+
+    const absPath = path.isAbsolute(entry.spec)
+      ? entry.spec
+      : path.resolve(workingDir, entry.spec);
+
+    // Verify the file still exists
+    try {
+      await fs.access(absPath);
+      pending.push(absPath);
+    } catch {}
+  }
+
+  return pending;
+}
+
 // Print batch summary with cost tracking
 function printBatchSummary(
   results: BatchResult[],
@@ -412,7 +435,7 @@ function printBatchSummary(
 
 // Main entry point - handles single spec or spec directory
 export async function runForge(options: ForgeOptions): Promise<void> {
-  const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed } = options;
+  const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed, pendingOnly } = options;
 
   if (!quiet) {
     showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS.');
@@ -448,6 +471,36 @@ export async function runForge(options: ForgeOptions): Promise<void> {
 
     const wallClockStart = Date.now();
     const results = await runSpecBatch(failedPaths, failedNames, options, concurrency, runId);
+    const wallClockDuration = (Date.now() - wallClockStart) / 1000;
+
+    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false);
+    return;
+  }
+
+  // Run only pending specs from the manifest
+  if (pendingOnly) {
+    const workingDir = await resolveWorkingDir(options.cwd);
+    const pendingPaths = await findPendingSpecs(workingDir);
+
+    if (pendingPaths.length === 0) {
+      console.log('No pending specs found in manifest. All done!');
+      return;
+    }
+
+    const pendingNames = pendingPaths.map(p => path.basename(p));
+    if (!quiet) {
+      console.log(`Running ${BOLD}${pendingPaths.length}${RESET} pending spec(s)`);
+      if (!parallel) {
+        pendingNames.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
+      }
+      if (parallel) {
+        console.log(`${DIM}[parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})]${RESET}`);
+      }
+      console.log('');
+    }
+
+    const wallClockStart = Date.now();
+    const results = await runSpecBatch(pendingPaths, pendingNames, options, concurrency, runId);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
     printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false);

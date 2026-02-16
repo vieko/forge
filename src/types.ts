@@ -36,6 +36,8 @@ export interface ForgeOptions {
   sequentialFirst?: number;
   /** Rerun only failed specs from the latest batch */
   rerunFailed?: boolean;
+  /** Run only pending specs from the manifest */
+  pendingOnly?: boolean;
 }
 
 /**

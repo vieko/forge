@@ -69,6 +69,7 @@ program
   .option('--concurrency <n>', 'Max concurrent specs in parallel mode (default: auto)')
   .option('--sequential-first <n>', 'Run first N specs sequentially before parallelizing')
   .option('--rerun-failed', 'Rerun only failed specs from latest batch')
+  .option('--pending', 'Run only pending specs from the manifest')
   .option('-w, --watch', 'Open a tmux pane with live session logs')
   .action(async (prompt: string, options: {
     spec?: string;
@@ -87,6 +88,7 @@ program
     concurrency?: string;
     sequentialFirst?: string;
     rerunFailed?: boolean;
+    pending?: boolean;
     watch?: boolean;
   }) => {
     validateSession(options.resume, options.fork);
@@ -127,6 +129,7 @@ program
         concurrency: options.concurrency ? parseInt(options.concurrency, 10) : undefined,
         sequentialFirst: options.sequentialFirst ? parseInt(options.sequentialFirst, 10) : undefined,
         rerunFailed: options.rerunFailed,
+        pendingOnly: options.pending,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);
@@ -314,7 +317,8 @@ program
   .option('--untracked', 'Show .md files in spec dirs not in manifest')
   .option('--reconcile', 'Backfill manifest from .forge/results/ history')
   .option('--prune', 'Remove orphaned entries (file missing) from manifest')
-  .option('--add <path>', 'Register spec file(s) by path or glob (e.g. specs/*.md)')
+  .option('--add [path]', 'Register untracked specs, or specific path/glob')
+  .option('--resolve <spec>', 'Mark a pending/failed spec as passed without running')
   .action(async (options: {
     cwd?: string;
     pending?: boolean;
@@ -324,7 +328,8 @@ program
     untracked?: boolean;
     reconcile?: boolean;
     prune?: boolean;
-    add?: string;
+    add?: string | boolean;
+    resolve?: string;
   }) => {
     try {
       await showSpecs({
@@ -337,6 +342,7 @@ program
         reconcile: options.reconcile,
         prune: options.prune,
         add: options.add,
+        resolve: options.resolve,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);

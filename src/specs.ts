@@ -416,6 +416,95 @@ export async function addSpecs(patterns: string[], workingDir: string): Promise<
   return added;
 }
 
+// ── Resolve spec (mark as passed without running) ────────────
+
+export async function resolveSpecs(patterns: string[], workingDir: string): Promise<number> {
+  let resolved = 0;
+  await withManifestLock(workingDir, (manifest) => {
+    for (const pattern of patterns) {
+      // Match by exact key, basename, or trailing path
+      const entry = manifest.specs.find(e =>
+        e.spec === pattern
+        || path.basename(e.spec) === pattern
+        || e.spec.endsWith('/' + pattern)
+      );
+      if (!entry) continue;
+      if (entry.status === 'passed') continue;
+
+      entry.runs.push({
+        runId: 'manual',
+        timestamp: new Date().toISOString(),
+        resultPath: '',
+        status: 'passed',
+        durationSeconds: 0,
+      });
+      updateEntryStatus(entry);
+      resolved++;
+    }
+  });
+  return resolved;
+}
+
+// ── Untracked detection ──────────────────────────────────────
+
+// Scan known spec directories for .md files not in the manifest
+export async function findUntrackedSpecs(workingDir: string): Promise<string[]> {
+  const manifest = await loadManifest(workingDir);
+  const specDirs = new Set<string>();
+  for (const entry of manifest.specs) {
+    if (entry.source === 'pipe') continue;
+    const absPath = path.isAbsolute(entry.spec)
+      ? entry.spec
+      : path.join(workingDir, entry.spec);
+    specDirs.add(path.dirname(absPath));
+  }
+
+  for (const dir of ['specs', '.bonfire/specs']) {
+    const absDir = path.join(workingDir, dir);
+    try {
+      await fs.access(absDir);
+      specDirs.add(absDir);
+    } catch {}
+  }
+
+  const trackedSpecs = new Set(manifest.specs.map(e => {
+    return path.isAbsolute(e.spec)
+      ? e.spec
+      : path.resolve(workingDir, e.spec);
+  }));
+
+  // Remove subdirectories already covered by a parent
+  const sortedDirs = [...specDirs].sort();
+  const rootDirs = sortedDirs.filter((dir, _i, arr) =>
+    !arr.some(parent => parent !== dir && dir.startsWith(parent + path.sep)),
+  );
+
+  const seen = new Set<string>();
+  const untracked: string[] = [];
+  for (const dir of rootDirs) {
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      const queue = [...entries.map(e => ({ entry: e, base: dir }))];
+      while (queue.length > 0) {
+        const { entry, base } = queue.shift()!;
+        const fullPath = path.join(base, entry.name);
+        if (entry.isDirectory()) {
+          try {
+            const sub = await fs.readdir(fullPath, { withFileTypes: true });
+            queue.push(...sub.map(e => ({ entry: e, base: fullPath })));
+          } catch {}
+        } else if (entry.name.endsWith('.md') && !trackedSpecs.has(fullPath) && !seen.has(fullPath)) {
+          seen.add(fullPath);
+          const rel = path.relative(workingDir, fullPath);
+          untracked.push(rel.startsWith('..') ? fullPath : rel);
+        }
+      }
+    } catch {}
+  }
+
+  return untracked;
+}
+
 // ── showSpecs command ────────────────────────────────────────
 
 export interface ShowSpecsOptions {
@@ -427,7 +516,8 @@ export interface ShowSpecsOptions {
   untracked?: boolean;
   reconcile?: boolean;
   prune?: boolean;
-  add?: string;
+  add?: string | boolean;
+  resolve?: string;
 }
 
 export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
@@ -453,13 +543,30 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
     }
   }
 
-  // Add specs from path/glob if requested
+  // Add specs: bare --add registers all untracked, --add <path> registers by path/glob
   if (options.add) {
-    const count = await addSpecs([options.add], workingDir);
+    let count: number;
+    if (typeof options.add === 'string') {
+      count = await addSpecs([options.add], workingDir);
+    } else {
+      const untracked = await findUntrackedSpecs(workingDir);
+      count = untracked.length > 0 ? await addSpecs(untracked, workingDir) : 0;
+    }
     if (count > 0) {
       console.log(`${BOLD}Added ${count} spec(s) to manifest${RESET}\n`);
     } else {
       console.log(`${DIM}No new specs to add (already tracked or no .md files found).${RESET}\n`);
+    }
+    return;
+  }
+
+  // Resolve spec (mark as passed without running)
+  if (options.resolve) {
+    const count = await resolveSpecs([options.resolve], workingDir);
+    if (count > 0) {
+      console.log(`${BOLD}Resolved ${count} spec(s) as passed${RESET}\n`);
+    } else {
+      console.log(`${DIM}No matching pending spec found.${RESET}\n`);
     }
     return;
   }
@@ -520,61 +627,9 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
   }
 
   // Untracked detection: scan known spec directories
-  const untrackedEntries: string[] = [];
-  if (!filterActive || options.untracked) {
-    // Discover spec directories from manifest entries
-    const specDirs = new Set<string>();
-    for (const entry of manifest.specs) {
-      if (entry.source === 'pipe') continue;
-      const absPath = path.isAbsolute(entry.spec)
-        ? entry.spec
-        : path.join(workingDir, entry.spec);
-      specDirs.add(path.dirname(absPath));
-    }
-
-    // Also check common locations
-    for (const dir of ['specs', '.bonfire/specs']) {
-      const absDir = path.join(workingDir, dir);
-      try {
-        await fs.access(absDir);
-        specDirs.add(absDir);
-      } catch {}
-    }
-
-    const trackedSpecs = new Set(manifest.specs.map(e => {
-      return path.isAbsolute(e.spec)
-        ? e.spec
-        : path.resolve(workingDir, e.spec);
-    }));
-
-    // Remove subdirectories already covered by a parent in specDirs
-    const sortedDirs = [...specDirs].sort();
-    const rootDirs = sortedDirs.filter((dir, _i, arr) =>
-      !arr.some(parent => parent !== dir && dir.startsWith(parent + path.sep)),
-    );
-
-    const seen = new Set<string>();
-    for (const dir of rootDirs) {
-      try {
-        const entries = await fs.readdir(dir, { withFileTypes: true });
-        const queue = [...entries.map(e => ({ entry: e, base: dir }))];
-        while (queue.length > 0) {
-          const { entry, base } = queue.shift()!;
-          const fullPath = path.join(base, entry.name);
-          if (entry.isDirectory()) {
-            try {
-              const sub = await fs.readdir(fullPath, { withFileTypes: true });
-              queue.push(...sub.map(e => ({ entry: e, base: fullPath })));
-            } catch {}
-          } else if (entry.name.endsWith('.md') && !trackedSpecs.has(fullPath) && !seen.has(fullPath)) {
-            seen.add(fullPath);
-            const rel = path.relative(workingDir, fullPath);
-            untrackedEntries.push(rel.startsWith('..') ? fullPath : rel);
-          }
-        }
-      } catch {}
-    }
-  }
+  const untrackedEntries: string[] = (!filterActive || options.untracked)
+    ? await findUntrackedSpecs(workingDir)
+    : [];
 
   // Display
   if (entries.length === 0 && untrackedEntries.length === 0) {

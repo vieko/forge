@@ -10,6 +10,9 @@ import {
   loadManifest,
   saveManifest,
   withManifestLock,
+  resolveSpecs,
+  addSpecs,
+  findUntrackedSpecs,
 } from './specs.js';
 import { parseSource } from './deps.js';
 import type { SpecManifest, SpecEntry, SpecRun } from './types.js';
@@ -838,5 +841,223 @@ describe('integration: full lifecycle state machine', () => {
 
     const loaded = await loadManifest(dir);
     expect(loaded.specs[0].spec).toBe(path.join('specs', 'auth.md'));
+  });
+});
+
+// ── resolveSpecs ─────────────────────────────────────────────
+
+describe('resolveSpecs', () => {
+  test('resolves a pending spec to passed by exact key', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/game-tests.md', 'file');
+    });
+
+    const count = await resolveSpecs(['specs/game-tests.md'], dir);
+    expect(count).toBe(1);
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('passed');
+    expect(loaded.specs[0].runs).toHaveLength(1);
+    expect(loaded.specs[0].runs[0].runId).toBe('manual');
+    expect(loaded.specs[0].runs[0].status).toBe('passed');
+  });
+
+  test('resolves by basename', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/deep/nested/feature.md', 'file');
+    });
+
+    const count = await resolveSpecs(['feature.md'], dir);
+    expect(count).toBe(1);
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('passed');
+  });
+
+  test('resolves by trailing path', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/unicorn-game/game-tests.md', 'file');
+    });
+
+    const count = await resolveSpecs(['unicorn-game/game-tests.md'], dir);
+    expect(count).toBe(1);
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('passed');
+  });
+
+  test('skips already-passed specs', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'done.md', 'file');
+      entry.runs.push(makeRun({ status: 'passed' }));
+      updateEntryStatus(entry);
+    });
+
+    const count = await resolveSpecs(['done.md'], dir);
+    expect(count).toBe(0);
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].runs).toHaveLength(1); // no extra run added
+  });
+
+  test('resolves a failed spec to passed', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'broken.md', 'file');
+      entry.runs.push(makeRun({ status: 'failed' }));
+      updateEntryStatus(entry);
+    });
+
+    const count = await resolveSpecs(['broken.md'], dir);
+    expect(count).toBe(1);
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('passed');
+    expect(loaded.specs[0].runs).toHaveLength(2);
+  });
+
+  test('returns 0 for non-existent spec', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    const count = await resolveSpecs(['nope.md'], dir);
+    expect(count).toBe(0);
+  });
+
+  test('resolves multiple specs at once', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'a.md', 'file');
+      findOrCreateEntry(manifest, 'b.md', 'file');
+      findOrCreateEntry(manifest, 'c.md', 'file');
+    });
+
+    const count = await resolveSpecs(['a.md', 'c.md'], dir);
+    expect(count).toBe(2);
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('passed');
+    expect(loaded.specs[1].status).toBe('pending');
+    expect(loaded.specs[2].status).toBe('passed');
+  });
+});
+
+// ── findUntrackedSpecs + bare --add ──────────────────────────
+
+describe('findUntrackedSpecs', () => {
+  test('detects .md files in spec dirs not in manifest', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'specs'), { recursive: true });
+
+    // Create spec files
+    await fs.writeFile(path.join(dir, 'specs', 'tracked.md'), '# tracked');
+    await fs.writeFile(path.join(dir, 'specs', 'untracked.md'), '# untracked');
+
+    // Register only one
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/tracked.md', 'file');
+    });
+
+    const untracked = await findUntrackedSpecs(dir);
+    expect(untracked).toEqual(['specs/untracked.md']);
+  });
+
+  test('returns empty when all specs are tracked', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'specs'), { recursive: true });
+
+    await fs.writeFile(path.join(dir, 'specs', 'a.md'), '# a');
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/a.md', 'file');
+    });
+
+    const untracked = await findUntrackedSpecs(dir);
+    expect(untracked).toHaveLength(0);
+  });
+
+  test('scans subdirectories recursively', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'specs', 'sub'), { recursive: true });
+
+    await fs.writeFile(path.join(dir, 'specs', 'top.md'), '# top');
+    await fs.writeFile(path.join(dir, 'specs', 'sub', 'deep.md'), '# deep');
+
+    // Register only top.md so specs/ dir is known
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/top.md', 'file');
+    });
+
+    const untracked = await findUntrackedSpecs(dir);
+    expect(untracked).toEqual([path.join('specs', 'sub', 'deep.md')]);
+  });
+});
+
+describe('bare --add (addSpecs with untracked)', () => {
+  test('registers all untracked specs when given their paths', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'specs'), { recursive: true });
+
+    await fs.writeFile(path.join(dir, 'specs', 'existing.md'), '# existing');
+    await fs.writeFile(path.join(dir, 'specs', 'new-a.md'), '# new a');
+    await fs.writeFile(path.join(dir, 'specs', 'new-b.md'), '# new b');
+
+    // Track only one
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/existing.md', 'file');
+    });
+
+    // Simulate bare --add: find untracked, then addSpecs
+    const untracked = await findUntrackedSpecs(dir);
+    expect(untracked).toHaveLength(2);
+
+    const count = await addSpecs(untracked, dir);
+    expect(count).toBe(2);
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs).toHaveLength(3);
+    expect(loaded.specs.map(e => e.spec).sort()).toEqual([
+      'specs/existing.md',
+      'specs/new-a.md',
+      'specs/new-b.md',
+    ]);
+  });
+
+  test('returns 0 when nothing is untracked', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'specs'), { recursive: true });
+
+    await fs.writeFile(path.join(dir, 'specs', 'only.md'), '# only');
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/only.md', 'file');
+    });
+
+    const untracked = await findUntrackedSpecs(dir);
+    expect(untracked).toHaveLength(0);
+
+    const count = await addSpecs(untracked, dir);
+    expect(count).toBe(0);
   });
 });
