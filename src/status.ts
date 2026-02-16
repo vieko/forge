@@ -59,11 +59,15 @@ export async function showStatus(options: { cwd?: string; all?: boolean; last?: 
     const totalCost = specs.reduce((sum, s) => sum + (s.costUsd || 0), 0);
     const totalDuration = specs.reduce((sum, s) => sum + s.durationSeconds, 0);
 
+    // Dynamic name width based on spec names in this group
+    const names = specs.map(s => s.specPath ? path.basename(s.specPath) : '(no spec)');
+    const nameWidth = Math.max(20, ...names.map(n => n.length));
+
     console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
     if (isBatch) {
-      console.log(`Batch: ${DIM}${key.substring(0, 8)}${RESET}  |  ${specs[0].startedAt}`);
+      console.log(`${BOLD}Batch${RESET} ${DIM}${key.substring(0, 8)}${RESET}  ${specs[0].startedAt}`);
     } else {
-      console.log(`Run: ${specs[0].startedAt}`);
+      console.log(`${BOLD}Run${RESET}  ${specs[0].startedAt}`);
     }
     console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
 
@@ -71,10 +75,13 @@ export async function showStatus(options: { cwd?: string; all?: boolean; last?: 
       const name = s.specPath ? path.basename(s.specPath) : '(no spec)';
       const statusIcon = s.status === 'success' ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
       const cost = s.costUsd !== undefined ? `$${s.costUsd.toFixed(2)}` : '   -';
-      console.log(`  ${statusIcon} ${name.padEnd(35)} ${s.durationSeconds.toFixed(0).padStart(4)}s  ${cost}`);
+      console.log(`  ${statusIcon} ${name.padEnd(nameWidth)} ${s.durationSeconds.toFixed(1).padStart(6)}s  ${cost}`);
     }
 
-    console.log(`\n  ${successCount}/${specs.length} successful  |  ${totalDuration.toFixed(0)}s  |  $${totalCost.toFixed(2)}`);
+    console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
+    console.log(`  Duration: ${BOLD}${totalDuration.toFixed(1)}s${RESET}`);
+    console.log(`  Cost:     ${BOLD}$${totalCost.toFixed(2)}${RESET}`);
+    console.log(`  Result:   ${successCount === specs.length ? '\x1b[32m' : '\x1b[33m'}${successCount}/${specs.length} successful\x1b[0m`);
   }
 
   console.log('');

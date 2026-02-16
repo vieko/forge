@@ -25,6 +25,7 @@ function lockPath(workingDir: string): string {
 
 async function acquireLock(workingDir: string, maxRetries = 10): Promise<void> {
   const lp = lockPath(workingDir);
+  await fs.mkdir(path.dirname(lp), { recursive: true });
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {

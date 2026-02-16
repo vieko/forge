@@ -511,46 +511,48 @@ export async function runForge(options: ForgeOptions): Promise<void> {
   if (specDir) {
     const resolvedDir = path.resolve(specDir);
 
+    let files: string[];
     try {
-      const files = await fs.readdir(resolvedDir);
-      const specFiles = files
-        .filter(f => f.endsWith('.md'))
-        .sort(); // Alphabetical order for predictable execution
-
-      if (specFiles.length === 0) {
-        throw new Error(`No .md files found in ${resolvedDir}`);
-      }
-
-      if (!quiet) {
-        const mode = parallel
-          ? `parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})`
-          : 'sequential';
-        console.log(`Found ${BOLD}${specFiles.length}${RESET} specs in ${DIM}${resolvedDir}${RESET}`);
-        console.log(`${DIM}[${mode}]${RESET}\n`);
-        if (!parallel) {
-          specFiles.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
-          console.log('');
-        }
-        if (parallel && sequentialFirst > 0) {
-          console.log(`Sequential-first: ${Math.min(sequentialFirst, specFiles.length)} spec(s) run before parallel phase\n`);
-        }
-      }
-
-      const specFilePaths = specFiles.map(f => path.join(resolvedDir, f));
-
-      const wallClockStart = Date.now();
-      const results = await runSpecBatch(specFilePaths, specFiles, options, concurrency, runId);
-      const wallClockDuration = (Date.now() - wallClockStart) / 1000;
-
-      printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false);
-
-      return;
+      files = await fs.readdir(resolvedDir);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new Error(`Spec directory not found: ${resolvedDir}`);
       }
       throw err;
     }
+
+    const specFiles = files
+      .filter(f => f.endsWith('.md'))
+      .sort(); // Alphabetical order for predictable execution
+
+    if (specFiles.length === 0) {
+      throw new Error(`No .md files found in ${resolvedDir}`);
+    }
+
+    if (!quiet) {
+      const mode = parallel
+        ? `parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})`
+        : 'sequential';
+      console.log(`Found ${BOLD}${specFiles.length}${RESET} specs in ${DIM}${resolvedDir}${RESET}`);
+      console.log(`${DIM}[${mode}]${RESET}\n`);
+      if (!parallel) {
+        specFiles.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
+        console.log('');
+      }
+      if (parallel && sequentialFirst > 0) {
+        console.log(`Sequential-first: ${Math.min(sequentialFirst, specFiles.length)} spec(s) run before parallel phase\n`);
+      }
+    }
+
+    const specFilePaths = specFiles.map(f => path.join(resolvedDir, f));
+
+    const wallClockStart = Date.now();
+    const results = await runSpecBatch(specFilePaths, specFiles, options, concurrency, runId);
+    const wallClockDuration = (Date.now() - wallClockStart) / 1000;
+
+    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false);
+
+    return;
   }
 
   // Auto-detect: if prompt looks like a file path to an existing .md file, treat as --spec
