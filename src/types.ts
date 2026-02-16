@@ -69,7 +69,7 @@ export interface ForgeResult {
   /** Batch run ID for grouping specs in the same run */
   runId?: string;
   /** Type of run */
-  type?: 'run' | 'audit' | 'review';
+  type?: 'run' | 'audit' | 'review' | 'define';
 }
 
 /**
@@ -82,6 +82,32 @@ export interface AuditOptions {
   outputDir?: string;
   /** Additional context prompt */
   prompt?: string;
+  /** Working directory (target repo) */
+  cwd?: string;
+  /** Model to use (shorthand like 'opus'/'sonnet' or full ID) */
+  model?: string;
+  /** Maximum turns (default: 100) */
+  maxTurns?: number;
+  /** Maximum budget in USD (default: $10) */
+  maxBudgetUsd?: number;
+  /** Show detailed output */
+  verbose?: boolean;
+  /** Suppress progress output */
+  quiet?: boolean;
+  /** Resume a previous session */
+  resume?: string;
+  /** Fork from a previous session (new session, same history) */
+  fork?: string;
+}
+
+/**
+ * Options for running define (spec generation from description).
+ */
+export interface DefineOptions {
+  /** High-level description of what to build */
+  prompt: string;
+  /** Output directory for generated spec files (default: specs/) */
+  outputDir?: string;
   /** Working directory (target repo) */
   cwd?: string;
   /** Model to use (shorthand like 'opus'/'sonnet' or full ID) */
@@ -117,7 +143,7 @@ export interface SpecEntry {
   spec: string;              // relative path (e.g. "auth/login.md") or identifier for piped specs
   status: 'pending' | 'running' | 'passed' | 'failed';
   runs: SpecRun[];
-  source: 'file' | 'pipe' | `github:${string}` | `audit:${string}`;
+  source: 'file' | 'pipe' | `github:${string}` | `audit:${string}` | `define:${string}`;
   createdAt: string;         // ISO 8601
   updatedAt: string;         // ISO 8601
 }

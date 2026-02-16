@@ -10,6 +10,7 @@ import { runAudit } from './audit.js';
 import { runReview } from './review.js';
 import { runWatch } from './watch.js';
 import { showSpecs } from './specs.js';
+import { runDefine } from './define.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -188,6 +189,60 @@ program
   });
 
 program
+  .command('define')
+  .description('Analyze codebase and generate outcome spec files from a description')
+  .argument('<prompt>', 'High-level description of what to build')
+  .option('-o, --output-dir <path>', 'Output directory for generated specs (default: specs/)')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'sonnet')
+  .option('-t, --max-turns <n>', 'Maximum turns (default: 100)', '100')
+  .option('-b, --max-budget <usd>', 'Maximum budget in USD')
+  .option('-v, --verbose', 'Show detailed output')
+  .option('-q, --quiet', 'Suppress progress output')
+  .option('-r, --resume <session>', 'Resume a previous session')
+  .option('-f, --fork <session>', 'Fork from a previous session')
+  .action(async (prompt: string, options: {
+    outputDir?: string;
+    cwd?: string;
+    model?: string;
+    maxTurns?: string;
+    maxBudget?: string;
+    verbose?: boolean;
+    quiet?: boolean;
+    resume?: string;
+    fork?: string;
+  }) => {
+    if (options.resume && options.fork) {
+      console.error('Error: --resume and --fork are mutually exclusive. Use one or the other.');
+      process.exit(1);
+    }
+    if (options.maxBudget !== undefined) {
+      const budget = parseFloat(options.maxBudget);
+      if (isNaN(budget) || budget <= 0) {
+        console.error('Error: --max-budget must be a positive number.');
+        process.exit(1);
+      }
+    }
+    try {
+      await runDefine({
+        prompt,
+        outputDir: options.outputDir,
+        cwd: options.cwd,
+        model: options.model,
+        maxTurns: options.maxTurns ? parseInt(options.maxTurns, 10) : 100,
+        maxBudgetUsd: options.maxBudget ? parseFloat(options.maxBudget) : undefined,
+        verbose: options.verbose,
+        quiet: options.quiet,
+        resume: options.resume,
+        fork: options.fork,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+program
   .command('review')
   .description('Review recent changes for quality issues')
   .argument('[diff]', 'Git diff range (default: main...HEAD)')
@@ -293,7 +348,7 @@ program
   });
 
 // Quick alias: `forge "do something"` = `forge run "do something"`
-const COMMANDS = new Set(['run', 'status', 'audit', 'review', 'watch', 'specs', 'help']);
+const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'watch', 'specs', 'help']);
 const args = process.argv.slice(2);
 if (args.length > 0 && !args[0].startsWith('-') && !COMMANDS.has(args[0])) {
   process.argv.splice(2, 0, 'run');

@@ -57,6 +57,11 @@ forge run --fork <session-id> "try different approach"
 # Quick alias (no 'run' needed)
 forge "simple task"
 
+# Define specs from a description
+forge define "build auth system"                # Generate specs in specs/
+forge define "add rate limiting" -o specs/api/  # Custom output dir
+forge define "refactor database" -C ~/project   # Different repo
+
 # Audit codebase against specs
 forge audit specs/                              # Audit, output to specs/audit/
 forge audit specs/ -C ~/target-repo             # Audit a different repo

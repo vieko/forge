@@ -2,10 +2,10 @@
 name: forge
 description: >-
   Verification boundary CLI that delegates tasks to autonomous agents. Use when the user wants to run forge, execute specs,
-  run specs in parallel, audit code against specs, review changes, watch live
+  run specs in parallel, define specs from a description, audit code against specs, review changes, watch live
   logs, check run status, resume a session, or delegate complex multi-step work
   to an autonomous agent. Triggers include "forge run", "run this spec",
-  "run specs in parallel", "audit the codebase", "review changes",
+  "run specs in parallel", "forge define", "define specs", "audit the codebase", "review changes",
   "forge watch", "forge status", "rerun failed", "delegate this to forge".
 allowed-tools: Bash(forge:*)
 metadata:
@@ -63,6 +63,16 @@ Reviews codebase against specs. Produces new spec files for remaining work — f
 forge audit specs/                              # Audit, output to specs/audit/
 forge audit specs/ -o ./remediation/            # Custom output dir
 forge audit specs/ -C ~/target-repo             # Different repo
+```
+
+### forge define
+
+Analyzes codebase and generates outcome spec files from a high-level description. Closes the loop: `forge define` → `forge specs` → `forge run --spec-dir`.
+
+```bash
+forge define "build auth system"                # Generate specs in specs/
+forge define "add rate limiting" -o specs/api/  # Custom output dir
+forge define "refactor database" -C ~/project   # Different repo
 ```
 
 ### forge review
