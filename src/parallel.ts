@@ -500,6 +500,22 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     }
   }
 
+  // Auto-detect: if prompt looks like a path to an existing .md file, treat as --spec
+  const effectiveOptions = { ...options };
+  if (!effectiveOptions.specPath && !effectiveOptions.specDir && effectiveOptions.prompt.endsWith('.md')) {
+    const candidatePath = path.resolve(effectiveOptions.cwd || '.', effectiveOptions.prompt);
+    try {
+      await fs.access(candidatePath);
+      effectiveOptions.specPath = effectiveOptions.prompt;
+      effectiveOptions.prompt = 'implement this specification';
+      if (!quiet) {
+        console.log(`${DIM}[forge]${RESET} Detected spec file: ${DIM}${effectiveOptions.specPath}${RESET}\n`);
+      }
+    } catch {
+      // Not a file — treat as regular prompt
+    }
+  }
+
   // Single spec or no spec - run directly
-  await runSingleSpec({ ...options, _runId: runId });
+  await runSingleSpec({ ...effectiveOptions, _runId: runId });
 }
