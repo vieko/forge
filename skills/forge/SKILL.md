@@ -2,14 +2,14 @@
 name: forge
 description: >-
   Verification boundary CLI that delegates tasks to autonomous agents. Use when the user wants to run forge, execute specs,
-  run specs in parallel, define specs from a description, audit code against specs, review changes, watch live
-  logs, check run status, resume a session, or delegate complex multi-step work
+  run specs in parallel, run pending specs, define specs from a description, resolve specs, audit code against specs,
+  review changes, watch live logs, check run status, resume a session, or delegate complex multi-step work
   to an autonomous agent. Triggers include "forge run", "run this spec",
-  "run specs in parallel", "forge define", "define specs", "audit the codebase", "review changes",
-  "forge watch", "forge status", "rerun failed", "delegate this to forge".
+  "run specs in parallel", "run pending", "forge define", "define specs", "audit the codebase", "review changes",
+  "forge watch", "forge status", "rerun failed", "resolve spec", "delegate this to forge".
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.2.3
+  version: 3.2.4
   author: vieko
 ---
 
@@ -40,6 +40,7 @@ forge run --spec specs/auth.md "implement this"          # With spec file
 forge run --spec-dir ./specs/ -P "implement all"         # Parallel specs
 forge run -C ~/other-repo "fix the login bug"            # Target different repo
 forge run --rerun-failed -P "fix failures"               # Rerun failed specs
+forge run --pending -P "implement pending"               # Run only pending specs
 forge run --resume <session-id> "continue"               # Resume interrupted session
 forge "quick task"                                       # Shorthand (no 'run')
 ```
@@ -112,7 +113,11 @@ forge specs --pending                           # Show only pending
 forge specs --failed                            # Show only failed
 forge specs --orphaned                          # Manifest entries with missing files
 forge specs --untracked                         # .md files not in manifest
+forge specs --add                               # Register all untracked specs
+forge specs --add specs/new.md                  # Register specific spec by path/glob
+forge specs --resolve game.md                   # Mark spec as passed without running
 forge specs --reconcile                         # Backfill from .forge/results/ history
+forge specs --prune                             # Remove orphaned entries from manifest
 ```
 
 ## Recipes

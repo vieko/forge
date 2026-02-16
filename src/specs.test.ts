@@ -13,6 +13,7 @@ import {
   resolveSpecs,
   addSpecs,
   findUntrackedSpecs,
+  buildHints,
 } from './specs.js';
 import { parseSource } from './deps.js';
 import type { SpecManifest, SpecEntry, SpecRun } from './types.js';
@@ -1059,5 +1060,57 @@ describe('bare --add (addSpecs with untracked)', () => {
 
     const count = await addSpecs(untracked, dir);
     expect(count).toBe(0);
+  });
+});
+
+// ── buildHints ───────────────────────────────────────────────
+
+describe('buildHints', () => {
+  test('returns empty array when all counts are zero', () => {
+    const hints = buildHints({ pending: 0, failed: 0, untracked: 0, orphaned: 0 });
+    expect(hints).toEqual([]);
+  });
+
+  test('pending > 0 includes run --pending and --check hints', () => {
+    const hints = buildHints({ pending: 3, failed: 0, untracked: 0, orphaned: 0 });
+    expect(hints).toHaveLength(2);
+    expect(hints[0]).toContain('forge run --pending');
+    expect(hints[1]).toContain('forge specs --check');
+  });
+
+  test('failed > 0 includes rerun-failed hint', () => {
+    const hints = buildHints({ pending: 0, failed: 2, untracked: 0, orphaned: 0 });
+    expect(hints).toHaveLength(1);
+    expect(hints[0]).toContain('forge run --rerun-failed');
+  });
+
+  test('untracked > 0 includes --add hint', () => {
+    const hints = buildHints({ pending: 0, failed: 0, untracked: 5, orphaned: 0 });
+    expect(hints).toHaveLength(1);
+    expect(hints[0]).toContain('forge specs --add');
+  });
+
+  test('orphaned > 0 includes --prune hint', () => {
+    const hints = buildHints({ pending: 0, failed: 0, untracked: 0, orphaned: 1 });
+    expect(hints).toHaveLength(1);
+    expect(hints[0]).toContain('forge specs --prune');
+  });
+
+  test('caps at 3 hints maximum', () => {
+    const hints = buildHints({ pending: 1, failed: 1, untracked: 1, orphaned: 1 });
+    expect(hints).toHaveLength(3);
+    // pending generates 2 hints + failed generates 1 = 3 (capped)
+    expect(hints[0]).toContain('forge run --pending');
+    expect(hints[1]).toContain('forge specs --check');
+    expect(hints[2]).toContain('forge run --rerun-failed');
+  });
+
+  test('priority order: pending before failed before untracked before orphaned', () => {
+    // With pending=0 so we get failed, untracked, orphaned
+    const hints = buildHints({ pending: 0, failed: 1, untracked: 1, orphaned: 1 });
+    expect(hints).toHaveLength(3);
+    expect(hints[0]).toContain('rerun-failed');
+    expect(hints[1]).toContain('--add');
+    expect(hints[2]).toContain('--prune');
   });
 });

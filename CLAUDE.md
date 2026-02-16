@@ -30,6 +30,9 @@ forge run --spec-dir ./specs/ -P --sequential-first 1 "implement these"
 # Rerun only failed specs from the latest batch
 forge run --rerun-failed -P -C ~/target-repo "fix failures"
 
+# Run only pending specs from the manifest
+forge run --pending -P "implement pending specs"
+
 # Configurable max turns (default: 250)
 forge run --max-turns 150 "large task"
 
@@ -81,7 +84,11 @@ forge specs --failed            # Show only failed specs
 forge specs --passed            # Show only passed specs
 forge specs --orphaned          # Specs in manifest but file missing
 forge specs --untracked         # .md files in spec dirs not in manifest
+forge specs --add               # Register all untracked specs
+forge specs --add specs/new.md  # Register specific spec by path/glob
+forge specs --resolve game.md   # Mark a pending/failed spec as passed
 forge specs --reconcile         # Backfill manifest from .forge/results/ history
+forge specs --prune             # Remove orphaned entries from manifest
 forge specs -C ~/other-repo     # Different working directory
 ```
 
@@ -111,21 +118,24 @@ System-level verification                │ braille spinner display,
 
 ```
 src/
-├── index.ts       # CLI entry + arg parsing
-├── display.ts     # ANSI constants, banner, spinners, formatProgress, formatElapsed
-├── utils.ts       # ForgeError, execAsync, config, isTransientError, sleep, saveResult
+├── index.ts       # CLI entry + arg parsing + validators
+├── display.ts     # ANSI constants, banner, spinners, printRunSummary, formatElapsed
+├── utils.ts       # ForgeError, execAsync, config, resolveSession, isTransientError, sleep, saveResult
 ├── verify.ts      # detectVerification, runVerification
 ├── core.ts        # QueryConfig, QueryResult, runQuery (SDK wrapper with hooks/streaming)
 ├── run.ts         # runSingleSpec, BatchResult
-├── specs.ts       # Spec manifest (lifecycle tracking, showSpecs command)
-├── parallel.ts    # workerPool, autoDetectConcurrency, spec display, runForge
+├── specs.ts       # Spec manifest (lifecycle, reconcile, prune, addSpecs, resolveSpecs, showSpecs)
+├── deps.ts        # Dependency parsing, topological sort, cycle detection, parseSource
+├── parallel.ts    # workerPool, autoDetectConcurrency, dep-aware execution, runForge
 ├── watch.ts       # WatchOptions, colorWatchLine, runWatch
-├── audit.ts       # runAudit
-├── define.ts      # runDefine
+├── audit.ts       # runAudit + manifest integration
+├── define.ts      # runDefine (spec generation from descriptions)
 ├── review.ts      # runReview
 ├── status.ts      # showStatus
-├── types.ts       # TypeScript types
+├── types.ts       # TypeScript types (ForgeResult, SpecManifest, SpecEntry, SpecRun, DefineOptions)
 ├── query.test.ts  # Tests for core utilities
+├── deps.test.ts   # Tests for dependency + parseSource
+├── specs.test.ts  # Tests for manifest CRUD, locking, integration lifecycle
 └── types.test.ts  # Type validation tests
 
 .forge/
@@ -148,10 +158,12 @@ src/
 6. **Result persistence** — saves structured metadata (with runId for batch grouping) and full result text to `.forge/results/`
 7. **Cost tracking** — per-spec and total cost shown in batch summary
 8. **Rerun failed** — `--rerun-failed` finds failed specs from latest batch and reruns them
-9. **Status** — `forge status` shows results from recent runs grouped by batch
-10. **Retry on transient errors** — auto-retries rate limits and network errors (3 attempts, exponential backoff)
-11. **Audit** — `forge audit` reviews the codebase against specs via a single read-heavy `query()` call and produces new spec files for any remaining work; output feeds directly into `forge run --spec-dir`
-12. **Spec lifecycle** — `.forge/specs.json` manifest tracks every spec from registration through execution; `forge specs` shows status, run history, cost, and detects orphaned/untracked specs
+9. **Run pending** — `--pending` runs only pending/stuck specs from the manifest
+10. **Status** — `forge status` shows results from recent runs grouped by batch
+11. **Retry on transient errors** — auto-retries rate limits and network errors (3 attempts, exponential backoff)
+12. **Audit** — `forge audit` reviews the codebase against specs via a single read-heavy `query()` call and produces new spec files for any remaining work; output feeds directly into `forge run --spec-dir`
+13. **Spec lifecycle** — `.forge/specs.json` manifest tracks every spec from registration through execution; `forge specs` shows status, run history, cost, and detects orphaned/untracked specs
+14. **Resolve specs** — `forge specs --resolve` marks specs as passed without running (for manually completed work)
 
 ## Spec Naming
 

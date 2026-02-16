@@ -2,7 +2,9 @@ import type { SpecManifest, SpecEntry, SpecRun } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { DIM, RESET, BOLD } from './display.js';
+import { DIM, RESET, BOLD, CMD, printRunSummary } from './display.js';
+import { runQuery } from './core.js';
+import { resolveConfig } from './utils.js';
 import { parseSource } from './deps.js';
 
 // ── Manifest path ────────────────────────────────────────────
@@ -505,6 +507,34 @@ export async function findUntrackedSpecs(workingDir: string): Promise<string[]> 
   return untracked;
 }
 
+// ── Contextual hints ─────────────────────────────────────────
+
+export interface HintCounts {
+  pending: number;
+  failed: number;
+  untracked: number;
+  orphaned: number;
+}
+
+/** Build actionable next-step hints based on spec state. Pure function for testability. */
+export function buildHints(counts: HintCounts): string[] {
+  const hints: string[] = [];
+  if (counts.pending > 0) {
+    hints.push(`${CMD}forge run --pending -P "implement"${RESET}  run pending specs`);
+    hints.push(`${CMD}forge specs --check${RESET}               auto-resolve implemented specs`);
+  }
+  if (counts.failed > 0) {
+    hints.push(`${CMD}forge run --rerun-failed -P "fix"${RESET}  rerun failed specs`);
+  }
+  if (counts.untracked > 0) {
+    hints.push(`${CMD}forge specs --add${RESET}                  register untracked specs`);
+  }
+  if (counts.orphaned > 0) {
+    hints.push(`${CMD}forge specs --prune${RESET}                remove orphaned entries`);
+  }
+  return hints.slice(0, 3);
+}
+
 // ── showSpecs command ────────────────────────────────────────
 
 export interface ShowSpecsOptions {
@@ -518,6 +548,7 @@ export interface ShowSpecsOptions {
   prune?: boolean;
   add?: string | boolean;
   resolve?: string;
+  check?: boolean;
 }
 
 export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
@@ -568,6 +599,12 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
     } else {
       console.log(`${DIM}No matching pending spec found.${RESET}\n`);
     }
+    return;
+  }
+
+  // Check pending specs (triage via agent)
+  if (options.check) {
+    await checkPendingSpecs(workingDir, false);
     return;
   }
 
@@ -756,4 +793,138 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
     const meta = [costLabel, durLabel].filter(Boolean).join(', ');
     console.log(`${DIM}${countLabel}${parts.length > 0 ? ': ' : ''}${RESET}${parts.join(', ')}${meta ? `  ${DIM}(${meta})${RESET}` : ''}`);
   }
+
+  // Contextual hints (only when no status filter is active)
+  if (!filterActive) {
+    const orphanedCount = entries.filter(e => e.orphaned).length;
+    const hints = buildHints({
+      pending,
+      failed,
+      untracked: untrackedEntries.length,
+      orphaned: orphanedCount,
+    });
+    if (hints.length > 0) {
+      console.log('');
+      for (const hint of hints) {
+        console.log(`  ${DIM}→${RESET} ${hint}`);
+      }
+    }
+  }
+}
+
+// ── Check pending specs ──────────────────────────────────────
+
+/** Triage pending specs: agent checks codebase and auto-resolves implemented ones. */
+export async function checkPendingSpecs(workingDir: string, quiet: boolean): Promise<void> {
+  const manifest = await loadManifest(workingDir);
+  const pendingEntries = manifest.specs.filter(
+    e => e.status === 'pending' || e.status === 'running',
+  );
+
+  if (pendingEntries.length === 0) {
+    console.log(`${DIM}No pending specs to check.${RESET}`);
+    return;
+  }
+
+  // Read spec contents
+  const specContents: Array<{ key: string; content: string }> = [];
+  for (const entry of pendingEntries) {
+    const absPath = path.isAbsolute(entry.spec)
+      ? entry.spec
+      : path.join(workingDir, entry.spec);
+    try {
+      const content = await fs.readFile(absPath, 'utf-8');
+      specContents.push({ key: entry.spec, content });
+    } catch {
+      // File missing — skip
+    }
+  }
+
+  if (specContents.length === 0) {
+    console.log(`${DIM}No readable pending spec files found.${RESET}`);
+    return;
+  }
+
+  if (!quiet) {
+    console.log(`${BOLD}Checking ${specContents.length} pending spec(s) against codebase...${RESET}\n`);
+  }
+
+  // Build prompt with spec contents
+  const specBlock = specContents
+    .map(s => `### ${s.key}\n\`\`\`markdown\n${s.content}\n\`\`\``)
+    .join('\n\n');
+
+  const prompt = `You are checking whether pending specs have already been implemented in the codebase.
+
+For each spec below, read the acceptance criteria carefully, then check the codebase to determine if the criteria are already met.
+
+${specBlock}
+
+After checking all specs, output ONLY a JSON block (no other text) in this exact format:
+
+\`\`\`json
+{"results": [{"spec": "<spec key>", "status": "implemented" | "not_implemented", "reason": "<brief explanation>"}]}
+\`\`\`
+
+Be thorough: check for the actual implementation, not just file existence. A spec is "implemented" only if ALL its acceptance criteria are met.`;
+
+  const resolved = await resolveConfig(workingDir, {
+    defaultModel: 'sonnet',
+    defaultMaxTurns: 50,
+    defaultMaxBudgetUsd: 5.0,
+  });
+
+  const result = await runQuery({
+    prompt,
+    workingDir,
+    model: resolved.model,
+    maxTurns: resolved.maxTurns,
+    maxBudgetUsd: resolved.maxBudgetUsd,
+    verbose: false,
+    quiet,
+    silent: false,
+  });
+
+  // Parse JSON results from agent response
+  const jsonMatch = result.resultText.match(/```json\s*([\s\S]*?)\s*```/)
+    || result.resultText.match(/(\{[\s\S]*"results"[\s\S]*\})/);
+
+  if (!jsonMatch) {
+    console.log(`${DIM}Could not parse agent response. Raw output:${RESET}`);
+    console.log(result.resultText);
+    printRunSummary({ durationSeconds: result.durationSeconds, costUsd: result.costUsd });
+    return;
+  }
+
+  let parsed: { results: Array<{ spec: string; status: string; reason: string }> };
+  try {
+    parsed = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+  } catch {
+    console.log(`${DIM}Could not parse JSON from agent response.${RESET}`);
+    printRunSummary({ durationSeconds: result.durationSeconds, costUsd: result.costUsd });
+    return;
+  }
+
+  // Display results and auto-resolve implemented specs
+  const toResolve: string[] = [];
+  for (const r of parsed.results) {
+    const statusColor = r.status === 'implemented' ? '\x1b[32m' : DIM;
+    const label = r.status === 'implemented' ? 'implemented' : 'not implemented';
+    console.log(`  ${statusColor}${label.padEnd(16)}${RESET} ${r.spec}`);
+    if (r.reason) {
+      console.log(`  ${DIM}${' '.repeat(16)} ${r.reason}${RESET}`);
+    }
+    if (r.status === 'implemented') {
+      toResolve.push(r.spec);
+    }
+  }
+
+  if (toResolve.length > 0) {
+    const count = await resolveSpecs(toResolve, workingDir);
+    console.log(`\n${BOLD}Resolved ${count} spec(s) as passed${RESET}`);
+  } else {
+    console.log(`\n${DIM}No specs were fully implemented.${RESET}`);
+  }
+
+  printRunSummary({ durationSeconds: result.durationSeconds, costUsd: result.costUsd });
 }

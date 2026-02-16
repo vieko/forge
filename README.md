@@ -30,15 +30,19 @@ bun run build
 forge run "implement feature X"                          # Run a task
 forge run --spec specs/feature.md "implement this"       # From a spec file
 forge run --spec-dir ./specs/ -P "implement these"       # Parallel specs
+forge run --pending -P "implement pending"               # Run only pending specs
 forge run --resume <session-id> "continue"               # Resume session
 ```
 
 ```bash
+forge define "build auth system"                         # Generate specs from description
 forge audit specs/                                       # Audit codebase against specs
 forge review                                             # Review git changes
 forge watch                                              # Live-tail session logs
 forge status                                             # View recent results
 forge specs                                              # List tracked specs with status
+forge specs --add                                        # Register all untracked specs
+forge specs --resolve game.md                            # Mark spec as passed
 ```
 
 See `forge --help` or `forge <command> --help` for all options.
@@ -50,7 +54,7 @@ See `forge --help` or `forge <command> --help` for all options.
 3. **Verify** — auto-detects project type, runs build/test, feeds errors back (up to 3 attempts)
 4. **Save** — results, session logs, and cost to `.forge/results/`
 
-Specs can declare dependencies via frontmatter (`depends: [a.md, b.md]`) for ordered execution. Parallel runs use auto-tuned concurrency. A manifest (`.forge/specs.json`) tracks every spec from registration through execution. Failed specs can be rerun. Sessions can be resumed or forked. Destructive commands are blocked. Transient errors retry automatically.
+Specs can declare dependencies via frontmatter (`depends: [a.md, b.md]`) for ordered execution. Parallel runs use auto-tuned concurrency. A manifest (`.forge/specs.json`) tracks every spec from registration through execution. Failed specs can be rerun. Pending specs can be run selectively. Manually completed specs can be resolved. Sessions can be resumed or forked. Destructive commands are blocked. Transient errors retry automatically.
 
 ## Configuration
 
