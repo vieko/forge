@@ -448,6 +448,29 @@ export async function resolveSpecs(patterns: string[], workingDir: string): Prom
   return resolved;
 }
 
+// ── Unresolve spec (reset to pending) ────────────────────────
+
+export async function unresolveSpecs(patterns: string[], workingDir: string): Promise<number> {
+  let unresolved = 0;
+  await withManifestLock(workingDir, (manifest) => {
+    for (const pattern of patterns) {
+      const entry = manifest.specs.find(e =>
+        e.spec === pattern
+        || path.basename(e.spec) === pattern
+        || e.spec.endsWith('/' + pattern)
+      );
+      if (!entry) continue;
+      if (entry.status === 'pending') continue;
+
+      entry.status = 'pending';
+      entry.runs = [];
+      entry.updatedAt = new Date().toISOString();
+      unresolved++;
+    }
+  });
+  return unresolved;
+}
+
 // ── Untracked detection ──────────────────────────────────────
 
 // Scan known spec directories for .md files not in the manifest
@@ -549,6 +572,7 @@ export interface ShowSpecsOptions {
   prune?: boolean;
   add?: string | boolean;
   resolve?: string;
+  unresolve?: string;
   check?: boolean;
 }
 
@@ -599,6 +623,17 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
       console.log(`${BOLD}Resolved ${count} spec(s) as passed${RESET}\n`);
     } else {
       console.log(`${DIM}No matching pending spec found.${RESET}\n`);
+    }
+    return;
+  }
+
+  // Unresolve spec (reset to pending)
+  if (options.unresolve) {
+    const count = await unresolveSpecs([options.unresolve], workingDir);
+    if (count > 0) {
+      console.log(`${BOLD}Unresolved ${count} spec(s) → pending${RESET}\n`);
+    } else {
+      console.log(`${DIM}No matching non-pending spec found.${RESET}\n`);
     }
     return;
   }

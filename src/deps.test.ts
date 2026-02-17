@@ -94,6 +94,65 @@ priority: high
   });
 });
 
+// ── parseDependencies (markdown fallback) ────────────────────
+
+describe('parseDependencies (markdown fallback)', () => {
+  test('parses **Depends on**: with single link', () => {
+    const content = `# My Spec
+
+**Depends on**: [Schema](./01-schema.md)
+**Status**: Ready`;
+    expect(parseDependencies(content)).toEqual(['01-schema.md']);
+  });
+
+  test('parses **Depends on**: with multiple links', () => {
+    const content = `# My Spec
+
+**Depends on**: [Schema](./01-schema.md), [Models](./02-models.md)
+**Status**: Ready`;
+    expect(parseDependencies(content)).toEqual(['01-schema.md', '02-models.md']);
+  });
+
+  test('extracts basename from nested paths', () => {
+    const content = `# Spec
+
+**Depends on**: [Base](../shared/01-base.md)`;
+    expect(parseDependencies(content)).toEqual(['01-base.md']);
+  });
+
+  test('YAML frontmatter takes precedence over markdown', () => {
+    const content = `---
+depends: [from-frontmatter.md]
+---
+
+# Spec
+
+**Depends on**: [Other](./from-markdown.md)`;
+    expect(parseDependencies(content)).toEqual(['from-frontmatter.md']);
+  });
+
+  test('handles **Dependencies**: variant', () => {
+    const content = `# Spec
+
+**Dependencies**: [Schema](./01-schema.md)`;
+    expect(parseDependencies(content)).toEqual(['01-schema.md']);
+  });
+
+  test('returns empty for no dependency declaration', () => {
+    const content = `# Spec
+
+Just some content with no deps.`;
+    expect(parseDependencies(content)).toEqual([]);
+  });
+
+  test('handles **Depend**: variant', () => {
+    const content = `# Spec
+
+**Depend on**: [Schema](./01-schema.md)`;
+    expect(parseDependencies(content)).toEqual(['01-schema.md']);
+  });
+});
+
 // ── parseSource ──────────────────────────────────────────────
 
 describe('parseSource', () => {

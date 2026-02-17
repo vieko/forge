@@ -117,6 +117,7 @@ forge specs --untracked                         # .md files not in manifest
 forge specs --add                               # Register all untracked specs
 forge specs --add specs/new.md                  # Register specific spec by path/glob
 forge specs --resolve game.md                   # Mark spec as passed without running
+forge specs --unresolve game.md                 # Reset a spec back to pending
 forge specs --check                             # Auto-resolve implemented pending specs
 forge specs --reconcile                         # Backfill from .forge/results/ history
 forge specs --prune                             # Remove orphaned entries from manifest

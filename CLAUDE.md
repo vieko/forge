@@ -88,6 +88,7 @@ forge specs --untracked         # .md files in spec dirs not in manifest
 forge specs --add               # Register all untracked specs
 forge specs --add specs/new.md  # Register specific spec by path/glob
 forge specs --resolve game.md   # Mark a pending/failed spec as passed
+forge specs --unresolve game.md # Reset a spec back to pending
 forge specs --check             # Auto-resolve already-implemented pending specs
 forge specs --reconcile         # Backfill manifest from .forge/results/ history
 forge specs --prune             # Remove orphaned entries from manifest
@@ -195,6 +196,8 @@ bun run typecheck
 # Build for production
 bun run build
 ```
+
+**Skill symlink**: The global skill at `~/.agents/skills/forge` must be a symlink to `skills/forge/` in this repo. Never copy — symlink keeps it in sync automatically.
 
 ## Configuration
 

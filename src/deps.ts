@@ -30,10 +30,22 @@ export interface DepLevel {
  *     - 01-foo.md
  *     - 02-bar.md
  *
- * Returns empty array if no frontmatter or no depends field.
+ * Falls back to markdown-style dependency declarations:
+ *   **Depends on**: [label](./01-foo.md)
+ *   **Depends on**: [label](./01-foo.md), [label](./02-bar.md)
+ *
+ * Returns empty array if no dependencies found.
  */
 export function parseDependencies(content: string): string[] {
-  // Match YAML frontmatter block: starts with --- on first line, ends with ---
+  // Try YAML frontmatter first
+  const fmDeps = parseFrontmatterDependencies(content);
+  if (fmDeps.length > 0) return fmDeps;
+
+  // Fall back to markdown-style **Depends on**: [label](./file.md)
+  return parseMarkdownDependencies(content);
+}
+
+function parseFrontmatterDependencies(content: string): string[] {
   const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!fmMatch) return [];
 
@@ -61,6 +73,27 @@ export function parseDependencies(content: string): string[] {
   }
 
   return [];
+}
+
+function parseMarkdownDependencies(content: string): string[] {
+  // Match: **Depends on**: [label](./file.md) or **Dependencies**: [label](./file.md)
+  const mdMatch = content.match(/^\*\*Depends?\s*(?:on|encies)?\*\*:\s*(.+)$/mi);
+  if (!mdMatch) return [];
+
+  const line = mdMatch[1];
+  const deps: string[] = [];
+
+  // Extract filenames from markdown links: [label](./path/to/file.md)
+  const linkRegex = /\[([^\]]*)\]\(([^)]+\.md)\)/g;
+  let match;
+  while ((match = linkRegex.exec(line)) !== null) {
+    // Extract just the basename from the path
+    const linkPath = match[2];
+    const basename = linkPath.split('/').pop()!;
+    deps.push(basename);
+  }
+
+  return deps;
 }
 
 /**

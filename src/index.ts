@@ -337,6 +337,7 @@ program
   .option('--prune', 'Remove orphaned entries (file missing) from manifest')
   .option('--add [path]', 'Register untracked specs, or specific path/glob')
   .option('--resolve <spec>', 'Mark a pending/failed spec as passed without running')
+  .option('--unresolve <spec>', 'Reset a spec back to pending (clears run history)')
   .option('--check', 'Triage pending specs: auto-resolve already-implemented ones')
   .action(async (options: {
     cwd?: string;
@@ -349,6 +350,7 @@ program
     prune?: boolean;
     add?: string | boolean;
     resolve?: string;
+    unresolve?: string;
     check?: boolean;
   }) => {
     try {
@@ -363,6 +365,7 @@ program
         prune: options.prune,
         add: options.add,
         resolve: options.resolve,
+        unresolve: options.unresolve,
         check: options.check,
       });
     } catch (error) {

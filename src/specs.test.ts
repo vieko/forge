@@ -13,6 +13,7 @@ import {
   resolveSpecs,
   addSpecs,
   findUntrackedSpecs,
+  unresolveSpecs,
   buildHints,
 } from './specs.js';
 import { parseSource } from './deps.js';
@@ -956,6 +957,83 @@ describe('resolveSpecs', () => {
     expect(loaded.specs[0].status).toBe('passed');
     expect(loaded.specs[1].status).toBe('pending');
     expect(loaded.specs[2].status).toBe('passed');
+  });
+});
+
+// ── unresolveSpecs ───────────────────────────────────────────
+
+describe('unresolveSpecs', () => {
+  test('resets a passed spec to pending', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'specs/feature.md', 'file');
+      entry.runs.push(makeRun({ status: 'passed' }));
+      updateEntryStatus(entry);
+    });
+
+    const count = await unresolveSpecs(['specs/feature.md'], dir);
+    expect(count).toBe(1);
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('pending');
+    expect(loaded.specs[0].runs).toHaveLength(0);
+  });
+
+  test('resets a failed spec to pending', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'broken.md', 'file');
+      entry.runs.push(makeRun({ status: 'failed' }));
+      updateEntryStatus(entry);
+    });
+
+    const count = await unresolveSpecs(['broken.md'], dir);
+    expect(count).toBe(1);
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('pending');
+    expect(loaded.specs[0].runs).toHaveLength(0);
+  });
+
+  test('skips already-pending specs', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'pending.md', 'file');
+    });
+
+    const count = await unresolveSpecs(['pending.md'], dir);
+    expect(count).toBe(0);
+  });
+
+  test('matches by basename', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'specs/deep/feature.md', 'file');
+      entry.runs.push(makeRun({ status: 'passed' }));
+      updateEntryStatus(entry);
+    });
+
+    const count = await unresolveSpecs(['feature.md'], dir);
+    expect(count).toBe(1);
+
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs[0].status).toBe('pending');
+  });
+
+  test('returns 0 for non-existent spec', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    const count = await unresolveSpecs(['nope.md'], dir);
+    expect(count).toBe(0);
   });
 });
 
