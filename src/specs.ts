@@ -471,13 +471,14 @@ export async function unresolveSpecs(patterns: string[], workingDir: string): Pr
   return unresolved;
 }
 
-// ── Untracked detection ──────────────────────────────────────
+// ── Known spec directories ───────────────────────────────────
 
-// Scan known spec directories for .md files not in the manifest
-export async function findUntrackedSpecs(workingDir: string): Promise<string[]> {
-  const manifest = await loadManifest(workingDir);
+/** Collect known spec directories: parent dirs of manifest entries + well-known dirs, deduplicated. */
+export async function knownSpecDirs(workingDir: string, manifest?: SpecManifest): Promise<string[]> {
+  const m = manifest ?? await loadManifest(workingDir);
   const specDirs = new Set<string>();
-  for (const entry of manifest.specs) {
+
+  for (const entry of m.specs) {
     if (entry.source === 'pipe') continue;
     const absPath = path.isAbsolute(entry.spec)
       ? entry.spec
@@ -493,17 +494,25 @@ export async function findUntrackedSpecs(workingDir: string): Promise<string[]> 
     } catch {}
   }
 
+  // Remove subdirectories already covered by a parent
+  const sortedDirs = [...specDirs].sort();
+  return sortedDirs.filter((dir, _i, arr) =>
+    !arr.some(parent => parent !== dir && dir.startsWith(parent + path.sep)),
+  );
+}
+
+// ── Untracked detection ──────────────────────────────────────
+
+// Scan known spec directories for .md files not in the manifest
+export async function findUntrackedSpecs(workingDir: string): Promise<string[]> {
+  const manifest = await loadManifest(workingDir);
+  const rootDirs = await knownSpecDirs(workingDir, manifest);
+
   const trackedSpecs = new Set(manifest.specs.map(e => {
     return path.isAbsolute(e.spec)
       ? e.spec
       : path.resolve(workingDir, e.spec);
   }));
-
-  // Remove subdirectories already covered by a parent
-  const sortedDirs = [...specDirs].sort();
-  const rootDirs = sortedDirs.filter((dir, _i, arr) =>
-    !arr.some(parent => parent !== dir && dir.startsWith(parent + path.sep)),
-  );
 
   const seen = new Set<string>();
   const untracked: string[] = [];
@@ -529,6 +538,103 @@ export async function findUntrackedSpecs(workingDir: string): Promise<string[]> 
   }
 
   return untracked;
+}
+
+// ── Spec path shorthand resolution ───────────────────────────
+
+/**
+ * Resolve a shorthand spec file path to an absolute path.
+ * Tries: direct path → manifest 3-level match → directory scan by basename.
+ * Returns null if nothing found.
+ */
+export async function resolveSpecFile(input: string, workingDir: string): Promise<string | null> {
+  // 1. Direct path
+  const direct = path.resolve(workingDir, input);
+  try {
+    await fs.access(direct);
+    return direct;
+  } catch {}
+
+  // 2. Manifest lookup (exact key → basename → trailing path)
+  const manifest = await loadManifest(workingDir);
+  const entry = manifest.specs.find(e =>
+    e.spec === input
+    || path.basename(e.spec) === input
+    || e.spec.endsWith('/' + input)
+  );
+  if (entry) {
+    const absPath = path.isAbsolute(entry.spec)
+      ? entry.spec
+      : path.resolve(workingDir, entry.spec);
+    try {
+      await fs.access(absPath);
+      return absPath;
+    } catch {}
+  }
+
+  // 3. Directory scan: search known spec dirs for a file matching by basename
+  const basename = path.basename(input);
+  const dirs = await knownSpecDirs(workingDir, manifest);
+  for (const dir of dirs) {
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      const queue = [...entries.map(e => ({ entry: e, base: dir }))];
+      while (queue.length > 0) {
+        const { entry: fsEntry, base } = queue.shift()!;
+        const fullPath = path.join(base, fsEntry.name);
+        if (fsEntry.isDirectory()) {
+          try {
+            const sub = await fs.readdir(fullPath, { withFileTypes: true });
+            queue.push(...sub.map(e => ({ entry: e, base: fullPath })));
+          } catch {}
+        } else if (fsEntry.name === basename) {
+          return fullPath;
+        }
+      }
+    } catch {}
+  }
+
+  return null;
+}
+
+/**
+ * Resolve a shorthand spec directory path to an absolute path.
+ * Tries: direct path → scan known spec dirs for matching subdirectory name.
+ * Returns null if nothing found.
+ */
+export async function resolveSpecDir(input: string, workingDir: string): Promise<string | null> {
+  // 1. Direct path
+  const direct = path.resolve(workingDir, input);
+  try {
+    const stat = await fs.stat(direct);
+    if (stat.isDirectory()) return direct;
+  } catch {}
+
+  // 2. Scan known spec dirs for a subdirectory matching by name or trailing path
+  const dirs = await knownSpecDirs(workingDir);
+  const inputName = path.basename(input);
+  for (const dir of dirs) {
+    // Check if the input matches as a direct child
+    const candidate = path.join(dir, inputName);
+    try {
+      const stat = await fs.stat(candidate);
+      if (stat.isDirectory()) return candidate;
+    } catch {}
+
+    // Scan subdirectories for trailing path match
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const fullPath = path.join(dir, entry.name);
+        if (entry.name === inputName || fullPath.endsWith('/' + input)) {
+          return fullPath;
+        }
+      }
+    } catch {}
+  }
+
+  return null;
 }
 
 // ── Contextual hints ─────────────────────────────────────────

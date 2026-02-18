@@ -15,6 +15,9 @@ import {
   findUntrackedSpecs,
   unresolveSpecs,
   buildHints,
+  knownSpecDirs,
+  resolveSpecFile,
+  resolveSpecDir,
 } from './specs.js';
 import { filterPassedSpecs } from './parallel.js';
 import { parseSource } from './deps.js';
@@ -1293,5 +1296,157 @@ describe('filterPassedSpecs', () => {
     const result = await filterPassedSpecs(['flaky.md'], specsDir, dir);
     expect(result.remaining).toEqual(['flaky.md']);
     expect(result.skipped).toBe(0);
+  });
+});
+
+// ── knownSpecDirs ────────────────────────────────────────────
+
+describe('knownSpecDirs', () => {
+  test('returns well-known dirs that exist on disk', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, 'specs'), { recursive: true });
+    // .bonfire/specs does not exist
+
+    const dirs = await knownSpecDirs(dir);
+    expect(dirs).toContain(path.join(dir, 'specs'));
+    expect(dirs).not.toContain(path.join(dir, '.bonfire/specs'));
+  });
+
+  test('includes directories from manifest entries', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'custom', 'deep'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'custom/deep/feature.md', 'file');
+    });
+
+    const dirs = await knownSpecDirs(dir);
+    expect(dirs).toContain(path.join(dir, 'custom', 'deep'));
+  });
+
+  test('deduplicates parent/child directories', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'specs', 'sub'), { recursive: true });
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/a.md', 'file');
+      findOrCreateEntry(manifest, 'specs/sub/b.md', 'file');
+    });
+
+    // Also make specs/ a well-known dir
+    const dirs = await knownSpecDirs(dir);
+    // specs/ should be present, specs/sub/ should be deduplicated away
+    const specsDir = path.join(dir, 'specs');
+    const subDir = path.join(dir, 'specs', 'sub');
+    expect(dirs).toContain(specsDir);
+    expect(dirs).not.toContain(subDir);
+  });
+});
+
+// ── resolveSpecFile ──────────────────────────────────────────
+
+describe('resolveSpecFile', () => {
+  test('direct path returns as-is', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, 'specs'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'specs', 'auth.md'), '# auth');
+
+    const result = await resolveSpecFile('specs/auth.md', dir);
+    expect(result).toBe(path.join(dir, 'specs', 'auth.md'));
+  });
+
+  test('manifest exact key match resolves', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'deep', 'nested'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'deep', 'nested', 'login.md'), '# login');
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'deep/nested/login.md', 'file');
+    });
+
+    const result = await resolveSpecFile('deep/nested/login.md', dir);
+    expect(result).toBe(path.join(dir, 'deep', 'nested', 'login.md'));
+  });
+
+  test('manifest basename match resolves', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'specs', 'auth'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'specs', 'auth', 'login.md'), '# login');
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/auth/login.md', 'file');
+    });
+
+    const result = await resolveSpecFile('login.md', dir);
+    expect(result).toBe(path.join(dir, 'specs', 'auth', 'login.md'));
+  });
+
+  test('manifest trailing path match resolves', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'specs', 'auth'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'specs', 'auth', 'login.md'), '# login');
+
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/auth/login.md', 'file');
+    });
+
+    const result = await resolveSpecFile('auth/login.md', dir);
+    expect(result).toBe(path.join(dir, 'specs', 'auth', 'login.md'));
+  });
+
+  test('returns null when nothing matches', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    const result = await resolveSpecFile('nonexistent.md', dir);
+    expect(result).toBeNull();
+  });
+});
+
+// ── resolveSpecDir ───────────────────────────────────────────
+
+describe('resolveSpecDir', () => {
+  test('direct path returns as-is', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, 'specs'), { recursive: true });
+
+    const result = await resolveSpecDir('specs', dir);
+    expect(result).toBe(path.join(dir, 'specs'));
+  });
+
+  test('subdirectory name matches in known spec dir', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'specs', 'gtmeng-580'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'specs', 'tracked.md'), '# tracked');
+
+    // Track a spec so specs/ becomes a known dir
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/tracked.md', 'file');
+    });
+
+    const result = await resolveSpecDir('gtmeng-580', dir);
+    expect(result).toBe(path.join(dir, 'specs', 'gtmeng-580'));
+  });
+
+  test('matches in well-known .bonfire/specs dir', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.bonfire', 'specs', 'feature-123'), { recursive: true });
+
+    const result = await resolveSpecDir('feature-123', dir);
+    expect(result).toBe(path.join(dir, '.bonfire', 'specs', 'feature-123'));
+  });
+
+  test('returns null when nothing matches', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+
+    const result = await resolveSpecDir('nonexistent-dir', dir);
+    expect(result).toBeNull();
   });
 });

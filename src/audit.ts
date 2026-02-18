@@ -4,7 +4,7 @@ import path from 'path';
 import { resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
 import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
-import { withManifestLock, findOrCreateEntry, specKey } from './specs.js';
+import { withManifestLock, findOrCreateEntry, specKey, resolveSpecDir } from './specs.js';
 
 export async function runAudit(options: AuditOptions): Promise<void> {
   const { specDir, prompt, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false } = options;
@@ -26,8 +26,11 @@ export async function runAudit(options: AuditOptions): Promise<void> {
   });
   const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd } = resolved;
 
-  // Read all .md files from specDir
-  const resolvedSpecDir = path.resolve(specDir);
+  // Read all .md files from specDir (with shorthand resolution)
+  const resolvedSpecDir = await resolveSpecDir(specDir, workingDir) ?? path.resolve(specDir);
+  if (!quiet && resolvedSpecDir !== path.resolve(specDir)) {
+    console.log(`${DIM}[forge]${RESET} Resolved: ${specDir} → ${path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir}\n`);
+  }
   let specFiles: string[];
   try {
     const files = await fs.readdir(resolvedSpecDir);

@@ -6,7 +6,7 @@ import { ForgeError } from './utils.js';
 import { DIM, RESET, BOLD, CMD, AGENT_VERBS, SPINNER_FRAMES, formatElapsed, showBanner } from './display.js';
 import { runSingleSpec, type BatchResult } from './run.js';
 import { loadSpecDeps, topoSort, hasDependencies, type SpecDep, type DepLevel } from './deps.js';
-import { withManifestLock, findOrCreateEntry, specKey, loadManifest } from './specs.js';
+import { withManifestLock, findOrCreateEntry, specKey, loadManifest, resolveSpecFile, resolveSpecDir } from './specs.js';
 import { resolveWorkingDir } from './utils.js';
 
 // Worker pool: runs tasks with bounded concurrency
@@ -468,6 +468,9 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS');
   }
 
+  // Resolve working directory early — used by multiple code paths
+  const workingDir = await resolveWorkingDir(options.cwd);
+
   // Resolve concurrency: use provided value or auto-detect
   const concurrency = options.concurrency ?? autoDetectConcurrency();
 
@@ -476,7 +479,6 @@ export async function runForge(options: ForgeOptions): Promise<void> {
 
   // Rerun failed specs from latest batch
   if (rerunFailed) {
-    const workingDir = options.cwd ? path.resolve(options.cwd) : process.cwd();
     const { runId: prevRunId, specPaths: failedPaths } = await findFailedSpecs(workingDir);
 
     if (failedPaths.length === 0) {
@@ -506,7 +508,6 @@ export async function runForge(options: ForgeOptions): Promise<void> {
 
   // Run only pending specs from the manifest
   if (pendingOnly) {
-    const workingDir = await resolveWorkingDir(options.cwd);
     const pendingPaths = await findPendingSpecs(workingDir);
 
     if (pendingPaths.length === 0) {
@@ -536,7 +537,10 @@ export async function runForge(options: ForgeOptions): Promise<void> {
 
   // If spec directory provided, run each spec
   if (specDir) {
-    const resolvedDir = path.resolve(specDir);
+    const resolvedDir = await resolveSpecDir(specDir, workingDir) ?? path.resolve(specDir);
+    if (!quiet && resolvedDir !== path.resolve(specDir)) {
+      console.log(`${DIM}[forge]${RESET} Resolved: ${specDir} → ${path.relative(workingDir, resolvedDir) || resolvedDir}\n`);
+    }
 
     let files: string[];
     try {
@@ -560,7 +564,6 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     let specFiles = allSpecFiles;
     let skippedCount = 0;
     if (!force) {
-      const workingDir = await resolveWorkingDir(options.cwd);
       const filtered = await filterPassedSpecs(allSpecFiles, resolvedDir, workingDir);
       specFiles = filtered.remaining;
       skippedCount = filtered.skipped;
@@ -604,16 +607,31 @@ export async function runForge(options: ForgeOptions): Promise<void> {
   const effectiveOptions = { ...options };
   if (!effectiveOptions.specPath && !effectiveOptions.specDir
       && effectiveOptions.prompt.endsWith('.md') && !effectiveOptions.prompt.includes(' ')) {
-    const candidatePath = path.resolve(effectiveOptions.cwd || '.', effectiveOptions.prompt);
-    try {
-      await fs.access(candidatePath);
-      effectiveOptions.specPath = candidatePath;
+    const resolved = await resolveSpecFile(effectiveOptions.prompt, workingDir);
+    if (resolved) {
+      effectiveOptions.specPath = resolved;
+      const display = resolved !== path.resolve(workingDir, effectiveOptions.prompt)
+        ? `${effectiveOptions.prompt} → ${path.relative(workingDir, resolved)}`
+        : path.relative(workingDir, resolved) || resolved;
       effectiveOptions.prompt = 'implement this specification';
       if (!quiet) {
-        console.log(`${DIM}[forge]${RESET} Detected spec file: ${DIM}${effectiveOptions.specPath}${RESET}\n`);
+        console.log(`${DIM}[forge]${RESET} Detected spec file: ${DIM}${display}${RESET}\n`);
       }
+    }
+  }
+
+  // Resolve --spec shorthand if path doesn't exist directly
+  if (effectiveOptions.specPath) {
+    try {
+      await fs.access(effectiveOptions.specPath);
     } catch {
-      // Not a file — treat as regular prompt
+      const resolved = await resolveSpecFile(effectiveOptions.specPath, workingDir);
+      if (resolved) {
+        if (!quiet) {
+          console.log(`${DIM}[forge]${RESET} Resolved: ${effectiveOptions.specPath} → ${path.relative(workingDir, resolved) || resolved}\n`);
+        }
+        effectiveOptions.specPath = resolved;
+      }
     }
   }
 
