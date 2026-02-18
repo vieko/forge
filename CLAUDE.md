@@ -33,6 +33,9 @@ forge run --rerun-failed -P -C ~/target-repo "fix failures"
 # Run only pending specs from the manifest
 forge run --pending -P "implement pending specs"
 
+# Force re-run of already passed specs
+forge run --spec-dir ./specs/ -P --force "re-verify all"
+
 # Configurable max turns (default: 250)
 forge run --max-turns 150 "large task"
 

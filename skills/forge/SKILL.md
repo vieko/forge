@@ -9,7 +9,7 @@ description: >-
   "forge watch", "forge status", "rerun failed", "resolve spec", "delegate this to forge".
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.2.5
+  version: 3.2.6
   author: vieko
 ---
 
@@ -47,8 +47,9 @@ forge "quick task"                                       # Shorthand (no 'run')
 
 Important flags:
 - `-s, --spec <path>` -- Spec file. Prompt becomes additional context.
-- `-S, --spec-dir <path>` -- Directory of specs. Each `.md` runs separately.
+- `-S, --spec-dir <path>` -- Directory of specs. Each `.md` runs separately. Already-passed specs are skipped.
 - `-P, --parallel` -- Run specs concurrently (auto-tuned concurrency).
+- `-F, --force` -- Re-run all specs including already passed (overrides skip behavior).
 - `--sequential-first <n>` -- Run first N specs sequentially, then parallelize.
 - `-C, --cwd <path>` -- Target repo directory.
 - `-w, --watch` -- Auto-split tmux pane with live logs.

@@ -38,6 +38,8 @@ export interface ForgeOptions {
   rerunFailed?: boolean;
   /** Run only pending specs from the manifest */
   pendingOnly?: boolean;
+  /** Force re-run of passed specs (skip manifest filtering) */
+  force?: boolean;
 }
 
 /**

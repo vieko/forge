@@ -433,9 +433,36 @@ function printBatchSummary(
   }
 }
 
+/** Filter out spec filenames whose manifest entry is already 'passed'. */
+export async function filterPassedSpecs(
+  specFileNames: string[],
+  specDir: string,
+  workingDir: string,
+): Promise<{ remaining: string[]; skipped: number }> {
+  const manifest = await loadManifest(workingDir);
+  const passedKeys = new Set(
+    manifest.specs
+      .filter(e => e.status === 'passed')
+      .map(e => e.spec),
+  );
+
+  let skipped = 0;
+  const remaining = specFileNames.filter(f => {
+    const absPath = path.join(specDir, f);
+    const key = specKey(absPath, workingDir);
+    if (passedKeys.has(key)) {
+      skipped++;
+      return false;
+    }
+    return true;
+  });
+
+  return { remaining, skipped };
+}
+
 // Main entry point - handles single spec or spec directory
 export async function runForge(options: ForgeOptions): Promise<void> {
-  const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed, pendingOnly } = options;
+  const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed, pendingOnly, force } = options;
 
   if (!quiet) {
     showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS');
@@ -521,12 +548,27 @@ export async function runForge(options: ForgeOptions): Promise<void> {
       throw err;
     }
 
-    const specFiles = files
+    const allSpecFiles = files
       .filter(f => f.endsWith('.md'))
       .sort(); // Alphabetical order for predictable execution
 
-    if (specFiles.length === 0) {
+    if (allSpecFiles.length === 0) {
       throw new Error(`No .md files found in ${resolvedDir}`);
+    }
+
+    // Filter out already-passed specs unless --force
+    let specFiles = allSpecFiles;
+    let skippedCount = 0;
+    if (!force) {
+      const workingDir = await resolveWorkingDir(options.cwd);
+      const filtered = await filterPassedSpecs(allSpecFiles, resolvedDir, workingDir);
+      specFiles = filtered.remaining;
+      skippedCount = filtered.skipped;
+    }
+
+    if (specFiles.length === 0) {
+      console.log(`All ${allSpecFiles.length} specs already passed. Use ${BOLD}--force${RESET} to re-run.`);
+      return;
     }
 
     if (!quiet) {
@@ -534,6 +576,9 @@ export async function runForge(options: ForgeOptions): Promise<void> {
         ? `parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})`
         : 'sequential';
       console.log(`Found ${BOLD}${specFiles.length}${RESET} specs in ${DIM}${resolvedDir}${RESET}`);
+      if (skippedCount > 0) {
+        console.log(`${DIM}[skipped ${skippedCount} already passed — use --force to re-run]${RESET}`);
+      }
       console.log(`${DIM}[${mode}]${RESET}\n`);
       if (!parallel) {
         specFiles.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));

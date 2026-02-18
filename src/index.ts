@@ -70,6 +70,7 @@ program
   .option('--sequential-first <n>', 'Run first N specs sequentially before parallelizing')
   .option('--rerun-failed', 'Rerun only failed specs from latest batch')
   .option('--pending', 'Run only pending specs from the manifest')
+  .option('-F, --force', 'Re-run all specs including already passed')
   .option('-w, --watch', 'Open a tmux pane with live session logs')
   .action(async (prompt: string, options: {
     spec?: string;
@@ -89,6 +90,7 @@ program
     sequentialFirst?: string;
     rerunFailed?: boolean;
     pending?: boolean;
+    force?: boolean;
     watch?: boolean;
   }) => {
     validateSession(options.resume, options.fork);
@@ -130,6 +132,7 @@ program
         sequentialFirst: options.sequentialFirst ? parseInt(options.sequentialFirst, 10) : undefined,
         rerunFailed: options.rerunFailed,
         pendingOnly: options.pending,
+        force: options.force,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);

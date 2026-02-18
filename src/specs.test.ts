@@ -16,6 +16,7 @@ import {
   unresolveSpecs,
   buildHints,
 } from './specs.js';
+import { filterPassedSpecs } from './parallel.js';
 import { parseSource } from './deps.js';
 import type { SpecManifest, SpecEntry, SpecRun } from './types.js';
 
@@ -1190,5 +1191,107 @@ describe('buildHints', () => {
     expect(hints[0]).toContain('rerun-failed');
     expect(hints[1]).toContain('--add');
     expect(hints[2]).toContain('--prune');
+  });
+});
+
+// ── filterPassedSpecs ────────────────────────────────────────
+
+describe('filterPassedSpecs', () => {
+  test('filters out specs with passed status in manifest', async () => {
+    const dir = await makeTmpDir();
+    const specsDir = path.join(dir, 'specs');
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(specsDir, { recursive: true });
+
+    await fs.writeFile(path.join(specsDir, 'a.md'), '# a');
+    await fs.writeFile(path.join(specsDir, 'b.md'), '# b');
+    await fs.writeFile(path.join(specsDir, 'c.md'), '# c');
+
+    // Mark 'a.md' as passed in manifest
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'specs/a.md', 'file');
+      entry.runs.push(makeRun({ status: 'passed' }));
+      updateEntryStatus(entry);
+      // b.md is pending
+      findOrCreateEntry(manifest, 'specs/b.md', 'file');
+    });
+
+    const result = await filterPassedSpecs(['a.md', 'b.md', 'c.md'], specsDir, dir);
+    expect(result.remaining).toEqual(['b.md', 'c.md']);
+    expect(result.skipped).toBe(1);
+  });
+
+  test('returns all specs when none are passed', async () => {
+    const dir = await makeTmpDir();
+    const specsDir = path.join(dir, 'specs');
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(specsDir, { recursive: true });
+
+    await fs.writeFile(path.join(specsDir, 'a.md'), '# a');
+    await fs.writeFile(path.join(specsDir, 'b.md'), '# b');
+
+    // Both pending
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'specs/a.md', 'file');
+      findOrCreateEntry(manifest, 'specs/b.md', 'file');
+    });
+
+    const result = await filterPassedSpecs(['a.md', 'b.md'], specsDir, dir);
+    expect(result.remaining).toEqual(['a.md', 'b.md']);
+    expect(result.skipped).toBe(0);
+  });
+
+  test('returns all specs when no manifest exists', async () => {
+    const dir = await makeTmpDir();
+    const specsDir = path.join(dir, 'specs');
+    await fs.mkdir(specsDir, { recursive: true });
+
+    await fs.writeFile(path.join(specsDir, 'a.md'), '# a');
+
+    const result = await filterPassedSpecs(['a.md'], specsDir, dir);
+    expect(result.remaining).toEqual(['a.md']);
+    expect(result.skipped).toBe(0);
+  });
+
+  test('filters all when every spec is passed', async () => {
+    const dir = await makeTmpDir();
+    const specsDir = path.join(dir, 'specs');
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(specsDir, { recursive: true });
+
+    await fs.writeFile(path.join(specsDir, 'a.md'), '# a');
+    await fs.writeFile(path.join(specsDir, 'b.md'), '# b');
+
+    await withManifestLock(dir, (manifest) => {
+      const a = findOrCreateEntry(manifest, 'specs/a.md', 'file');
+      a.runs.push(makeRun({ status: 'passed' }));
+      updateEntryStatus(a);
+      const b = findOrCreateEntry(manifest, 'specs/b.md', 'file');
+      b.runs.push(makeRun({ status: 'passed' }));
+      updateEntryStatus(b);
+    });
+
+    const result = await filterPassedSpecs(['a.md', 'b.md'], specsDir, dir);
+    expect(result.remaining).toEqual([]);
+    expect(result.skipped).toBe(2);
+  });
+
+  test('keeps failed specs even if they have run history', async () => {
+    const dir = await makeTmpDir();
+    const specsDir = path.join(dir, 'specs');
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(specsDir, { recursive: true });
+
+    await fs.writeFile(path.join(specsDir, 'flaky.md'), '# flaky');
+
+    await withManifestLock(dir, (manifest) => {
+      const entry = findOrCreateEntry(manifest, 'specs/flaky.md', 'file');
+      entry.runs.push(makeRun({ status: 'failed' }));
+      updateEntryStatus(entry);
+    });
+
+    const result = await filterPassedSpecs(['flaky.md'], specsDir, dir);
+    expect(result.remaining).toEqual(['flaky.md']);
+    expect(result.skipped).toBe(0);
   });
 });
