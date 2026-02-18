@@ -412,18 +412,20 @@ async function findPendingSpecs(workingDir: string): Promise<string[]> {
   return pending;
 }
 
-// Print batch summary with cost tracking
+// Print batch summary with cost tracking and next-step hint
 function printBatchSummary(
   results: BatchResult[],
   wallClockDuration: number,
   parallel: boolean,
   quiet: boolean,
+  specDir?: string,
 ): void {
   const totalSpecDuration = results.reduce((sum, r) => sum + r.duration, 0);
   const totalCost = results.reduce((sum, r) => sum + (r.cost || 0), 0);
 
   if (!quiet || parallel) {
     const successCount = results.filter(r => r.status === 'success').length;
+    const allPassed = successCount === results.length;
     console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
     console.log(`${BOLD}SPEC BATCH SUMMARY${RESET}`);
     console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
@@ -438,7 +440,16 @@ function printBatchSummary(
       console.log(`  Spec total: ${totalSpecDuration.toFixed(1)}s`);
     }
     console.log(`  Cost:       ${BOLD}$${totalCost.toFixed(2)}${RESET}`);
-    console.log(`  Result:     ${successCount === results.length ? '\x1b[32m' : '\x1b[33m'}${successCount}/${results.length} successful\x1b[0m`);
+    console.log(`  Result:     ${allPassed ? '\x1b[32m' : '\x1b[33m'}${successCount}/${results.length} successful\x1b[0m`);
+
+    // Next-step hint
+    if (allPassed && specDir) {
+      console.log(`\n  ${DIM}Next step:${RESET}`);
+      console.log(`    forge audit ${specDir} "verify implementation"`);
+    } else if (!allPassed) {
+      console.log(`\n  ${DIM}Next step:${RESET}`);
+      console.log(`    forge run --rerun-failed -P "fix failures"`);
+    }
   }
 }
 
@@ -609,7 +620,8 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     const results = await runSpecBatch(specFilePaths, specFiles, options, concurrency, runId, skippedNames);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
-    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false);
+    const displayDir = path.relative(workingDir, resolvedDir) || resolvedDir;
+    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false, displayDir);
 
     return;
   }
