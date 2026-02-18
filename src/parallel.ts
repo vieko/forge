@@ -257,12 +257,21 @@ async function runSpecBatch(
   options: ForgeOptions,
   concurrency: number,
   runId: string,
+  satisfiedDeps?: Set<string>,
 ): Promise<BatchResult[]> {
   const results: BatchResult[] = [];
   const { quiet, parallel, sequentialFirst = 0 } = options;
 
   // Load dependency metadata from spec frontmatter
   const specDeps = await loadSpecDeps(specFilePaths, specFileNames);
+
+  // Strip already-satisfied deps (e.g. passed specs filtered from the batch)
+  if (satisfiedDeps && satisfiedDeps.size > 0) {
+    for (const spec of specDeps) {
+      spec.depends = spec.depends.filter(d => !satisfiedDeps.has(d));
+    }
+  }
+
   const useDeps = hasDependencies(specDeps);
 
   // Register all specs in the manifest as 'running' before execution
@@ -438,7 +447,7 @@ export async function filterPassedSpecs(
   specFileNames: string[],
   specDir: string,
   workingDir: string,
-): Promise<{ remaining: string[]; skipped: number }> {
+): Promise<{ remaining: string[]; skipped: number; skippedNames: Set<string> }> {
   const manifest = await loadManifest(workingDir);
   const passedKeys = new Set(
     manifest.specs
@@ -446,18 +455,18 @@ export async function filterPassedSpecs(
       .map(e => e.spec),
   );
 
-  let skipped = 0;
+  const skippedNames = new Set<string>();
   const remaining = specFileNames.filter(f => {
     const absPath = path.join(specDir, f);
     const key = specKey(absPath, workingDir);
     if (passedKeys.has(key)) {
-      skipped++;
+      skippedNames.add(f);
       return false;
     }
     return true;
   });
 
-  return { remaining, skipped };
+  return { remaining, skipped: skippedNames.size, skippedNames };
 }
 
 // Main entry point - handles single spec or spec directory
@@ -563,10 +572,12 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     // Filter out already-passed specs unless --force
     let specFiles = allSpecFiles;
     let skippedCount = 0;
+    let skippedNames = new Set<string>();
     if (!force) {
       const filtered = await filterPassedSpecs(allSpecFiles, resolvedDir, workingDir);
       specFiles = filtered.remaining;
       skippedCount = filtered.skipped;
+      skippedNames = filtered.skippedNames;
     }
 
     if (specFiles.length === 0) {
@@ -595,7 +606,7 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     const specFilePaths = specFiles.map(f => path.join(resolvedDir, f));
 
     const wallClockStart = Date.now();
-    const results = await runSpecBatch(specFilePaths, specFiles, options, concurrency, runId);
+    const results = await runSpecBatch(specFilePaths, specFiles, options, concurrency, runId, skippedNames);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
     printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false);
