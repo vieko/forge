@@ -162,7 +162,7 @@ src/
 4. **Sequential-first** — optionally run foundation specs sequentially before parallelizing the rest
 5. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
 6. **Result persistence** — saves structured metadata (with runId for batch grouping) and full result text to `.forge/results/`
-7. **Cost tracking** — per-spec and total cost shown in batch summary
+7. **Cost tracking** — per-spec and total cost shown in batch summary, with next-step hint (audit on all-pass, rerun-failed on failures)
 8. **Rerun failed** — `--rerun-failed` finds failed specs from latest batch and reruns them
 9. **Run pending** — `--pending` runs only pending/stuck specs from the manifest
 10. **Status** — `forge status` shows results from recent runs grouped by batch

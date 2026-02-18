@@ -46,7 +46,12 @@ SPEC BATCH SUMMARY
   Spec total: 197.1s
   Cost:       $5.50
   Result:     3/4 successful
+
+  Next step:
+    forge run --rerun-failed -P "fix failures"
 ```
+
+When all specs pass, the hint suggests `forge audit <spec-dir>` instead.
 
 Use `--dry-run` to estimate cost before committing to a full run.
 
