@@ -74,6 +74,18 @@ depends:
 
 Forge detects cycles and errors before execution. Specs with no dependencies run first (level 0), then their dependents (level 1), and so on — each level runs in parallel.
 
+## Skip-Passed Behavior
+
+Already-passed specs (per manifest) are automatically skipped when using `--spec-dir`. If skipped specs are listed as dependencies by remaining specs, those deps are treated as satisfied — the dependency graph adjusts automatically.
+
+```bash
+# Specs 01-03 already passed, 04-06 depend on them → 04-06 run, deps satisfied
+forge run --spec-dir ./specs/ -P "implement remaining"
+
+# Force re-run everything including passed specs
+forge run --spec-dir ./specs/ -P --force "re-verify all"
+```
+
 ## Key Behaviors
 
 - Each spec runs in its own isolated agent session — no shared context.

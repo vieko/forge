@@ -42,20 +42,25 @@ forge run -C ~/other-repo "fix the login bug"            # Target different repo
 forge run --rerun-failed -P "fix failures"               # Rerun failed specs
 forge run --pending -P "implement pending"               # Run only pending specs
 forge run --resume <session-id> "continue"               # Resume interrupted session
+forge run --plan-only "design API for auth"              # Plan without implementing
 forge "quick task"                                       # Shorthand (no 'run')
 ```
 
 Important flags:
-- `-s, --spec <path>` -- Spec file. Prompt becomes additional context.
-- `-S, --spec-dir <path>` -- Directory of specs. Each `.md` runs separately. Already-passed specs are skipped.
+- `-s, --spec <path>` -- Spec file (shorthand resolves via manifest). Prompt becomes additional context.
+- `-S, --spec-dir <path>` -- Directory of specs (shorthand resolves via known dirs). Runs each `.md` separately; use `-P` for parallel. Already-passed specs are skipped.
 - `-P, --parallel` -- Run specs concurrently (auto-tuned concurrency).
-- `-F, --force` -- Re-run all specs including already passed (overrides skip behavior).
+- `-F, --force` -- Re-run all specs including already passed.
+- `--concurrency <n>` -- Override auto-detected parallelism (default: freeMem/2GB, capped at CPUs).
 - `--sequential-first <n>` -- Run first N specs sequentially, then parallelize.
 - `-C, --cwd <path>` -- Target repo directory.
-- `-w, --watch` -- Auto-split tmux pane with live logs.
+- `-t, --max-turns <n>` -- Max turns per spec (default: 250).
+- `-b, --max-budget <usd>` -- Max budget in USD per spec.
+- `--plan-only` -- Create tasks without implementing.
 - `--dry-run` -- Preview tasks and estimate cost without executing.
-
-Run `forge run --help` for all flags.
+- `-v, --verbose` -- Full output detail.
+- `-q, --quiet` -- Suppress progress output (for CI).
+- `-w, --watch` -- Auto-split tmux pane with live logs.
 
 ### forge audit
 
@@ -63,6 +68,7 @@ Reviews codebase against specs. Produces new spec files for remaining work — f
 
 ```bash
 forge audit specs/                              # Audit, output to specs/audit/
+forge audit specs/ "focus on auth module"       # With additional context
 forge audit specs/ -o ./remediation/            # Custom output dir
 forge audit specs/ -C ~/target-repo             # Different repo
 forge audit specs/ --watch                      # Auto-split tmux pane with live logs
@@ -86,6 +92,7 @@ Reviews recent git changes for bugs and quality issues.
 forge review                                    # Review main...HEAD
 forge review HEAD~5...HEAD                      # Specific range
 forge review --dry-run -o findings.md           # Report only, write to file
+forge review -C ~/other-repo                    # Different repo
 ```
 
 ### forge watch
@@ -103,6 +110,7 @@ forge watch <session-id>                        # Watch specific session
 forge status                                    # Latest run
 forge status --all                              # All runs
 forge status -n 5                               # Last 5 runs
+forge status -C ~/other-repo                    # Different repo
 ```
 
 ### forge specs
@@ -113,13 +121,14 @@ List tracked specs with lifecycle status. Specs are registered in `.forge/specs.
 forge specs                                     # List all tracked specs
 forge specs --pending                           # Show only pending
 forge specs --failed                            # Show only failed
+forge specs --passed                            # Show only passed
 forge specs --orphaned                          # Manifest entries with missing files
 forge specs --untracked                         # .md files not in manifest
 forge specs --add                               # Register all untracked specs
 forge specs --add specs/new.md                  # Register specific spec by path/glob
 forge specs --resolve game.md                   # Mark spec as passed without running
 forge specs --unresolve game.md                 # Reset a spec back to pending
-forge specs --check                             # Auto-resolve implemented pending specs
+forge specs --check                             # Triage pending specs: auto-resolve already-implemented ones via Sonnet agent
 forge specs --reconcile                         # Backfill from .forge/results/ history
 forge specs --prune                             # Remove orphaned entries from manifest
 ```
@@ -133,6 +142,8 @@ forge specs --prune                             # Remove orphaned entries from m
 - Resolves `depends:` frontmatter into a topological execution order
 - Tracks all specs in a single batch with grouped cost reporting
 - Auto-tunes concurrency based on available memory
+
+**Shorthand resolution**: spec paths resolve automatically. `forge run --spec login.md` finds the spec via manifest lookup. `forge run --spec-dir gtmeng-580` finds `.bonfire/specs/gtmeng-580/`. Full paths always work too.
 
 ## Recipes
 
@@ -154,6 +165,17 @@ forge run --spec-dir ./specs/ -P "implement all specs"
 forge run --rerun-failed -P "fix failures"
 # 4. Check results
 forge status
+```
+
+### Triage pending specs
+
+```bash
+# See what's pending
+forge specs --pending
+# Auto-resolve specs that are already implemented in the codebase
+forge specs --check
+# Run whatever is still pending
+forge run --pending -P "implement remaining"
 ```
 
 ### Dependency-aware execution
