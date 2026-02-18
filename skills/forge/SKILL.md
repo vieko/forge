@@ -124,7 +124,25 @@ forge specs --reconcile                         # Backfill from .forge/results/ 
 forge specs --prune                             # Remove orphaned entries from manifest
 ```
 
+## Important
+
+**Never manually orchestrate parallel forge runs** (e.g. `forge run spec1.md & forge run spec2.md & wait`). Forge handles parallelism, dependency ordering, and skip-passed internally via `--spec-dir -P`. Manual orchestration bypasses the dependency graph, manifest tracking, and batch grouping.
+
+**Always prefer `--spec-dir -P`** over running individual specs. It automatically:
+- Skips already-passed specs (use `--force` to override)
+- Resolves `depends:` frontmatter into a topological execution order
+- Tracks all specs in a single batch with grouped cost reporting
+- Auto-tunes concurrency based on available memory
+
 ## Recipes
+
+### Run all specs in a directory
+
+```bash
+forge run --spec-dir gtmeng-580 -P -C ~/dev/project "implement all"
+# Shorthand paths resolve automatically (gtmeng-580 → .bonfire/specs/gtmeng-580/)
+# Already-passed specs are skipped; deps on passed specs are treated as satisfied
+```
 
 ### Spec-driven development
 
