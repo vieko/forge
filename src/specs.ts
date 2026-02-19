@@ -1062,7 +1062,17 @@ Be thorough: check for the actual implementation, not just file existence. A spe
   }
 
   if (toResolve.length > 0) {
-    const count = await resolveSpecs(toResolve, workingDir);
+    // Map agent-returned keys back to canonical manifest keys
+    const canonicalKeys = toResolve.map(agentKey => {
+      const match = specContents.find(s =>
+        s.key === agentKey
+        || path.basename(s.key) === agentKey
+        || s.key.endsWith('/' + agentKey)
+        || path.basename(s.key) === path.basename(agentKey)
+      );
+      return match ? match.key : agentKey;
+    });
+    const count = await resolveSpecs(canonicalKeys, workingDir);
     console.log(`\n${BOLD}Resolved ${count} spec(s) as passed${RESET}`);
   } else {
     console.log(`\n${DIM}No specs were fully implemented.${RESET}`);
