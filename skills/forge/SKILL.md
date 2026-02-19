@@ -9,7 +9,7 @@ description: >-
   "forge watch", "forge status", "rerun failed", "resolve spec", "delegate this to forge".
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.2.8
+  version: 3.3.0
   author: vieko
 ---
 
