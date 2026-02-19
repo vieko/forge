@@ -103,7 +103,7 @@ forge specs -C ~/other-repo     # Different working directory
 ## Architecture
 
 ```
-~4000 lines (source) + ~1500 lines (tests)
+~4500 lines (source) + ~2000 lines (tests)
 
 User Prompt
     ↓
@@ -129,21 +129,22 @@ src/
 ├── index.ts       # CLI entry + arg parsing + validators
 ├── display.ts     # ANSI constants, banner, spinners, printRunSummary, formatElapsed
 ├── utils.ts       # ForgeError, execAsync, config, resolveSession, isTransientError, sleep, saveResult
-├── verify.ts      # detectVerification, runVerification
+├── verify.ts      # detectVerification, runVerification, monorepo detection + scoping
 ├── core.ts        # QueryConfig, QueryResult, runQuery (SDK wrapper with hooks/streaming)
 ├── run.ts         # runSingleSpec, BatchResult
 ├── specs.ts       # Spec manifest (lifecycle, reconcile, prune, addSpecs, resolveSpecs, showSpecs)
 ├── deps.ts        # Dependency parsing, topological sort, cycle detection, parseSource
-├── parallel.ts    # workerPool, autoDetectConcurrency, dep-aware execution, runForge
+├── parallel.ts    # workerPool, autoDetectConcurrency, dep-aware execution, runForge, progressTracker
 ├── watch.ts       # WatchOptions, colorWatchLine, runWatch
 ├── audit.ts       # runAudit + manifest integration
 ├── define.ts      # runDefine (spec generation from descriptions)
 ├── review.ts      # runReview
 ├── status.ts      # showStatus
-├── types.ts       # TypeScript types (ForgeResult, SpecManifest, SpecEntry, SpecRun, DefineOptions)
+├── types.ts       # TypeScript types (ForgeResult, SpecManifest, SpecEntry, SpecRun, DefineOptions, MonorepoContext)
 ├── query.test.ts  # Tests for core utilities
 ├── deps.test.ts   # Tests for dependency + parseSource
 ├── specs.test.ts  # Tests for manifest CRUD, locking, integration lifecycle
+├── verify.test.ts # Tests for monorepo detection, scoping, rewriting
 └── types.test.ts  # Type validation tests
 
 .forge/
@@ -161,18 +162,19 @@ src/
 1. **Prompt construction** — wraps user prompt in outcome-focused template with acceptance criteria
 2. **Agent execution** — single SDK `query()` call; agent decides its own approach (direct coding, task breakdown, etc.)
 3. **Parallel execution** — worker pool runs specs concurrently with auto-tuned concurrency (freeMem/2GB, capped at CPUs), braille spinner showing per-spec status and live tool activity
-4. **Sequential-first** — optionally run foundation specs sequentially before parallelizing the rest
-5. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
-6. **Result persistence** — saves structured metadata (with runId for batch grouping) and full result text to `.forge/results/`
-7. **Cost tracking** — per-spec and total cost shown in batch summary, with next-step hint (audit on all-pass, rerun-failed on failures)
-8. **Rerun failed** — `--rerun-failed` finds failed specs from latest batch and reruns them
-9. **Run pending** — `--pending` runs only pending/stuck specs from the manifest
-10. **Status** — `forge status` shows results from recent runs grouped by batch
-11. **Retry on transient errors** — auto-retries rate limits and network errors (3 attempts, exponential backoff)
-12. **Audit** — `forge audit` reviews the codebase against specs via a single read-heavy `query()` call and produces new spec files for any remaining work; output feeds directly into `forge run --spec-dir`
-13. **Spec lifecycle** — `.forge/specs.json` manifest tracks every spec from registration through execution; `forge specs` shows status, run history, cost, and detects orphaned/untracked specs
-14. **Resolve specs** — `forge specs --resolve` marks specs as passed without running (for manually completed work)
-15. **Check specs** — `forge specs --check` uses a Sonnet agent to triage pending specs against the codebase and auto-resolve implemented ones
+4. **Sequential progress** — progress tracker shows checkpoint between each spec (`+` pass, `x` fail, `>` running, `-` pending); deduplicates with batch summary
+5. **Sequential-first** — optionally run foundation specs sequentially before parallelizing the rest
+6. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
+7. **Result persistence** — saves structured metadata (with runId for batch grouping) and full result text to `.forge/results/`
+8. **Cost tracking** — per-spec and total cost shown in batch summary, with next-step hint (audit on all-pass, rerun-failed on failures)
+9. **Rerun failed** — `--rerun-failed` finds failed specs from latest batch and reruns them
+10. **Run pending** — `--pending` runs only pending/stuck specs from the manifest
+11. **Status** — `forge status` shows results from recent runs grouped by batch
+12. **Retry on transient errors** — auto-retries rate limits and network errors (3 attempts, exponential backoff)
+13. **Audit** — `forge audit` reviews the codebase against specs via a single read-heavy `query()` call and produces new spec files for any remaining work; output feeds directly into `forge run --spec-dir`
+14. **Spec lifecycle** — `.forge/specs.json` manifest tracks every spec from registration through execution; `forge specs` shows status, run history, cost, and detects orphaned/untracked specs
+15. **Resolve specs** — `forge specs --resolve` marks specs as passed without running (for manually completed work)
+16. **Check specs** — `forge specs --check` uses a Sonnet agent to triage pending specs against the codebase and auto-resolve implemented ones
 
 ## Spec Naming
 
