@@ -412,12 +412,12 @@ export async function runVerification(
     }
     try {
       await execAsync(cmd, { cwd: workingDir, timeout: 120000 });
-      if (spinner) spinner.stop(`${DIM}[Verify]${RESET} \x1b[32m✓\x1b[0m ${cmd}`);
+      if (spinner) spinner.stop(`${DIM}[Verify]${RESET} \x1b[32m+\x1b[0m ${cmd}`);
     } catch (err) {
       const error = err as { stderr?: string; stdout?: string; message?: string };
       const errorOutput = error.stderr || error.stdout || error.message || 'Unknown error';
       errors.push(`Command failed: ${cmd}\n${errorOutput}`);
-      if (spinner) spinner.stop(`${DIM}[Verify]${RESET} \x1b[31m✗\x1b[0m ${cmd}`);
+      if (spinner) spinner.stop(`${DIM}[Verify]${RESET} \x1b[31mx\x1b[0m ${cmd}`);
     }
   }
 

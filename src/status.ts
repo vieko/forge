@@ -73,7 +73,7 @@ export async function showStatus(options: { cwd?: string; all?: boolean; last?: 
 
     for (const s of specs) {
       const name = s.specPath ? path.basename(s.specPath) : '(no spec)';
-      const statusIcon = s.status === 'success' ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
+      const statusIcon = s.status === 'success' ? '\x1b[32m+\x1b[0m' : '\x1b[31mx\x1b[0m';
       const cost = s.costUsd !== undefined ? `$${s.costUsd.toFixed(2)}` : '   -';
       console.log(`  ${statusIcon} ${name.padEnd(nameWidth)} ${s.durationSeconds.toFixed(1).padStart(6)}s  ${cost}`);
     }

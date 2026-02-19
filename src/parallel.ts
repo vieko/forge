@@ -86,14 +86,14 @@ function createSpecDisplay(specFiles: string[]) {
           break;
         }
         case 'success':
-          lines.push(`\x1b[32m✓\x1b[0m ${padName} \x1b[32m${formatElapsed(s.duration! * 1000)}\x1b[0m`);
+          lines.push(`\x1b[32m+\x1b[0m ${padName} \x1b[32m${formatElapsed(s.duration! * 1000)}\x1b[0m`);
           break;
         case 'failed': {
           const errMax = Math.max(0, cols - prefixWidth - 10); // "failed" + spacing
           const errDetail = s.error && errMax > 5
             ? `  ${DIM}${s.error.substring(0, errMax)}${RESET}`
             : '';
-          lines.push(`\x1b[31m✗\x1b[0m ${padName} \x1b[31mfailed\x1b[0m${errDetail}`);
+          lines.push(`\x1b[31mx\x1b[0m ${padName} \x1b[31mfailed\x1b[0m${errDetail}`);
           break;
         }
       }
@@ -145,20 +145,123 @@ export function autoDetectConcurrency(): number {
   return Math.max(1, Math.min(memBased, cpuBased));
 }
 
+// ── Progress Tracker ─────────────────────────────────────────
+
+interface ProgressSpec {
+  name: string;
+  status: 'pending' | 'running' | 'success' | 'failed';
+  duration?: number;
+  cost?: number;
+}
+
+function createProgressTracker(specNames: string[], quiet?: boolean) {
+  const items: ProgressSpec[] = specNames.map(name => ({ name, status: 'pending' }));
+  const nameWidth = Math.max(30, ...specNames.map(n => n.length));
+
+  function formatLine(item: ProgressSpec): string {
+    const padName = item.name.padEnd(nameWidth);
+    switch (item.status) {
+      case 'pending':
+        return `  ${DIM}- ${padName}${RESET}`;
+      case 'running':
+        return `  ${CMD}> ${padName}${RESET}`;
+      case 'success': {
+        const dur = item.duration !== undefined ? `${item.duration.toFixed(1).padStart(6)}s` : '';
+        const cost = item.cost !== undefined ? `  $${item.cost.toFixed(2)}` : '';
+        return `  \x1b[32m+ ${padName}\x1b[0m ${dur}${cost}`;
+      }
+      case 'failed': {
+        const dur = item.duration !== undefined ? `${item.duration.toFixed(1).padStart(6)}s` : '';
+        const cost = item.cost !== undefined ? `  $${item.cost.toFixed(2)}` : '';
+        return `  \x1b[31mx ${padName}\x1b[0m ${dur}${cost}`;
+      }
+    }
+  }
+
+  function printCheckpoint(): void {
+    if (quiet) return;
+    console.log('');
+    for (const item of items) {
+      console.log(formatLine(item));
+    }
+    console.log('');
+  }
+
+  return {
+    /** Mark spec as running and print checkpoint with leading divider */
+    start(index: number): void {
+      items[index].status = 'running';
+      if (quiet) return;
+      console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
+      printCheckpoint();
+      console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
+    },
+    /** Mark spec as succeeded */
+    done(index: number, duration: number, cost?: number): void {
+      items[index].status = 'success';
+      items[index].duration = duration;
+      items[index].cost = cost;
+    },
+    /** Mark spec as failed */
+    fail(index: number, duration: number, cost?: number): void {
+      items[index].status = 'failed';
+      items[index].duration = duration;
+      items[index].cost = cost;
+    },
+    /** Print final checkpoint (no surrounding dividers — batch summary adds its own) */
+    printFinal(): void {
+      if (quiet) return;
+      console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+      console.log('');
+      for (const item of items) {
+        console.log(formatLine(item));
+      }
+      console.log('');
+    },
+    /** Bulk-update results from a parallel phase (for dependency-graph integration) */
+    applyResults(results: BatchResult[], specIndexMap: Map<string, number>): void {
+      for (const r of results) {
+        const idx = specIndexMap.get(r.spec);
+        if (idx === undefined) continue;
+        if (r.status === 'success') {
+          items[idx].status = 'success';
+          items[idx].duration = r.duration;
+          items[idx].cost = r.cost;
+        } else {
+          items[idx].status = 'failed';
+          items[idx].duration = r.duration;
+          items[idx].cost = r.cost;
+        }
+      }
+    },
+    /** Mark a set of specs as running (for parallel phases) */
+    markRunning(indices: number[]): void {
+      for (const idx of indices) {
+        items[idx].status = 'running';
+      }
+    },
+  };
+}
+
 // Run specs sequentially
 async function runSpecsSequential(
   specs: Array<{ name: string; path: string }>,
   options: ForgeOptions,
   runId: string,
   label?: string,
+  tracker?: ReturnType<typeof createProgressTracker>,
+  trackerIndices?: number[],
 ): Promise<BatchResult[]> {
   const results: BatchResult[] = [];
   const { quiet } = options;
+  const useTracker = tracker && trackerIndices && trackerIndices.length === specs.length;
 
   for (let i = 0; i < specs.length; i++) {
     const { name: specFile, path: specFilePath } = specs[i];
 
-    if (!quiet) {
+    if (useTracker) {
+      tracker.start(trackerIndices[i]);
+    } else if (!quiet) {
       console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
       console.log(`Running spec ${i + 1}/${specs.length}${label ? ` (${label})` : ''}: ${BOLD}${specFile}${RESET}`);
       console.log(`${DIM}${'─'.repeat(60)}${RESET}\n`);
@@ -177,7 +280,9 @@ async function runSpecsSequential(
       });
 
       const duration = (Date.now() - startTime) / 1000;
-      results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration });
+      const cost = result.costUsd;
+      results.push({ spec: specFile, status: 'success', cost, duration });
+      if (useTracker) tracker.done(trackerIndices[i], duration, cost);
     } catch (err) {
       const duration = (Date.now() - startTime) / 1000;
       const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
@@ -187,6 +292,7 @@ async function runSpecsSequential(
         cost,
         duration
       });
+      if (useTracker) tracker.fail(trackerIndices[i], duration, cost);
 
       if (!quiet) {
         console.error(`\nSpec ${specFile} failed:`, err instanceof Error ? err.message : err);
@@ -258,7 +364,7 @@ async function runSpecBatch(
   concurrency: number,
   runId: string,
   satisfiedDeps?: Set<string>,
-): Promise<BatchResult[]> {
+): Promise<{ results: BatchResult[]; hasTracker: boolean }> {
   const results: BatchResult[] = [];
   const { quiet, parallel, sequentialFirst = 0 } = options;
 
@@ -289,39 +395,53 @@ async function runSpecBatch(
   if (useDeps && parallel) {
     const levels = topoSort(specDeps);
 
-    if (!quiet) {
-      console.log(`${DIM}[dependency graph: ${levels.length} level(s)]${RESET}\n`);
-      for (let i = 0; i < levels.length; i++) {
-        const names = levels[i].specs.map(s => s.name).join(', ');
-        console.log(`  ${DIM}Level ${i + 1}:${RESET} ${names}`);
+    // Flatten all spec names across levels for the tracker
+    const allSpecNames: string[] = [];
+    const specIndexMap = new Map<string, number>();
+    for (const level of levels) {
+      for (const s of level.specs) {
+        specIndexMap.set(s.name, allSpecNames.length);
+        allSpecNames.push(s.name);
       }
-      console.log('');
+    }
+
+    const tracker = createProgressTracker(allSpecNames, quiet ?? false);
+
+    if (!quiet) {
+      console.log(`${DIM}[dependency graph: ${levels.length} level(s)]${RESET}`);
     }
 
     for (let i = 0; i < levels.length; i++) {
       const level = levels[i];
       const levelSpecs = level.specs.map(s => ({ name: s.name, path: s.path }));
+      const levelIndices = levelSpecs.map(s => specIndexMap.get(s.name)!);
 
       if (levelSpecs.length === 1) {
-        // Single spec in level — run sequentially (no spinner overhead)
+        // Single spec in level — run sequentially with tracker
         const levelResults = await runSpecsSequential(
           levelSpecs, options, runId,
           `level ${i + 1}/${levels.length}`,
+          tracker, levelIndices,
         );
         results.push(...levelResults);
       } else {
         // Multiple specs in level — run in parallel
+        tracker.markRunning(levelIndices);
         if (!quiet) {
           console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
           console.log(`Level ${i + 1}/${levels.length}: ${BOLD}${levelSpecs.length} specs${RESET} ${DIM}(parallel)${RESET}`);
           console.log(`${DIM}${'─'.repeat(60)}${RESET}\n`);
         }
         const levelResults = await runSpecsParallel(levelSpecs, options, concurrency, runId);
+        tracker.applyResults(levelResults, specIndexMap);
         results.push(...levelResults);
       }
     }
 
-    return results;
+    // Final checkpoint after all levels
+    tracker.printFinal();
+
+    return { results, hasTracker: true };
   }
 
   // Default behavior: sequential-first + parallel split
@@ -333,10 +453,17 @@ async function runSpecBatch(
     name, path: specFilePaths[seqCount + i],
   }));
 
+  // Create tracker for sequential-only batches (more than 1 spec)
+  const useSequentialTracker = !parallel && specFileNames.length > 1;
+  const tracker = useSequentialTracker
+    ? createProgressTracker(specFileNames, quiet ?? false)
+    : undefined;
+
   // Sequential phase
   if (seqSpecs.length > 0) {
     const label = parSpecs.length > 0 ? 'sequential' : undefined;
-    const seqResults = await runSpecsSequential(seqSpecs, options, runId, label);
+    const seqIndices = seqSpecs.map((_, i) => i);
+    const seqResults = await runSpecsSequential(seqSpecs, options, runId, label, tracker, tracker ? seqIndices : undefined);
     results.push(...seqResults);
   }
 
@@ -346,7 +473,12 @@ async function runSpecBatch(
     results.push(...parResults);
   }
 
-  return results;
+  // Final checkpoint for sequential-only batches
+  if (tracker) {
+    tracker.printFinal();
+  }
+
+  return { results, hasTracker: !!tracker };
 }
 
 // Find failed specs from latest batch in .forge/results/
@@ -413,12 +545,14 @@ async function findPendingSpecs(workingDir: string): Promise<string[]> {
 }
 
 // Print batch summary with cost tracking and next-step hint
+// When hasTracker is true, the progress tracker already printed per-spec results — skip the duplicate listing.
 function printBatchSummary(
   results: BatchResult[],
   wallClockDuration: number,
   parallel: boolean,
   quiet: boolean,
   specDir?: string,
+  hasTracker?: boolean,
 ): void {
   const totalSpecDuration = results.reduce((sum, r) => sum + r.duration, 0);
   const totalCost = results.reduce((sum, r) => sum + (r.cost || 0), 0);
@@ -426,15 +560,22 @@ function printBatchSummary(
   if (!quiet || parallel) {
     const successCount = results.filter(r => r.status === 'success').length;
     const allPassed = successCount === results.length;
-    console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
-    console.log(`${BOLD}SPEC BATCH SUMMARY${RESET}`);
-    console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
-    results.forEach(r => {
-      const icon = r.status === 'success' ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
-      const cost = r.cost !== undefined ? `$${r.cost.toFixed(2)}` : '   -';
-      console.log(`  ${icon} ${r.spec.padEnd(30)} ${r.duration.toFixed(1).padStart(6)}s  ${cost}`);
-    });
-    console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
+
+    if (hasTracker) {
+      // Tracker already printed per-spec results — just show aggregates
+      console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
+    } else {
+      console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+      console.log(`${BOLD}SPEC BATCH SUMMARY${RESET}`);
+      console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
+      results.forEach(r => {
+        const icon = r.status === 'success' ? '\x1b[32m+\x1b[0m' : '\x1b[31mx\x1b[0m';
+        const cost = r.cost !== undefined ? `$${r.cost.toFixed(2)}` : '   -';
+        console.log(`  ${icon} ${r.spec.padEnd(30)} ${r.duration.toFixed(1).padStart(6)}s  ${cost}`);
+      });
+      console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
+    }
+
     console.log(`  Wall-clock: ${BOLD}${wallClockDuration.toFixed(1)}s${RESET}`);
     if (parallel) {
       console.log(`  Spec total: ${totalSpecDuration.toFixed(1)}s`);
@@ -509,20 +650,18 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     const failedNames = failedPaths.map(p => path.basename(p));
     if (!quiet) {
       console.log(`Rerunning ${BOLD}${failedPaths.length}${RESET} failed spec(s) from batch ${DIM}${prevRunId.substring(0, 8)}${RESET}`);
-      if (!parallel) {
-        failedNames.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
-      }
       if (parallel) {
         console.log(`${DIM}[parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})]${RESET}`);
+      } else {
+        console.log(`${DIM}[sequential]${RESET}`);
       }
-      console.log('');
     }
 
     const wallClockStart = Date.now();
-    const results = await runSpecBatch(failedPaths, failedNames, options, concurrency, runId);
+    const { results, hasTracker } = await runSpecBatch(failedPaths, failedNames, options, concurrency, runId);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
-    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false);
+    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false, undefined, hasTracker);
     return;
   }
 
@@ -538,20 +677,18 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     const pendingNames = pendingPaths.map(p => path.basename(p));
     if (!quiet) {
       console.log(`Running ${BOLD}${pendingPaths.length}${RESET} pending spec(s)`);
-      if (!parallel) {
-        pendingNames.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
-      }
       if (parallel) {
         console.log(`${DIM}[parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})]${RESET}`);
+      } else {
+        console.log(`${DIM}[sequential]${RESET}`);
       }
-      console.log('');
     }
 
     const wallClockStart = Date.now();
-    const results = await runSpecBatch(pendingPaths, pendingNames, options, concurrency, runId);
+    const { results, hasTracker } = await runSpecBatch(pendingPaths, pendingNames, options, concurrency, runId);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
-    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false);
+    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false, undefined, hasTracker);
     return;
   }
 
@@ -604,24 +741,20 @@ export async function runForge(options: ForgeOptions): Promise<void> {
       if (skippedCount > 0) {
         console.log(`${DIM}[skipped ${skippedCount} already passed — use --force to re-run]${RESET}`);
       }
-      console.log(`${DIM}[${mode}]${RESET}\n`);
-      if (!parallel) {
-        specFiles.forEach((f, i) => console.log(`  ${DIM}${i + 1}.${RESET} ${f}`));
-        console.log('');
-      }
+      console.log(`${DIM}[${mode}]${RESET}`);
       if (parallel && sequentialFirst > 0) {
-        console.log(`Sequential-first: ${Math.min(sequentialFirst, specFiles.length)} spec(s) run before parallel phase\n`);
+        console.log(`\nSequential-first: ${Math.min(sequentialFirst, specFiles.length)} spec(s) run before parallel phase`);
       }
     }
 
     const specFilePaths = specFiles.map(f => path.join(resolvedDir, f));
 
     const wallClockStart = Date.now();
-    const results = await runSpecBatch(specFilePaths, specFiles, options, concurrency, runId, skippedNames);
+    const { results, hasTracker } = await runSpecBatch(specFilePaths, specFiles, options, concurrency, runId, skippedNames);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
     const displayDir = path.relative(workingDir, resolvedDir) || resolvedDir;
-    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false, displayDir);
+    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false, displayDir, hasTracker);
 
     return;
   }

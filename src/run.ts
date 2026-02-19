@@ -102,7 +102,8 @@ You decide the best approach. You may:
 - Break work into tasks if helpful
 - Use any tools available
 
-Focus on delivering working code that meets the acceptance criteria.`;
+Focus on delivering working code that meets the acceptance criteria.
+Do not use emojis in your output.`;
   }
 
   // Verification loop settings
