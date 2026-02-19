@@ -4,7 +4,7 @@ import path from 'path';
 import { resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
 import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
-import { withManifestLock, findOrCreateEntry, specKey, resolveSpecDir } from './specs.js';
+import { withManifestLock, findOrCreateEntry, specKey, resolveSpecDir, resolveSpecFile } from './specs.js';
 
 export async function runAudit(options: AuditOptions): Promise<void> {
   const { specDir, prompt, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false } = options;
@@ -26,17 +26,53 @@ export async function runAudit(options: AuditOptions): Promise<void> {
   });
   const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd } = resolved;
 
-  // Read all .md files from specDir (with shorthand resolution)
-  const resolvedSpecDir = await resolveSpecDir(specDir, workingDir) ?? path.resolve(specDir);
-  if (!quiet && resolvedSpecDir !== path.resolve(specDir)) {
-    console.log(`${DIM}[forge]${RESET} Resolved: ${specDir} → ${path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir}\n`);
-  }
+  // Detect whether argument is a file or directory (with shorthand resolution)
+  let resolvedSpecDir: string;
   let specFiles: string[];
-  try {
-    const files = await fs.readdir(resolvedSpecDir);
-    specFiles = files.filter(f => f.endsWith('.md')).sort();
-  } catch {
-    throw new Error(`Spec directory not found: ${resolvedSpecDir}`);
+  let singleFile = false;
+
+  // Try as file first (direct path or shorthand)
+  const directPath = path.resolve(workingDir, specDir);
+  let stat: Awaited<ReturnType<typeof fs.stat>> | null = null;
+  try { stat = await fs.stat(directPath); } catch {}
+
+  if (stat?.isFile() && directPath.endsWith('.md')) {
+    singleFile = true;
+    resolvedSpecDir = path.dirname(directPath);
+    specFiles = [path.basename(directPath)];
+  } else if (!stat) {
+    // Try shorthand resolution — file first, then directory
+    const resolvedFile = await resolveSpecFile(specDir, workingDir);
+    if (resolvedFile) {
+      singleFile = true;
+      resolvedSpecDir = path.dirname(resolvedFile);
+      specFiles = [path.basename(resolvedFile)];
+      if (!quiet) {
+        console.log(`${DIM}[forge]${RESET} Resolved: ${specDir} → ${path.relative(workingDir, resolvedFile) || resolvedFile}\n`);
+      }
+    } else {
+      const resolvedDir = await resolveSpecDir(specDir, workingDir) ?? directPath;
+      if (!quiet && resolvedDir !== directPath) {
+        console.log(`${DIM}[forge]${RESET} Resolved: ${specDir} → ${path.relative(workingDir, resolvedDir) || resolvedDir}\n`);
+      }
+      resolvedSpecDir = resolvedDir;
+      try {
+        const files = await fs.readdir(resolvedSpecDir);
+        specFiles = files.filter(f => f.endsWith('.md')).sort();
+      } catch {
+        throw new Error(`Spec path not found: ${resolvedSpecDir}`);
+      }
+    }
+  } else if (stat?.isDirectory()) {
+    resolvedSpecDir = directPath;
+    try {
+      const files = await fs.readdir(resolvedSpecDir);
+      specFiles = files.filter(f => f.endsWith('.md')).sort();
+    } catch {
+      throw new Error(`Spec directory not found: ${resolvedSpecDir}`);
+    }
+  } else {
+    throw new Error(`Not a spec file or directory: ${specDir}`);
   }
 
   if (specFiles.length === 0) {
@@ -54,7 +90,7 @@ export async function runAudit(options: AuditOptions): Promise<void> {
   // Resolve output directory (relative to workingDir, not process.cwd())
   const outputDir = options.outputDir
     ? path.resolve(workingDir, options.outputDir)
-    : path.join(resolvedSpecDir, 'audit');
+    : singleFile ? path.join(resolvedSpecDir, 'audit') : path.join(resolvedSpecDir, 'audit');
 
   // Warn if output dir is non-empty
   try {

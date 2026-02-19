@@ -67,7 +67,9 @@ Important flags:
 Reviews codebase against specs. Produces new spec files for remaining work — feed them back into `forge run --spec-dir`.
 
 ```bash
-forge audit specs/                              # Audit, output to specs/audit/
+forge audit specs/                              # Audit all specs in directory
+forge audit specs/auth.md                       # Audit a single spec file
+forge audit auth.md                             # Shorthand (resolves via manifest)
 forge audit specs/ "focus on auth module"       # With additional context
 forge audit specs/ -o ./remediation/            # Custom output dir
 forge audit specs/ -C ~/target-repo             # Different repo

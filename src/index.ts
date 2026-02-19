@@ -162,7 +162,7 @@ program
 program
   .command('audit')
   .description('Audit codebase against specs and produce new specs for remaining work')
-  .argument('<spec-dir>', 'Directory of spec files to audit against')
+  .argument('<spec-path>', 'Spec file or directory to audit against')
   .argument('[prompt]', 'Additional context for the audit')
   .option('-o, --output-dir <path>', 'Output directory for generated specs (default: <spec-dir>/audit/)')
   .option('-C, --cwd <path>', 'Working directory (target repo)')

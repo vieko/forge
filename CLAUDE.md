@@ -69,7 +69,9 @@ forge define "add rate limiting" -o specs/api/  # Custom output dir
 forge define "refactor database" -C ~/project   # Different repo
 
 # Audit codebase against specs
-forge audit specs/                              # Audit, output to specs/audit/
+forge audit specs/                              # Audit all specs in directory
+forge audit specs/auth.md                       # Audit a single spec file
+forge audit auth.md                             # Shorthand (resolves via manifest)
 forge audit specs/ -C ~/target-repo             # Audit a different repo
 forge audit specs/ -o ./remediation/            # Custom output directory
 forge audit specs/ "focus on auth module"       # With additional context
