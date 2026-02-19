@@ -1,9 +1,9 @@
-import type { ForgeOptions, ForgeResult } from './types.js';
+import type { ForgeOptions, ForgeResult, MonorepoContext } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { ForgeError, resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
 import { DIM, RESET, CMD, BOLD, printRunSummary } from './display.js';
-import { runVerification } from './verify.js';
+import { runVerification, detectMonorepo, determineAffectedPackages } from './verify.js';
 import { runQuery, streamLogAppend } from './core.js';
 import { withManifestLock, findOrCreateEntry, updateEntryStatus, specKey, pipeSpecId, resolveSpecSource } from './specs.js';
 
@@ -39,6 +39,23 @@ export async function runSingleSpec(options: ForgeOptions & { specContent?: stri
     } catch {
       throw new Error(`Spec file not found: ${specPath}`);
     }
+  }
+
+  // Detect monorepo and determine affected packages
+  let monorepoContext: MonorepoContext | null = null;
+  try {
+    monorepoContext = await detectMonorepo(workingDir);
+    if (monorepoContext) {
+      const affected = determineAffectedPackages(monorepoContext, specPath, finalSpecContent, workingDir);
+      monorepoContext = { ...monorepoContext, affected };
+      if (!quiet && affected.length > 0) {
+        console.log(`${DIM}[forge]${RESET} Monorepo (${monorepoContext.type}): scoping to ${affected.join(', ')}`);
+      } else if (!quiet && monorepoContext) {
+        console.log(`${DIM}[forge]${RESET} Monorepo (${monorepoContext.type}): no affected packages detected, using unscoped verification`);
+      }
+    }
+  } catch {
+    // Monorepo detection failure should never block execution
   }
 
   // Build the prompt
@@ -122,6 +139,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
       sessionExtra: { prompt, ...(isFork && { forkedFrom: options.fork }) },
       resume: effectiveResume,
       forkSession: isFork,
+      monorepoContext,
     });
 
     const endTime = new Date();
@@ -131,7 +149,7 @@ Focus on delivering working code that meets the acceptance criteria.`;
     if (!dryRun && !planOnly) {
       if (!quiet) console.log(`${DIM}[forge]${RESET} Running verification...`);
       if (qr.logPath) streamLogAppend(qr.logPath, 'Verify: running verification...');
-      const verification = await runVerification(workingDir, quiet, config.verify);
+      const verification = await runVerification(workingDir, quiet, config.verify, monorepoContext);
 
       if (!verification.passed) {
         verifyAttempt++;

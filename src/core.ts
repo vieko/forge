@@ -1,9 +1,10 @@
 import { query as sdkQuery, type HookCallback } from '@anthropic-ai/claude-agent-sdk';
-import type { ForgeResult } from './types.js';
+import type { ForgeResult, MonorepoContext } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { ForgeError, isTransientError, sleep, saveResult } from './utils.js';
 import { DIM, RESET, CMD, AGENT_VERBS, createInlineSpinner, formatProgress } from './display.js';
+import { rewriteBuildCommand } from './verify.js';
 
 // What callers pass to runQuery()
 export interface QueryConfig {
@@ -20,6 +21,8 @@ export interface QueryConfig {
   sessionExtra?: Record<string, unknown>;
   resume?: string;
   forkSession?: boolean;
+  /** Monorepo context for scoped build command rewriting */
+  monorepoContext?: MonorepoContext | null;
 }
 
 // What runQuery() returns on success
@@ -82,7 +85,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
     prompt, workingDir, model: modelName, maxTurns, maxBudgetUsd,
     verbose, quiet, silent, onActivity,
     auditLogExtra = {}, sessionExtra = {},
-    resume, forkSession,
+    resume, forkSession, monorepoContext,
   } = config;
 
   const startTime = new Date();
@@ -122,6 +125,19 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
           },
         };
       }
+    }
+    return {};
+  };
+
+  // Hook: Monorepo build command scoping — rewrites unscoped build/test commands
+  const monorepoRewriter: HookCallback = async (input) => {
+    if (!monorepoContext || monorepoContext.affected.length === 0) return {};
+    const command = ((input as Record<string, unknown>).tool_input as Record<string, unknown>)?.command as string || '';
+    const rewritten = rewriteBuildCommand(command, monorepoContext);
+    if (rewritten && rewritten !== command) {
+      if (!quiet) console.log(`${DIM}[forge]${RESET} Scoped: ${command} → ${rewritten}`);
+      // Replace the command in the tool input
+      ((input as Record<string, unknown>).tool_input as Record<string, unknown>).command = rewritten;
     }
     return {};
   };
@@ -184,7 +200,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
           permissionMode: 'default',
           includePartialMessages: true,
           hooks: {
-            PreToolUse: [{ matcher: 'Bash', hooks: [bashGuardrail] }],
+            PreToolUse: [{ matcher: 'Bash', hooks: [bashGuardrail, monorepoRewriter] }],
             PostToolUse: [{ hooks: [auditLog] }],
             Stop: [{ hooks: [stopHandler] }],
           },

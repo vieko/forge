@@ -158,6 +158,21 @@ export interface SpecManifest {
   specs: SpecEntry[];
 }
 
+// ── Monorepo Scoped Verification ─────────────────────────────
+
+/** Monorepo tooling type. */
+export type MonorepoType = 'pnpm' | 'turbo' | 'nx';
+
+/** Monorepo context for scoped verification and build command rewriting. */
+export interface MonorepoContext {
+  /** Which monorepo tool was detected */
+  type: MonorepoType;
+  /** Mapping of workspace directory (relative to root) to package name */
+  packages: Map<string, string>;
+  /** Package names relevant to the current spec */
+  affected: string[];
+}
+
 /**
  * Options for running a review.
  */
