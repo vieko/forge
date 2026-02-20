@@ -175,6 +175,7 @@ src/
 14. **Spec lifecycle** — `.forge/specs.json` manifest tracks every spec from registration through execution; `forge specs` shows status, run history, cost, and detects orphaned/untracked specs
 15. **Resolve specs** — `forge specs --resolve` marks specs as passed without running (for manually completed work)
 16. **Check specs** — `forge specs --check` uses a Sonnet agent to triage pending specs against the codebase and auto-resolve implemented ones
+17. **Watch auto-follow** — `forge watch` auto-follows to next session during sequential batch runs; renders spec divider headers (`Spec 1/3: name.md`) between sessions
 
 ## Spec Naming
 

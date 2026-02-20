@@ -21,6 +21,8 @@ export interface QueryConfig {
   sessionExtra?: Record<string, unknown>;
   resume?: string;
   forkSession?: boolean;
+  /** Spec label for batch progress (e.g. "1/3") */
+  specLabel?: string;
   /** Monorepo context for scoped build command rewriting */
   monorepoContext?: MonorepoContext | null;
 }
@@ -85,7 +87,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
     prompt, workingDir, model: modelName, maxTurns, maxBudgetUsd,
     verbose, quiet, silent, onActivity,
     auditLogExtra = {}, sessionExtra = {},
-    resume, forkSession, monorepoContext,
+    resume, forkSession, specLabel, monorepoContext,
   } = config;
 
   const startTime = new Date();
@@ -234,8 +236,10 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
                   logPath: logFilePath,
                 };
                 // Spec metadata header
-                const specLabel = auditLogExtra.spec ? `, spec: ${auditLogExtra.spec}` : '';
-                streamLog.current.write(`[${new Date().toISOString()}] Session started (model: ${modelName}${specLabel})`);
+                const specTag = auditLogExtra.spec
+                  ? `, spec: ${auditLogExtra.spec}${specLabel ? ` [${specLabel}]` : ''}`
+                  : '';
+                streamLog.current.write(`[${new Date().toISOString()}] Session started (model: ${modelName}${specTag})`);
               }).catch(() => {});
             }).catch(() => {});
           }

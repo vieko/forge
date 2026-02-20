@@ -15,8 +15,8 @@ export interface BatchResult {
   duration: number;
 }
 
-export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string }): Promise<ForgeResult> {
-  const { prompt, specPath, specContent, cwd, model, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId } = options;
+export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string }): Promise<ForgeResult> {
+  const { prompt, specPath, specContent, cwd, model, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel } = options;
   const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
 
   // Resolve and validate working directory
@@ -140,6 +140,7 @@ Do not use emojis in your output.`;
       sessionExtra: { prompt, ...(isFork && { forkedFrom: options.fork }) },
       resume: effectiveResume,
       forkSession: isFork,
+      specLabel: _specLabel,
       monorepoContext,
     });
 
@@ -154,7 +155,7 @@ Do not use emojis in your output.`;
 
       if (!verification.passed) {
         verifyAttempt++;
-        if (qr.logPath) streamLogAppend(qr.logPath, `Verify: \u2717 failed (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
+        if (qr.logPath) streamLogAppend(qr.logPath, `Verify: x failed (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
         if (verifyAttempt < maxVerifyAttempts) {
           if (!quiet) {
             console.log(`\n${DIM}[forge]${RESET} \x1b[33mVerification failed\x1b[0m (attempt ${verifyAttempt}/${maxVerifyAttempts})`);
@@ -244,7 +245,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
         }
       } else {
         if (!quiet) console.log(`${DIM}[forge]${RESET} \x1b[32mVerification passed!\x1b[0m\n`);
-        if (qr.logPath) streamLogAppend(qr.logPath, 'Verify: \u2713 passed');
+        if (qr.logPath) streamLogAppend(qr.logPath, 'Verify: + passed');
       }
     }
 

@@ -9,7 +9,7 @@ description: >-
   "forge watch", "forge status", "rerun failed", "resolve spec", "delegate this to forge".
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.4.0
+  version: 3.5.0
   author: vieko
 ---
 
@@ -99,11 +99,12 @@ forge review -C ~/other-repo                    # Different repo
 
 ### forge watch
 
-Live-tail session logs with colored output. Auto-exits when session completes.
+Live-tail session logs with colored output. Auto-follows to next session during batch runs; exits after final session or 60s timeout.
 
 ```bash
-forge watch                                     # Watch latest session
-forge watch <session-id>                        # Watch specific session
+forge watch                                     # Watch latest session (auto-follows batch)
+forge watch <session-id>                        # Watch specific session (no auto-follow)
+forge watch -C ~/other-repo                     # Watch in different repo
 ```
 
 ### forge status

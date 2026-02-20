@@ -277,6 +277,7 @@ async function runSpecsSequential(
         specContent,
         specDir: undefined,
         _runId: runId,
+        _specLabel: `${i + 1}/${specs.length}`,
       });
 
       const duration = (Date.now() - startTime) / 1000;
