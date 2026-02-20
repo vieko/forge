@@ -9,7 +9,7 @@ description: >-
   "forge watch", "forge status", "rerun failed", "resolve spec", "delegate this to forge".
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.5.1
+  version: 3.6.0
   author: vieko
 ---
 
@@ -51,6 +51,7 @@ Important flags:
 - `-S, --spec-dir <path>` -- Directory of specs (shorthand resolves via known dirs). Runs each `.md` separately; use `-P` for parallel. Already-passed specs are skipped.
 - `-P, --parallel` -- Run specs concurrently (auto-tuned concurrency).
 - `-F, --force` -- Re-run all specs including already passed.
+- `-B, --branch <name>` -- Run in an isolated git worktree on the named branch. Auto-commits on success, cleans up after.
 - `--concurrency <n>` -- Override auto-detected parallelism (default: freeMem/2GB, capped at CPUs).
 - `--sequential-first <n>` -- Run first N specs sequentially, then parallelize.
 - `-C, --cwd <path>` -- Target repo directory.
