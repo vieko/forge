@@ -15,12 +15,15 @@ export interface BatchResult {
   duration: number;
 }
 
-export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string }): Promise<ForgeResult> {
-  const { prompt, specPath, specContent, cwd, model, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel } = options;
+export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string; _resultDir?: string }): Promise<ForgeResult> {
+  const { prompt, specPath, specContent, cwd, model, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir } = options;
   const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
 
   // Resolve and validate working directory
   const workingDir = await resolveWorkingDir(cwd);
+
+  // Result persistence directory: original repo when running in a worktree, otherwise workingDir
+  const resultDir = _resultDir || workingDir;
 
   // Load config and merge with defaults (CLI flags override config)
   const resolved = await resolveConfig(workingDir, {
@@ -222,17 +225,17 @@ ${verification.errors}
 forge run --resume ${qr.sessionId} "fix verification errors"
 \`\`\``;
 
-          const errorResultsDir = await saveResult(workingDir, forgeResult, errorResultText);
+          const errorResultsDir = await saveResult(resultDir, forgeResult, errorResultText);
 
           // Update spec manifest on failure
-          const failSpecId = specPath ? specKey(specPath, workingDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
+          const failSpecId = specPath ? specKey(specPath, resultDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
           if (failSpecId) {
-            await withManifestLock(workingDir, (manifest) => {
+            await withManifestLock(resultDir, (manifest) => {
               const entry = findOrCreateEntry(manifest, failSpecId, resolveSpecSource(finalSpecContent, specPath));
               entry.runs.push({
                 runId: _runId || forgeResult.startedAt,
                 timestamp: forgeResult.startedAt,
-                resultPath: path.relative(workingDir, errorResultsDir),
+                resultPath: path.relative(resultDir, errorResultsDir),
                 status: 'failed',
                 costUsd: forgeResult.costUsd,
                 durationSeconds: forgeResult.durationSeconds,
@@ -265,17 +268,17 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       runId: _runId
     };
 
-    const resultsDir = await saveResult(workingDir, forgeResult, qr.resultText);
+    const resultsDir = await saveResult(resultDir, forgeResult, qr.resultText);
 
     // Update spec manifest on success
-    const successSpecId = specPath ? specKey(specPath, workingDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
+    const successSpecId = specPath ? specKey(specPath, resultDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
     if (successSpecId) {
-      await withManifestLock(workingDir, (manifest) => {
+      await withManifestLock(resultDir, (manifest) => {
         const entry = findOrCreateEntry(manifest, successSpecId, resolveSpecSource(finalSpecContent, specPath));
         entry.runs.push({
           runId: _runId || forgeResult.startedAt,
           timestamp: forgeResult.startedAt,
-          resultPath: path.relative(workingDir, resultsDir),
+          resultPath: path.relative(resultDir, resultsDir),
           status: 'passed',
           costUsd: forgeResult.costUsd,
           durationSeconds: forgeResult.durationSeconds,

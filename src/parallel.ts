@@ -2,7 +2,7 @@ import type { ForgeOptions, ForgeResult } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
-import { ForgeError } from './utils.js';
+import { ForgeError, execAsync, createWorktree, commitWorktree, cleanupWorktree } from './utils.js';
 import { DIM, RESET, BOLD, CMD, AGENT_VERBS, SPINNER_FRAMES, formatElapsed, showBanner } from './display.js';
 import { runSingleSpec, type BatchResult } from './run.js';
 import { loadSpecDeps, topoSort, hasDependencies, type SpecDep, type DepLevel } from './deps.js';
@@ -243,10 +243,13 @@ function createProgressTracker(specNames: string[], quiet?: boolean) {
   };
 }
 
+// Internal options type: ForgeOptions + worktree result dir
+type RunOptions = ForgeOptions & { _resultDir?: string };
+
 // Run specs sequentially
 async function runSpecsSequential(
   specs: Array<{ name: string; path: string }>,
-  options: ForgeOptions,
+  options: RunOptions,
   runId: string,
   label?: string,
   tracker?: ReturnType<typeof createProgressTracker>,
@@ -308,7 +311,7 @@ async function runSpecsSequential(
 // Run specs in parallel with a spinner display
 async function runSpecsParallel(
   specs: Array<{ name: string; path: string }>,
-  options: ForgeOptions,
+  options: RunOptions,
   concurrency: number,
   runId: string,
 ): Promise<BatchResult[]> {
@@ -361,7 +364,7 @@ async function runSpecsParallel(
 async function runSpecBatch(
   specFilePaths: string[],
   specFileNames: string[],
-  options: ForgeOptions,
+  options: RunOptions,
   concurrency: number,
   runId: string,
   satisfiedDeps?: Set<string>,
@@ -382,7 +385,8 @@ async function runSpecBatch(
   const useDeps = hasDependencies(specDeps);
 
   // Register all specs in the manifest as 'running' before execution
-  const batchWorkingDir = await resolveWorkingDir(options.cwd);
+  // Use _resultDir (original repo) for manifest when running in a worktree
+  const batchWorkingDir = options._resultDir || await resolveWorkingDir(options.cwd);
   await withManifestLock(batchWorkingDir, (manifest) => {
     for (const specFilePath of specFilePaths) {
       const key = specKey(specFilePath, batchWorkingDir);
@@ -624,7 +628,7 @@ export async function filterPassedSpecs(
 
 // Main entry point - handles single spec or spec directory
 export async function runForge(options: ForgeOptions): Promise<void> {
-  const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed, pendingOnly, force } = options;
+  const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed, pendingOnly, force, branch } = options;
 
   if (!quiet) {
     showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS');
@@ -632,6 +636,80 @@ export async function runForge(options: ForgeOptions): Promise<void> {
 
   // Resolve working directory early — used by multiple code paths
   const workingDir = await resolveWorkingDir(options.cwd);
+
+  // ── Branch isolation via git worktree ──────────────────────
+  let worktreePath: string | undefined;
+  let originalRepoDir: string | undefined;
+
+  if (branch) {
+    worktreePath = await createWorktree(workingDir, branch);
+    originalRepoDir = workingDir;
+
+    if (!quiet) {
+      console.log(`${DIM}[branch: ${branch}]${RESET} -> ${worktreePath}`);
+      console.log('');
+    }
+
+    // Override cwd so all downstream code works in the worktree
+    options = { ...options, cwd: worktreePath };
+  }
+
+  // When in worktree mode, results/manifest persist to the original repo
+  const resultDir = originalRepoDir || workingDir;
+
+  // Internal option: pass result dir through to runSingleSpec and runSpecBatch
+  const runOptions: ForgeOptions & { _resultDir?: string } = originalRepoDir
+    ? { ...options, _resultDir: originalRepoDir }
+    : options;
+
+  try {
+    const { anyPassed } = await runForgeInner(runOptions, workingDir, resultDir, quiet, parallel, sequentialFirst, rerunFailed, pendingOnly, force);
+
+    // Auto-commit on branch — skip if all specs failed
+    if (worktreePath && originalRepoDir) {
+      if (anyPassed) {
+        const committed = await commitWorktree(worktreePath, branch!);
+        if (!quiet) {
+          if (committed) {
+            console.log(`\n${DIM}[forge]${RESET} Committed changes to branch ${BOLD}${branch}${RESET}`);
+          } else {
+            console.log(`\n${DIM}[forge]${RESET} No changes to commit on branch ${BOLD}${branch}${RESET}`);
+          }
+        }
+      } else if (!quiet) {
+        console.log(`\n${DIM}[forge]${RESET} All specs failed — skipping commit on branch ${BOLD}${branch}${RESET}`);
+      }
+    }
+  } catch (err) {
+    // Single spec failure or pre-execution error — don't commit broken state
+    throw err;
+  } finally {
+    // Always clean up the worktree
+    if (worktreePath && originalRepoDir) {
+      await cleanupWorktree(worktreePath, originalRepoDir);
+      if (!quiet) {
+        console.log(`${DIM}[forge]${RESET} Cleaned up worktree for branch ${BOLD}${branch}${RESET}`);
+      }
+    }
+  }
+}
+
+// Inner implementation of runForge — separated to allow worktree wrapping
+async function runForgeInner(
+  options: RunOptions,
+  workingDir: string,
+  resultDir: string,
+  quiet: boolean | undefined,
+  parallel: boolean | undefined,
+  sequentialFirst: number,
+  rerunFailed: boolean | undefined,
+  pendingOnly: boolean | undefined,
+  force: boolean | undefined,
+): Promise<{ anyPassed: boolean }> {
+  const { specDir, specPath } = options;
+
+  // Re-resolve working dir since cwd may have been overridden for worktree
+  const effectiveWorkingDir = await resolveWorkingDir(options.cwd);
 
   // Resolve concurrency: use provided value or auto-detect
   const concurrency = options.concurrency ?? autoDetectConcurrency();
@@ -641,11 +719,11 @@ export async function runForge(options: ForgeOptions): Promise<void> {
 
   // Rerun failed specs from latest batch
   if (rerunFailed) {
-    const { runId: prevRunId, specPaths: failedPaths } = await findFailedSpecs(workingDir);
+    const { runId: prevRunId, specPaths: failedPaths } = await findFailedSpecs(resultDir);
 
     if (failedPaths.length === 0) {
       console.log('No failed specs found in latest batch. All passed!');
-      return;
+      return { anyPassed: true };
     }
 
     const failedNames = failedPaths.map(p => path.basename(p));
@@ -663,16 +741,16 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
     printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false, undefined, hasTracker);
-    return;
+    return { anyPassed: results.some(r => r.status === 'success') };
   }
 
   // Run only pending specs from the manifest
   if (pendingOnly) {
-    const pendingPaths = await findPendingSpecs(workingDir);
+    const pendingPaths = await findPendingSpecs(resultDir);
 
     if (pendingPaths.length === 0) {
       console.log('No pending specs found in manifest. All done!');
-      return;
+      return { anyPassed: true };
     }
 
     const pendingNames = pendingPaths.map(p => path.basename(p));
@@ -690,14 +768,14 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
     printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false, undefined, hasTracker);
-    return;
+    return { anyPassed: results.some(r => r.status === 'success') };
   }
 
   // If spec directory provided, run each spec
   if (specDir) {
-    const resolvedDir = await resolveSpecDir(specDir, workingDir) ?? path.resolve(specDir);
+    const resolvedDir = await resolveSpecDir(specDir, effectiveWorkingDir) ?? path.resolve(specDir);
     if (!quiet && resolvedDir !== path.resolve(specDir)) {
-      console.log(`${DIM}[forge]${RESET} Resolved: ${specDir} → ${path.relative(workingDir, resolvedDir) || resolvedDir}\n`);
+      console.log(`${DIM}[forge]${RESET} Resolved: ${specDir} → ${path.relative(effectiveWorkingDir, resolvedDir) || resolvedDir}\n`);
     }
 
     let files: string[];
@@ -723,7 +801,7 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     let skippedCount = 0;
     let skippedNames = new Set<string>();
     if (!force) {
-      const filtered = await filterPassedSpecs(allSpecFiles, resolvedDir, workingDir);
+      const filtered = await filterPassedSpecs(allSpecFiles, resolvedDir, resultDir);
       specFiles = filtered.remaining;
       skippedCount = filtered.skipped;
       skippedNames = filtered.skippedNames;
@@ -731,7 +809,7 @@ export async function runForge(options: ForgeOptions): Promise<void> {
 
     if (specFiles.length === 0) {
       console.log(`All ${allSpecFiles.length} specs already passed. Use ${BOLD}--force${RESET} to re-run.`);
-      return;
+      return { anyPassed: true };
     }
 
     if (!quiet) {
@@ -754,22 +832,22 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     const { results, hasTracker } = await runSpecBatch(specFilePaths, specFiles, options, concurrency, runId, skippedNames);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
-    const displayDir = path.relative(workingDir, resolvedDir) || resolvedDir;
+    const displayDir = path.relative(effectiveWorkingDir, resolvedDir) || resolvedDir;
     printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false, displayDir, hasTracker);
 
-    return;
+    return { anyPassed: results.some(r => r.status === 'success') };
   }
 
   // Auto-detect: if prompt looks like a file path to an existing .md file, treat as --spec
   const effectiveOptions = { ...options };
   if (!effectiveOptions.specPath && !effectiveOptions.specDir
       && effectiveOptions.prompt.endsWith('.md') && !effectiveOptions.prompt.includes(' ')) {
-    const resolved = await resolveSpecFile(effectiveOptions.prompt, workingDir);
+    const resolved = await resolveSpecFile(effectiveOptions.prompt, effectiveWorkingDir);
     if (resolved) {
       effectiveOptions.specPath = resolved;
-      const display = resolved !== path.resolve(workingDir, effectiveOptions.prompt)
-        ? `${effectiveOptions.prompt} → ${path.relative(workingDir, resolved)}`
-        : path.relative(workingDir, resolved) || resolved;
+      const display = resolved !== path.resolve(effectiveWorkingDir, effectiveOptions.prompt)
+        ? `${effectiveOptions.prompt} → ${path.relative(effectiveWorkingDir, resolved)}`
+        : path.relative(effectiveWorkingDir, resolved) || resolved;
       effectiveOptions.prompt = 'implement this specification';
       if (!quiet) {
         console.log(`${DIM}[forge]${RESET} Detected spec file: ${DIM}${display}${RESET}\n`);
@@ -782,16 +860,17 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     try {
       await fs.access(effectiveOptions.specPath);
     } catch {
-      const resolved = await resolveSpecFile(effectiveOptions.specPath, workingDir);
+      const resolved = await resolveSpecFile(effectiveOptions.specPath, effectiveWorkingDir);
       if (resolved) {
         if (!quiet) {
-          console.log(`${DIM}[forge]${RESET} Resolved: ${effectiveOptions.specPath} → ${path.relative(workingDir, resolved) || resolved}\n`);
+          console.log(`${DIM}[forge]${RESET} Resolved: ${effectiveOptions.specPath} → ${path.relative(effectiveWorkingDir, resolved) || resolved}\n`);
         }
         effectiveOptions.specPath = resolved;
       }
     }
   }
 
-  // Single spec or no spec - run directly
+  // Single spec or no spec - run directly (throws on failure)
   await runSingleSpec({ ...effectiveOptions, _runId: runId });
+  return { anyPassed: true };
 }

@@ -71,6 +71,7 @@ program
   .option('--rerun-failed', 'Rerun only failed specs from latest batch')
   .option('--pending', 'Run only pending specs from the manifest')
   .option('-F, --force', 'Re-run all specs including already passed')
+  .option('-B, --branch <name>', 'Run in an isolated git worktree on the named branch')
   .option('-w, --watch', 'Open a tmux pane with live session logs')
   .action(async (prompt: string, options: {
     spec?: string;
@@ -91,6 +92,7 @@ program
     rerunFailed?: boolean;
     pending?: boolean;
     force?: boolean;
+    branch?: string;
     watch?: boolean;
   }) => {
     validateSession(options.resume, options.fork);
@@ -133,6 +135,7 @@ program
         rerunFailed: options.rerunFailed,
         pendingOnly: options.pending,
         force: options.force,
+        branch: options.branch,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);

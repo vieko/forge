@@ -40,6 +40,8 @@ export interface ForgeOptions {
   pendingOnly?: boolean;
   /** Force re-run of passed specs (skip manifest filtering) */
   force?: boolean;
+  /** Run in an isolated git worktree on the named branch */
+  branch?: string;
 }
 
 /**
