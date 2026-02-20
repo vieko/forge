@@ -301,6 +301,12 @@ forge run --resume ${qr.sessionId} "fix verification errors"
         console.log(`  Resume:   ${CMD}forge run --resume ${qr.sessionId} "continue"${RESET}`);
         console.log(`  Fork:     ${CMD}forge run --fork ${qr.sessionId} "try different approach"${RESET}`);
       }
+
+      // Next-step hint for spec runs
+      if (specPath && !dryRun && !planOnly) {
+        console.log(`\n  ${DIM}Next step:${RESET}`);
+        console.log(`    forge audit ${path.basename(specPath)} "verify implementation"`);
+      }
     }
 
     // Dry run: show cost estimates
