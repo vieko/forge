@@ -46,8 +46,8 @@ export const AGENT_VERBS = [
   'Alloying',
 ];
 
-// Braille spinner frames for inline and multi-line displays
-export const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+// ASCII spinner frames for inline and multi-line displays
+export const SPINNER_FRAMES = ['|', '/', '-', '\\'];
 
 // Single-line spinner that overwrites itself in place
 // prefix: fixed left portion (e.g. "[forge]"), frame renders after it
