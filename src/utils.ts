@@ -179,7 +179,7 @@ export async function commitWorktree(worktreePath: string, branch: string): Prom
     return false;
   }
 
-  await execAsync('git add -A', { cwd: worktreePath });
+  await execAsync('git add -A -- . ":!.forge"', { cwd: worktreePath });
   const message = `forge: branch isolation results on ${branch}`;
   await execAsync(`git commit -m "${message}"`, { cwd: worktreePath });
   return true;

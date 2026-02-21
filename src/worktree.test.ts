@@ -144,6 +144,20 @@ describe('commitWorktree', () => {
     expect(stdout).toContain('untracked.txt');
     expect(stdout).toContain('src/index.ts');
   });
+
+  test('excludes .forge/ directory from commit', async () => {
+    await fs.writeFile(path.join(wtPath, 'real-change.ts'), 'export const y = 2;\n');
+    await fs.mkdir(path.join(wtPath, '.forge'), { recursive: true });
+    await fs.writeFile(path.join(wtPath, '.forge', 'audit.jsonl'), '{"tool":"bash"}\n');
+    await fs.writeFile(path.join(wtPath, '.forge', 'latest-session.json'), '{"id":"test"}\n');
+
+    const committed = await commitWorktree(wtPath, 'commit-test');
+    expect(committed).toBe(true);
+
+    const { stdout } = await execAsync('git show --name-only --format=""', { cwd: wtPath });
+    expect(stdout).toContain('real-change.ts');
+    expect(stdout).not.toContain('.forge');
+  });
 });
 
 // ── cleanupWorktree ─────────────────────────────────────────
