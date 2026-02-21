@@ -775,7 +775,7 @@ async function runForgeInner(
   if (specDir) {
     const resolvedDir = await resolveSpecDir(specDir, effectiveWorkingDir) ?? path.resolve(specDir);
     if (!quiet && resolvedDir !== path.resolve(specDir)) {
-      console.log(`${DIM}[forge]${RESET} Resolved: ${specDir} → ${path.relative(effectiveWorkingDir, resolvedDir) || resolvedDir}\n`);
+      console.log(`${DIM}[forge]${RESET} Resolved: ${specDir} → ${path.relative(resultDir, resolvedDir) || resolvedDir}\n`);
     }
 
     let files: string[];
@@ -832,7 +832,7 @@ async function runForgeInner(
     const { results, hasTracker } = await runSpecBatch(specFilePaths, specFiles, options, concurrency, runId, skippedNames);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
-    const displayDir = path.relative(effectiveWorkingDir, resolvedDir) || resolvedDir;
+    const displayDir = path.relative(resultDir, resolvedDir) || resolvedDir;
     printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false, displayDir, hasTracker);
 
     return { anyPassed: results.some(r => r.status === 'success') };
@@ -846,8 +846,8 @@ async function runForgeInner(
     if (resolved) {
       effectiveOptions.specPath = resolved;
       const display = resolved !== path.resolve(effectiveWorkingDir, effectiveOptions.prompt)
-        ? `${effectiveOptions.prompt} → ${path.relative(effectiveWorkingDir, resolved)}`
-        : path.relative(effectiveWorkingDir, resolved) || resolved;
+        ? `${effectiveOptions.prompt} → ${path.relative(resultDir, resolved)}`
+        : path.relative(resultDir, resolved) || resolved;
       effectiveOptions.prompt = 'implement this specification';
       if (!quiet) {
         console.log(`${DIM}[forge]${RESET} Detected spec file: ${DIM}${display}${RESET}\n`);
@@ -863,7 +863,7 @@ async function runForgeInner(
       const resolved = await resolveSpecFile(effectiveOptions.specPath, effectiveWorkingDir);
       if (resolved) {
         if (!quiet) {
-          console.log(`${DIM}[forge]${RESET} Resolved: ${effectiveOptions.specPath} → ${path.relative(effectiveWorkingDir, resolved) || resolved}\n`);
+          console.log(`${DIM}[forge]${RESET} Resolved: ${effectiveOptions.specPath} → ${path.relative(resultDir, resolved) || resolved}\n`);
         }
         effectiveOptions.specPath = resolved;
       }
