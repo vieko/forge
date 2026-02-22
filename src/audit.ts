@@ -4,7 +4,7 @@ import path from 'path';
 import { resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
 import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
-import { withManifestLock, findOrCreateEntry, specKey, resolveSpecDir, resolveSpecFile } from './specs.js';
+import { withManifestLock, findOrCreateEntry, specKey, resolveSpecDir, resolveSpecFile, resolveSpecSource } from './specs.js';
 
 export async function runAudit(options: AuditOptions): Promise<void> {
   const { specDir, prompt, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false } = options;
@@ -86,6 +86,20 @@ export async function runAudit(options: AuditOptions): Promise<void> {
     specContents.push(`### ${file}\n\n${content}`);
   }
   const allSpecContents = specContents.join('\n\n---\n\n');
+
+  // Auto-register input specs in the manifest
+  await withManifestLock(workingDir, (manifest) => {
+    const tracked = new Set(manifest.specs.map(e => e.spec));
+    for (let i = 0; i < specFiles.length; i++) {
+      const absPath = path.join(resolvedSpecDir, specFiles[i]);
+      const key = specKey(absPath, workingDir);
+      if (!tracked.has(key)) {
+        // Content already read above — extract it (strip the "### filename\n\n" header)
+        const rawContent = specContents[i].replace(/^### .+\n\n/, '');
+        findOrCreateEntry(manifest, key, resolveSpecSource(rawContent, absPath));
+      }
+    }
+  });
 
   // Resolve output directory (relative to workingDir, not process.cwd())
   const outputDir = options.outputDir

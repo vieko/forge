@@ -6,7 +6,7 @@ import { ForgeError, execAsync, createWorktree, commitWorktree, cleanupWorktree 
 import { DIM, RESET, BOLD, CMD, AGENT_VERBS, SPINNER_FRAMES, formatElapsed, showBanner } from './display.js';
 import { runSingleSpec, type BatchResult } from './run.js';
 import { loadSpecDeps, topoSort, hasDependencies, type SpecDep, type DepLevel } from './deps.js';
-import { withManifestLock, findOrCreateEntry, specKey, loadManifest, resolveSpecFile, resolveSpecDir } from './specs.js';
+import { withManifestLock, findOrCreateEntry, specKey, loadManifest, resolveSpecFile, resolveSpecDir, resolveSpecSource } from './specs.js';
 import { resolveWorkingDir } from './utils.js';
 
 // Worker pool: runs tasks with bounded concurrency
@@ -796,6 +796,20 @@ async function runForgeInner(
       throw new Error(`No .md files found in ${resolvedDir}`);
     }
 
+    // Auto-register discovered specs in the manifest
+    await withManifestLock(resultDir, async (manifest) => {
+      const tracked = new Set(manifest.specs.map(e => e.spec));
+      for (const f of allSpecFiles) {
+        const absPath = path.join(resolvedDir, f);
+        const key = specKey(absPath, resultDir);
+        if (!tracked.has(key)) {
+          let content: string | undefined;
+          try { content = await fs.readFile(absPath, 'utf-8'); } catch {}
+          findOrCreateEntry(manifest, key, resolveSpecSource(content, absPath));
+        }
+      }
+    });
+
     // Filter out already-passed specs unless --force
     let specFiles = allSpecFiles;
     let skippedCount = 0;
@@ -868,6 +882,19 @@ async function runForgeInner(
         effectiveOptions.specPath = resolved;
       }
     }
+  }
+
+  // Auto-register single spec in manifest before running
+  if (effectiveOptions.specPath) {
+    const absSpec = path.resolve(effectiveOptions.specPath);
+    await withManifestLock(resultDir, async (manifest) => {
+      const key = specKey(absSpec, resultDir);
+      if (!manifest.specs.some(e => e.spec === key)) {
+        let content: string | undefined;
+        try { content = await fs.readFile(absSpec, 'utf-8'); } catch {}
+        findOrCreateEntry(manifest, key, resolveSpecSource(content, absSpec));
+      }
+    });
   }
 
   // Single spec or no spec - run directly (throws on failure)
