@@ -621,12 +621,12 @@ export async function resolveSpecDir(input: string, workingDir: string): Promise
       if (stat.isDirectory()) return candidate;
     } catch {}
 
-    // Scan subdirectories for trailing path match
+    // Scan subdirectories recursively for trailing path match
     try {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
+      const entries = await fs.readdir(dir, { withFileTypes: true, recursive: true });
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
-        const fullPath = path.join(dir, entry.name);
+        const fullPath = path.join(entry.parentPath || dir, entry.name);
         if (entry.name === inputName || fullPath.endsWith('/' + input)) {
           return fullPath;
         }
