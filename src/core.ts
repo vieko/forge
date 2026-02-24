@@ -25,6 +25,8 @@ export interface QueryConfig {
   specLabel?: string;
   /** Monorepo context for scoped build command rewriting */
   monorepoContext?: MonorepoContext | null;
+  /** Directory for .forge/ persistence (session logs, audit, results). Defaults to workingDir. Used to route writes to the original repo when running in a worktree. */
+  persistDir?: string;
 }
 
 // What runQuery() returns on success
@@ -90,12 +92,15 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
     resume, forkSession, specLabel, monorepoContext,
   } = config;
 
+  // Persistence base: original repo when in a worktree, otherwise workingDir
+  const persistBase = config.persistDir || workingDir;
+
   const startTime = new Date();
   let sessionId: string | undefined;
 
   // Stream log for session visibility (fire-and-forget writes)
   // Using an object wrapper to avoid TypeScript narrowing issues with async closures
-  const sessionDir = path.join(workingDir, '.forge', 'sessions');
+  const sessionDir = path.join(persistBase, '.forge', 'sessions');
   interface StreamLog { write: (line: string) => void; close: () => void; logPath: string }
   const streamLog: { current: StreamLog | null } = { current: null };
 
@@ -145,11 +150,11 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
   };
 
   // Hook: Stop handler — persist session state for resume on interrupt
-  const latestSessionPath = path.join(workingDir, '.forge', 'latest-session.json');
+  const latestSessionPath = path.join(persistBase, '.forge', 'latest-session.json');
   const persistSession = async () => {
     const logPath = sessionId ? path.join(sessionDir, sessionId, 'stream.log') : undefined;
     const state = { sessionId, startedAt: startTime.toISOString(), model: modelName, cwd: workingDir, logPath, ...sessionExtra };
-    await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(persistBase, '.forge'), { recursive: true });
     await fs.writeFile(latestSessionPath, JSON.stringify(state, null, 2));
   };
   const stopHandler: HookCallback = async () => {
@@ -158,7 +163,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
   };
 
   // Hook: Tool call audit log
-  const auditPath = path.join(workingDir, '.forge', 'audit.jsonl');
+  const auditPath = path.join(persistBase, '.forge', 'audit.jsonl');
   let forgeDirCreated = false;
   const auditLog: HookCallback = async (input, toolUseID) => {
     try {
@@ -172,7 +177,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
         input: inp.tool_input,
       };
       if (!forgeDirCreated) {
-        await fs.mkdir(path.join(workingDir, '.forge'), { recursive: true });
+        await fs.mkdir(path.join(persistBase, '.forge'), { recursive: true });
         forgeDirCreated = true;
       }
       await fs.appendFile(auditPath, JSON.stringify(entry) + '\n');
@@ -415,7 +420,7 @@ forge run --resume ${message.session_id || sessionId} "continue"
             }
           }
 
-          await saveResult(workingDir, forgeResult, errorResultText);
+          await saveResult(persistBase, forgeResult, errorResultText);
           throw new ForgeError(label, forgeResult);
         }
       }
@@ -468,7 +473,7 @@ forge run --resume ${message.session_id || sessionId} "continue"
         sessionId,
         error: errMsg,
       };
-      await saveResult(workingDir, forgeResult, `Error:\n${errMsg}`).catch(() => {});
+      await saveResult(persistBase, forgeResult, `Error:\n${errMsg}`).catch(() => {});
       streamLog.current?.close();
       throw new ForgeError(errMsg, forgeResult);
     }

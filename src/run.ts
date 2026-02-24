@@ -132,6 +132,7 @@ Do not use emojis in your output.`;
     const qr = await runQuery({
       prompt: currentPrompt,
       workingDir,
+      persistDir: resultDir !== workingDir ? resultDir : undefined,
       model: modelName,
       maxTurns: dryRun ? 20 : effectiveMaxTurns,
       maxBudgetUsd: effectiveMaxBudgetUsd,

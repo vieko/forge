@@ -956,6 +956,26 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
 
 // ── Check pending specs ──────────────────────────────────────
 
+/** Parse JSON check results from agent response text. Returns null if parsing fails. */
+function parseCheckResults(
+  text: string,
+): Array<{ spec: string; status: string; reason: string }> | null {
+  const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/)
+    || text.match(/(\{[\s\S]*"results"[\s\S]*\})/);
+  if (!jsonMatch) return null;
+
+  try {
+    const parsed = JSON.parse(jsonMatch[1] || jsonMatch[0]) as {
+      results: Array<{ spec: string; status: string; reason: string }>;
+    };
+    return parsed.results;
+  } catch {
+    return null;
+  }
+}
+
+const CHECK_BATCH_SIZE = 20;
+
 /** Triage pending specs: agent checks codebase and auto-resolves implemented ones. */
 export async function checkPendingSpecs(workingDir: string, quiet: boolean): Promise<void> {
   const manifest = await loadManifest(workingDir);
@@ -991,12 +1011,34 @@ export async function checkPendingSpecs(workingDir: string, quiet: boolean): Pro
     console.log(`${BOLD}Checking ${specContents.length} pending spec(s) against codebase...${RESET}\n`);
   }
 
-  // Build prompt with spec contents
-  const specBlock = specContents
-    .map(s => `### ${s.key}\n\`\`\`markdown\n${s.content}\n\`\`\``)
-    .join('\n\n');
+  const resolved = await resolveConfig(workingDir, {
+    defaultModel: 'sonnet',
+    defaultMaxTurns: 50,
+    defaultMaxBudgetUsd: 5.0,
+  });
 
-  const prompt = `You are checking whether pending specs have already been implemented in the codebase.
+  // Chunk specs into batches to avoid EPIPE with large prompt sizes
+  const batches: Array<typeof specContents> = [];
+  for (let i = 0; i < specContents.length; i += CHECK_BATCH_SIZE) {
+    batches.push(specContents.slice(i, i + CHECK_BATCH_SIZE));
+  }
+
+  const allResults: Array<{ spec: string; status: string; reason: string }> = [];
+  let totalDuration = 0;
+  let totalCost = 0;
+
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+
+    if (batches.length > 1 && !quiet) {
+      console.log(`${DIM}[forge]${RESET} Batch ${b + 1}/${batches.length} (${batch.length} specs)...`);
+    }
+
+    const specBlock = batch
+      .map(s => `### ${s.key}\n\`\`\`markdown\n${s.content}\n\`\`\``)
+      .join('\n\n');
+
+    const prompt = `You are checking whether pending specs have already been implemented in the codebase.
 
 For each spec below, read the acceptance criteria carefully, then check the codebase to determine if the criteria are already met.
 
@@ -1010,46 +1052,39 @@ After checking all specs, output ONLY a JSON block (no other text) in this exact
 
 Be thorough: check for the actual implementation, not just file existence. A spec is "implemented" only if ALL its acceptance criteria are met.`;
 
-  const resolved = await resolveConfig(workingDir, {
-    defaultModel: 'sonnet',
-    defaultMaxTurns: 50,
-    defaultMaxBudgetUsd: 5.0,
-  });
+    const result = await runQuery({
+      prompt,
+      workingDir,
+      model: resolved.model,
+      maxTurns: resolved.maxTurns,
+      maxBudgetUsd: resolved.maxBudgetUsd,
+      verbose: false,
+      quiet,
+      silent: false,
+    });
 
-  const result = await runQuery({
-    prompt,
-    workingDir,
-    model: resolved.model,
-    maxTurns: resolved.maxTurns,
-    maxBudgetUsd: resolved.maxBudgetUsd,
-    verbose: false,
-    quiet,
-    silent: false,
-  });
+    totalDuration += result.durationSeconds;
+    totalCost += result.costUsd ?? 0;
 
-  // Parse JSON results from agent response
-  const jsonMatch = result.resultText.match(/```json\s*([\s\S]*?)\s*```/)
-    || result.resultText.match(/(\{[\s\S]*"results"[\s\S]*\})/);
+    const batchResults = parseCheckResults(result.resultText);
+    if (!batchResults) {
+      console.log(`${DIM}Could not parse agent response for batch ${b + 1}. Raw output:${RESET}`);
+      console.log(result.resultText);
+      continue;
+    }
 
-  if (!jsonMatch) {
-    console.log(`${DIM}Could not parse agent response. Raw output:${RESET}`);
-    console.log(result.resultText);
-    printRunSummary({ durationSeconds: result.durationSeconds, costUsd: result.costUsd });
-    return;
+    allResults.push(...batchResults);
   }
 
-  let parsed: { results: Array<{ spec: string; status: string; reason: string }> };
-  try {
-    parsed = JSON.parse(jsonMatch[1] || jsonMatch[0]);
-  } catch {
-    console.log(`${DIM}Could not parse JSON from agent response.${RESET}`);
-    printRunSummary({ durationSeconds: result.durationSeconds, costUsd: result.costUsd });
+  if (allResults.length === 0) {
+    console.log(`${DIM}No parseable results from agent.${RESET}`);
+    printRunSummary({ durationSeconds: totalDuration, costUsd: totalCost });
     return;
   }
 
   // Display results and auto-resolve implemented specs
   const toResolve: string[] = [];
-  for (const r of parsed.results) {
+  for (const r of allResults) {
     const statusColor = r.status === 'implemented' ? '\x1b[32m' : DIM;
     const label = r.status === 'implemented' ? 'implemented' : 'not implemented';
     console.log(`  ${statusColor}${label.padEnd(16)}${RESET} ${r.spec}`);
@@ -1078,5 +1113,5 @@ Be thorough: check for the actual implementation, not just file existence. A spe
     console.log(`\n${DIM}No specs were fully implemented.${RESET}`);
   }
 
-  printRunSummary({ durationSeconds: result.durationSeconds, costUsd: result.costUsd });
+  printRunSummary({ durationSeconds: totalDuration, costUsd: totalCost });
 }
