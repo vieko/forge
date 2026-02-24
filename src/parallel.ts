@@ -773,7 +773,11 @@ async function runForgeInner(
 
   // If spec directory provided, run each spec
   if (specDir) {
-    const resolvedDir = await resolveSpecDir(specDir, effectiveWorkingDir) ?? path.resolve(specDir);
+    // Resolve against original repo first (specs may be in gitignored dirs like .bonfire/),
+    // then fall back to effective working dir (which may be a worktree)
+    const resolvedDir = await resolveSpecDir(specDir, resultDir)
+      ?? (resultDir !== effectiveWorkingDir ? await resolveSpecDir(specDir, effectiveWorkingDir) : null)
+      ?? path.resolve(specDir);
     if (!quiet && resolvedDir !== path.resolve(specDir)) {
       console.log(`${DIM}[forge]${RESET} Resolved: ${specDir} → ${path.relative(resultDir, resolvedDir) || resolvedDir}\n`);
     }
@@ -856,7 +860,9 @@ async function runForgeInner(
   const effectiveOptions = { ...options };
   if (!effectiveOptions.specPath && !effectiveOptions.specDir
       && effectiveOptions.prompt.endsWith('.md') && !effectiveOptions.prompt.includes(' ')) {
-    const resolved = await resolveSpecFile(effectiveOptions.prompt, effectiveWorkingDir);
+    // Resolve against original repo first, then worktree
+    const resolved = await resolveSpecFile(effectiveOptions.prompt, resultDir)
+      ?? (resultDir !== effectiveWorkingDir ? await resolveSpecFile(effectiveOptions.prompt, effectiveWorkingDir) : null);
     if (resolved) {
       effectiveOptions.specPath = resolved;
       const display = resolved !== path.resolve(effectiveWorkingDir, effectiveOptions.prompt)
@@ -874,7 +880,9 @@ async function runForgeInner(
     try {
       await fs.access(effectiveOptions.specPath);
     } catch {
-      const resolved = await resolveSpecFile(effectiveOptions.specPath, effectiveWorkingDir);
+      // Resolve against original repo first, then worktree
+      const resolved = await resolveSpecFile(effectiveOptions.specPath, resultDir)
+        ?? (resultDir !== effectiveWorkingDir ? await resolveSpecFile(effectiveOptions.specPath, effectiveWorkingDir) : null);
       if (resolved) {
         if (!quiet) {
           console.log(`${DIM}[forge]${RESET} Resolved: ${effectiveOptions.specPath} → ${path.relative(resultDir, resolved) || resolved}\n`);
