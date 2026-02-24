@@ -7,6 +7,8 @@ description: >-
   to an autonomous agent. Triggers include "forge run", "run this spec",
   "run specs in parallel", "run pending", "forge define", "define specs", "audit the codebase", "review changes",
   "forge watch", "forge status", "rerun failed", "resolve spec", "delegate this to forge".
+  Do NOT use for simple edits you can make directly, questions that don't require implementation,
+  or straightforward work in the current repo that doesn't need autonomous agent execution.
 allowed-tools: Bash(forge:*)
 metadata:
   version: 3.6.3
@@ -19,16 +21,10 @@ Delegate complex, multi-step development work to an autonomous agent that builds
 
 ## When to Use Forge
 
-**Use forge when:**
 - The task targets a different repo (`-C ~/other-project`)
 - The work is complex enough to benefit from autonomous agent execution with verification
 - You have spec files describing outcomes to implement
 - You want to run multiple specs in parallel
-
-**Don't use forge when:**
-- The task is a simple edit you can make directly
-- The user is asking a question, not requesting implementation
-- The work is in the current file / current repo and straightforward
 
 ## Commands
 
@@ -147,7 +143,28 @@ forge specs --prune                             # Remove orphaned entries from m
 - Tracks all specs in a single batch with grouped cost reporting
 - Auto-tunes concurrency based on available memory
 
+**`--spec` takes exactly one file.** The prompt is always the last positional argument (a quoted string). Bare file paths without a flag are interpreted as the prompt, not as spec files. To run multiple specs, use `--spec-dir -P`.
+
 **Shorthand resolution**: spec paths resolve automatically. `forge run --spec login.md` finds the spec via manifest lookup. `forge run --spec-dir gtmeng-580` finds `.bonfire/specs/gtmeng-580/`. Full paths always work too.
+
+## Common Mistakes
+
+```bash
+# WRONG: bare paths without --spec are treated as the prompt string
+forge run specs/auth.md specs/login.md
+
+# WRONG: --spec only takes one file, not multiple
+forge run --spec specs/auth.md specs/login.md "implement"
+
+# WRONG: manually running specs one-by-one bypasses dependency ordering
+forge run --spec specs/01-schema.md "implement" && forge run --spec specs/02-api.md "implement"
+
+# RIGHT: put specs in a directory, use --spec-dir -P
+forge run --spec-dir specs/ -P "implement all"
+
+# RIGHT: single spec with --spec
+forge run --spec specs/auth.md "implement this"
+```
 
 ## Recipes
 
@@ -157,6 +174,21 @@ forge specs --prune                             # Remove orphaned entries from m
 forge run --spec-dir gtmeng-580 -P -C ~/dev/project "implement all"
 # Shorthand paths resolve automatically (gtmeng-580 → .bonfire/specs/gtmeng-580/)
 # Already-passed specs are skipped; deps on passed specs are treated as satisfied
+```
+
+### Run a subset of specs from a directory
+
+If specs use `depends:` frontmatter, `--spec-dir -P` automatically runs only the ready ones in topological order. Dependent specs wait for their deps to pass — no need to cherry-pick individual specs.
+
+```bash
+# Specs declare their dependencies:
+#   03-api.md has "depends: [01-schema.md, 02-models.md]"
+# Forge resolves the graph — 01 and 02 run in parallel, 03 waits for both
+forge run --spec-dir specs/feature/ -P "implement all"
+
+# Already-passed specs are skipped automatically; their dependents still run
+# Use --force to re-run everything including passed specs
+forge run --spec-dir specs/feature/ -P --force "re-verify all"
 ```
 
 ### Spec-driven development
