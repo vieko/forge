@@ -974,7 +974,7 @@ function parseCheckResults(
   }
 }
 
-const CHECK_BATCH_SIZE = 20;
+const CHECK_BATCH_SIZE = 10;
 
 /** Triage pending specs: agent checks codebase and auto-resolves implemented ones. */
 export async function checkPendingSpecs(workingDir: string, quiet: boolean): Promise<void> {
@@ -1013,7 +1013,7 @@ export async function checkPendingSpecs(workingDir: string, quiet: boolean): Pro
 
   const resolved = await resolveConfig(workingDir, {
     defaultModel: 'sonnet',
-    defaultMaxTurns: 50,
+    defaultMaxTurns: 20,
     defaultMaxBudgetUsd: 5.0,
   });
 
@@ -1042,6 +1042,12 @@ export async function checkPendingSpecs(workingDir: string, quiet: boolean): Pro
 
 For each spec below, read the acceptance criteria carefully, then check the codebase to determine if the criteria are already met.
 
+IMPORTANT tool-use rules:
+- Use ONLY Read and Grep tools to inspect the codebase. Do NOT use Bash, Write, or Edit.
+- Do NOT use python3, node, or any shell command to build or parse your response.
+- Output the JSON result directly as text — do not construct it programmatically.
+- Stay focused: check each spec, then output the result. Do not loop or retry.
+
 ${specBlock}
 
 After checking all specs, output ONLY a JSON block (no other text) in this exact format:
@@ -1052,16 +1058,24 @@ After checking all specs, output ONLY a JSON block (no other text) in this exact
 
 Be thorough: check for the actual implementation, not just file existence. A spec is "implemented" only if ALL its acceptance criteria are met.`;
 
-    const result = await runQuery({
-      prompt,
-      workingDir,
-      model: resolved.model,
-      maxTurns: resolved.maxTurns,
-      maxBudgetUsd: resolved.maxBudgetUsd,
-      verbose: false,
-      quiet,
-      silent: false,
-    });
+    let result;
+    try {
+      result = await runQuery({
+        prompt,
+        workingDir,
+        model: resolved.model,
+        maxTurns: resolved.maxTurns,
+        maxBudgetUsd: resolved.maxBudgetUsd,
+        verbose: false,
+        quiet,
+        silent: false,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`${DIM}[forge]${RESET} Batch ${b + 1}/${batches.length} failed: ${msg}`);
+      console.log(`${DIM}        Skipping batch, continuing...${RESET}`);
+      continue;
+    }
 
     totalDuration += result.durationSeconds;
     totalCost += result.costUsd ?? 0;
