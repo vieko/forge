@@ -176,7 +176,10 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
     } else {
       console.log(`\n  ${BOLD}${outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
       outputSpecs.forEach((f, i) => console.log(`    ${DIM}${i + 1}.${RESET} ${f}`));
-      console.log(`\n  Next step:\n    ${CMD}forge run --spec-dir ${outputDir} -P -C ${workingDir} "implement"${RESET}`);
+      const relOutput = path.relative(workingDir, outputDir);
+      const dirArg = relOutput.startsWith('..') ? outputDir : relOutput;
+      const cwdFlag = workingDir !== process.cwd() ? ` -C ${workingDir}` : '';
+      console.log(`\n  Next step:\n    ${CMD}forge run --spec-dir ${dirArg} -P${cwdFlag} "implement"${RESET}`);
     }
     console.log('');
   }

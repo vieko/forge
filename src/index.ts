@@ -381,10 +381,14 @@ program
   });
 
 // Quick alias: `forge "do something"` = `forge run "do something"`
+// Also handles `forge --spec-dir ... -P "prompt"` → `forge run --spec-dir ... -P "prompt"`
 const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'watch', 'specs', 'help']);
+const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--parallel', '--plan-only', '--dry-run', '--sequential-first', '--branch']);
 const args = process.argv.slice(2);
-if (args.length > 0 && !args[0].startsWith('-') && !COMMANDS.has(args[0])) {
-  process.argv.splice(2, 0, 'run');
+if (args.length > 0 && !COMMANDS.has(args[0])) {
+  if (!args[0].startsWith('-') || RUN_FLAGS.has(args[0])) {
+    process.argv.splice(2, 0, 'run');
+  }
 }
 
 // Parse -C/--cwd early for SIGINT handler (before commander parses)
