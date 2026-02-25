@@ -106,6 +106,10 @@ export interface AuditOptions {
   resume?: string;
   /** Fork from a previous session (new session, same history) */
   fork?: string;
+  /** Run audit-fix convergence loop: audit, run remediation, re-audit until clean */
+  fix?: boolean;
+  /** Maximum number of audit-fix rounds (default: 3) */
+  fixRounds?: number;
 }
 
 /**

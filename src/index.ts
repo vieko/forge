@@ -175,6 +175,8 @@ program
   .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'opus')
   .option('-t, --max-turns <n>', 'Maximum turns (default: 250)', '250')
   .option('-b, --max-budget <usd>', 'Maximum budget in USD')
+  .option('--fix', 'Run audit-fix convergence loop until clean or max rounds')
+  .option('--fix-rounds <n>', 'Maximum audit-fix rounds (default: 3)')
   .option('-v, --verbose', 'Show detailed output')
   .option('-q, --quiet', 'Suppress progress output')
   .option('-r, --resume <session>', 'Resume a previous session')
@@ -186,6 +188,8 @@ program
     model?: string;
     maxTurns?: string;
     maxBudget?: string;
+    fix?: boolean;
+    fixRounds?: string;
     verbose?: boolean;
     quiet?: boolean;
     resume?: string;
@@ -223,6 +227,8 @@ program
         quiet: options.quiet,
         resume: options.resume,
         fork: options.fork,
+        fix: options.fix,
+        fixRounds: options.fixRounds ? parseInt(options.fixRounds, 10) : undefined,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);
