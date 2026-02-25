@@ -5,11 +5,11 @@
 Auto-detected: `freeMem / 2GB`, capped at `min(cpuCount, 5)`, floor 1.
 
 ```bash
-# Auto (recommended)
-forge run --spec-dir ./specs/ -P "task"
+# Auto (recommended, parallel by default)
+forge run --spec-dir ./specs/ "task"
 
 # Manual override
-forge run --spec-dir ./specs/ -P --concurrency 3 "task"
+forge run --spec-dir ./specs/ --concurrency 3 "task"
 ```
 
 Each agent session uses ~2GB memory. On a 16GB/8-core machine, expect concurrency of 3-4.
@@ -23,7 +23,7 @@ Reduce if you hit rate limits or memory pressure. Increase if you have headroom 
 forge watch
 
 # Or auto-split tmux
-forge run --spec-dir ./specs/ -P --watch "task"
+forge run --spec-dir ./specs/ --watch "task"
 
 # Batch results
 forge status
@@ -48,7 +48,7 @@ SPEC BATCH SUMMARY
   Result:     3/4 successful
 
   Next step:
-    forge run --rerun-failed -P "fix failures"
+    forge run --rerun-failed "fix failures"
 ```
 
 When all specs pass, the hint suggests `forge audit <spec-dir>` instead.
@@ -85,10 +85,10 @@ Already-passed specs (per manifest) are automatically skipped when using `--spec
 
 ```bash
 # Specs 01-03 already passed, 04-06 depend on them → 04-06 run, deps satisfied
-forge run --spec-dir ./specs/ -P "implement remaining"
+forge run --spec-dir ./specs/ "implement remaining"
 
 # Force re-run everything including passed specs
-forge run --spec-dir ./specs/ -P --force "re-verify all"
+forge run --spec-dir ./specs/ --force "re-verify all"
 ```
 
 ## Key Behaviors
@@ -97,4 +97,4 @@ forge run --spec-dir ./specs/ -P --force "re-verify all"
 - Verification (typecheck, build, test) runs independently per spec.
 - Transient errors (rate limits, network) auto-retry with exponential backoff.
 - Use `depends:` frontmatter for specs that must run after others. Use `--sequential-first` as a simpler fallback when one foundational spec must run before the rest.
-- Results are grouped by batch run ID. Use `forge run --rerun-failed -P` to retry failures.
+- Results are grouped by batch run ID. Use `forge run --rerun-failed` to retry failures.

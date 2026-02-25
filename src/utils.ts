@@ -119,6 +119,7 @@ export function isTransientError(error: unknown): boolean {
       message.includes('rate limit') ||
       message.includes('rate_limit') ||
       message.includes('429') ||
+      message.includes('500') ||
       message.includes('503') ||
       message.includes('502') ||
       message.includes('timeout') ||

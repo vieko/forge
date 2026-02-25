@@ -28,11 +28,11 @@ export interface ForgeOptions {
   resume?: string;
   /** Fork from a previous session (new session, same history) */
   fork?: string;
-  /** Run specs in parallel (only with --spec-dir) */
-  parallel?: boolean;
+  /** Run specs sequentially instead of parallel (default: parallel) */
+  sequential?: boolean;
   /** Max concurrent specs when parallel (default: auto) */
   concurrency?: number;
-  /** Run first N specs sequentially before parallelizing (with --parallel) */
+  /** Run first N specs sequentially before parallelizing the rest */
   sequentialFirst?: number;
   /** Rerun only failed specs from the latest batch */
   rerunFailed?: boolean;
@@ -40,6 +40,8 @@ export interface ForgeOptions {
   pendingOnly?: boolean;
   /** Force re-run of passed specs (skip manifest filtering) */
   force?: boolean;
+  /** Skip automatic spec splitting for complex specs */
+  noSplit?: boolean;
   /** Run in an isolated git worktree on the named branch */
   branch?: string;
 }

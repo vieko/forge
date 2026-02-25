@@ -65,12 +65,13 @@ program
   .option('-q, --quiet', 'Suppress progress output (for CI)')
   .option('-r, --resume <session>', 'Resume a previous session')
   .option('-f, --fork <session>', 'Fork from a previous session')
-  .option('-P, --parallel', 'Run specs in parallel (with --spec-dir)')
+  .option('--sequential', 'Run specs sequentially instead of parallel (default: parallel)')
   .option('--concurrency <n>', 'Max concurrent specs in parallel mode (default: auto)')
   .option('--sequential-first <n>', 'Run first N specs sequentially before parallelizing')
   .option('--rerun-failed', 'Rerun only failed specs from latest batch')
   .option('--pending', 'Run only pending specs from the manifest')
   .option('-F, --force', 'Re-run all specs including already passed')
+  .option('--no-split', 'Skip automatic spec splitting for complex specs')
   .option('-B, --branch <name>', 'Run in an isolated git worktree on the named branch')
   .option('-w, --watch', 'Open a tmux pane with live session logs')
   .action(async (prompt: string, options: {
@@ -86,12 +87,13 @@ program
     quiet?: boolean;
     resume?: string;
     fork?: string;
-    parallel?: boolean;
+    sequential?: boolean;
     concurrency?: string;
     sequentialFirst?: string;
     rerunFailed?: boolean;
     pending?: boolean;
     force?: boolean;
+    noSplit?: boolean;
     branch?: string;
     watch?: boolean;
   }) => {
@@ -129,12 +131,13 @@ program
         quiet: options.quiet,
         resume: options.resume,
         fork: options.fork,
-        parallel: options.parallel,
+        sequential: options.sequential,
         concurrency: options.concurrency ? parseInt(options.concurrency, 10) : undefined,
         sequentialFirst: options.sequentialFirst ? parseInt(options.sequentialFirst, 10) : undefined,
         rerunFailed: options.rerunFailed,
         pendingOnly: options.pending,
         force: options.force,
+        noSplit: options.noSplit,
         branch: options.branch,
       });
     } catch (error) {
@@ -381,9 +384,9 @@ program
   });
 
 // Quick alias: `forge "do something"` = `forge run "do something"`
-// Also handles `forge --spec-dir ... -P "prompt"` → `forge run --spec-dir ... -P "prompt"`
+// Also handles `forge --spec-dir ... "prompt"` → `forge run --spec-dir ... "prompt"`
 const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'watch', 'specs', 'help']);
-const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--parallel', '--plan-only', '--dry-run', '--sequential-first', '--branch']);
+const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--dry-run', '--sequential-first', '--branch']);
 const args = process.argv.slice(2);
 if (args.length > 0 && !COMMANDS.has(args[0])) {
   if (!args[0].startsWith('-') || RUN_FLAGS.has(args[0])) {

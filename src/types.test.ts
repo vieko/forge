@@ -24,13 +24,13 @@ describe('ForgeOptions', () => {
       quiet: false,
       resume: 'session-123',
       fork: 'session-456',
-      parallel: true,
+      sequential: true,
       concurrency: 3,
       sequentialFirst: 1,
       rerunFailed: false,
     };
     expect(opts.prompt).toBe('test task');
-    expect(opts.parallel).toBe(true);
+    expect(opts.sequential).toBe(true);
     expect(opts.concurrency).toBe(3);
   });
 });

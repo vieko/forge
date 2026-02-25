@@ -4,7 +4,7 @@ import path from 'path';
 import { resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
 import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
-import { withManifestLock, findOrCreateEntry, specKey } from './specs.js';
+import { withManifestLock, findOrCreateEntry, specKey, assessSpecComplexity, type ComplexityWarning } from './specs.js';
 
 export async function runDefine(options: DefineOptions): Promise<void> {
   const { prompt, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false } = options;
@@ -94,6 +94,8 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
 ## Constraints
 
 - **One concern per spec.** Each spec must be independently executable by an autonomous agent.
+- **Keep specs focused.** Each spec should have at most 6-8 acceptance criteria. If a feature naturally requires more, split it into multiple specs connected via \`depends:\` frontmatter.
+- **Prefer many small specs over few large ones.** A spec that covers multiple distinct concerns should be decomposed. Each spec should target a single responsibility.
 - **Descriptive filenames.** Use lowercase, hyphen-separated names (e.g. \`rate-limiting.md\`, \`auth-middleware.md\`). No numeric prefixes.
 - **Outcomes, not procedures.** Describe the end state, not the steps to get there.
 - **Reference actual files.** Explore the codebase and list specific file paths in the Context section.
@@ -168,6 +170,18 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
     });
   }
 
+  // Post-generation complexity validation
+  const complexityWarnings: ComplexityWarning[] = [];
+  if (outputSpecs.length > 0) {
+    for (const specFile of outputSpecs) {
+      try {
+        const content = await fs.readFile(path.join(outputDir, specFile), 'utf-8');
+        const warning = assessSpecComplexity(specFile, content);
+        if (warning) complexityWarnings.push(warning);
+      } catch {}
+    }
+  }
+
   if (!quiet) {
     printRunSummary({ durationSeconds, costUsd: qr.costUsd });
 
@@ -176,10 +190,21 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
     } else {
       console.log(`\n  ${BOLD}${outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
       outputSpecs.forEach((f, i) => console.log(`    ${DIM}${i + 1}.${RESET} ${f}`));
+
+      // Print complexity warnings
+      if (complexityWarnings.length > 0) {
+        console.log('');
+        for (const w of complexityWarnings) {
+          for (const reason of w.reasons) {
+            console.log(`  \x1b[33m[forge]\x1b[0m ${w.file}: ${reason}. Consider splitting.`);
+          }
+        }
+      }
+
       const relOutput = path.relative(workingDir, outputDir);
       const dirArg = relOutput.startsWith('..') ? outputDir : relOutput;
       const cwdFlag = workingDir !== process.cwd() ? ` -C ${workingDir}` : '';
-      console.log(`\n  Next step:\n    ${CMD}forge run --spec-dir ${dirArg} -P${cwdFlag} "implement"${RESET}`);
+      console.log(`\n  Next step:\n    ${CMD}forge run --spec-dir ${dirArg}${cwdFlag} "implement"${RESET}`);
     }
     console.log('');
   }

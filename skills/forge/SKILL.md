@@ -33,10 +33,10 @@ Delegate complex, multi-step development work to an autonomous agent that builds
 ```bash
 forge run "add auth middleware"                          # Simple task
 forge run --spec specs/auth.md "implement this"          # With spec file
-forge run --spec-dir ./specs/ -P "implement all"         # Parallel specs
+forge run --spec-dir ./specs/ "implement all"             # Parallel specs (default)
 forge run -C ~/other-repo "fix the login bug"            # Target different repo
-forge run --rerun-failed -P "fix failures"               # Rerun failed specs
-forge run --pending -P "implement pending"               # Run only pending specs
+forge run --rerun-failed "fix failures"                  # Rerun failed specs
+forge run --pending "implement pending"                  # Run only pending specs
 forge run --resume <session-id> "continue"               # Resume interrupted session
 forge run --plan-only "design API for auth"              # Plan without implementing
 forge "quick task"                                       # Shorthand (no 'run')
@@ -44,8 +44,8 @@ forge "quick task"                                       # Shorthand (no 'run')
 
 Important flags:
 - `-s, --spec <path>` -- Spec file (shorthand resolves via manifest). Prompt becomes additional context.
-- `-S, --spec-dir <path>` -- Directory of specs (shorthand resolves via known dirs). Runs each `.md` separately; use `-P` for parallel. Already-passed specs are skipped.
-- `-P, --parallel` -- Run specs concurrently (auto-tuned concurrency).
+- `-S, --spec-dir <path>` -- Directory of specs (shorthand resolves via known dirs). Runs each `.md` in parallel by default. Already-passed specs are skipped.
+- `--sequential` -- Run specs sequentially instead of parallel (default: parallel).
 - `-F, --force` -- Re-run all specs including already passed.
 - `-B, --branch <name>` -- Run in an isolated git worktree on the named branch. Auto-commits on success, cleans up after.
 - `--concurrency <n>` -- Override auto-detected parallelism (default: freeMem/2GB, capped at CPUs).
@@ -135,15 +135,15 @@ forge specs --prune                             # Remove orphaned entries from m
 
 ## Important
 
-**Never manually orchestrate parallel forge runs** (e.g. `forge run spec1.md & forge run spec2.md & wait`). Forge handles parallelism, dependency ordering, and skip-passed internally via `--spec-dir -P`. Manual orchestration bypasses the dependency graph, manifest tracking, and batch grouping.
+**Never manually orchestrate parallel forge runs** (e.g. `forge run spec1.md & forge run spec2.md & wait`). Forge handles parallelism, dependency ordering, and skip-passed internally via `--spec-dir`. Manual orchestration bypasses the dependency graph, manifest tracking, and batch grouping.
 
-**Always prefer `--spec-dir -P`** over running individual specs. It automatically:
+**Always prefer `--spec-dir`** over running individual specs. It automatically:
 - Skips already-passed specs (use `--force` to override)
 - Resolves `depends:` frontmatter into a topological execution order
 - Tracks all specs in a single batch with grouped cost reporting
 - Auto-tunes concurrency based on available memory
 
-**`--spec` takes exactly one file.** The prompt is always the last positional argument (a quoted string). Bare file paths without a flag are interpreted as the prompt, not as spec files. To run multiple specs, use `--spec-dir -P`.
+**`--spec` takes exactly one file.** The prompt is always the last positional argument (a quoted string). Bare file paths without a flag are interpreted as the prompt, not as spec files. To run multiple specs, use `--spec-dir`.
 
 **Shorthand resolution**: spec paths resolve automatically. `forge run --spec login.md` finds the spec via manifest lookup. `forge run --spec-dir gtmeng-580` finds `.bonfire/specs/gtmeng-580/`. Full paths always work too.
 
@@ -159,8 +159,8 @@ forge run --spec specs/auth.md specs/login.md "implement"
 # WRONG: manually running specs one-by-one bypasses dependency ordering
 forge run --spec specs/01-schema.md "implement" && forge run --spec specs/02-api.md "implement"
 
-# RIGHT: put specs in a directory, use --spec-dir -P
-forge run --spec-dir specs/ -P "implement all"
+# RIGHT: put specs in a directory, use --spec-dir
+forge run --spec-dir specs/ "implement all"
 
 # RIGHT: single spec with --spec
 forge run --spec specs/auth.md "implement this"
@@ -171,24 +171,24 @@ forge run --spec specs/auth.md "implement this"
 ### Run all specs in a directory
 
 ```bash
-forge run --spec-dir gtmeng-580 -P -C ~/dev/project "implement all"
+forge run --spec-dir gtmeng-580 -C ~/dev/project "implement all"
 # Shorthand paths resolve automatically (gtmeng-580 → .bonfire/specs/gtmeng-580/)
 # Already-passed specs are skipped; deps on passed specs are treated as satisfied
 ```
 
 ### Run a subset of specs from a directory
 
-If specs use `depends:` frontmatter, `--spec-dir -P` automatically runs only the ready ones in topological order. Dependent specs wait for their deps to pass — no need to cherry-pick individual specs.
+If specs use `depends:` frontmatter, `--spec-dir` automatically runs only the ready ones in topological order. Dependent specs wait for their deps to pass — no need to cherry-pick individual specs.
 
 ```bash
 # Specs declare their dependencies:
 #   03-api.md has "depends: [01-schema.md, 02-models.md]"
 # Forge resolves the graph — 01 and 02 run in parallel, 03 waits for both
-forge run --spec-dir specs/feature/ -P "implement all"
+forge run --spec-dir specs/feature/ "implement all"
 
 # Already-passed specs are skipped automatically; their dependents still run
 # Use --force to re-run everything including passed specs
-forge run --spec-dir specs/feature/ -P --force "re-verify all"
+forge run --spec-dir specs/feature/ --force "re-verify all"
 ```
 
 ### Spec-driven development
@@ -196,9 +196,9 @@ forge run --spec-dir specs/feature/ -P --force "re-verify all"
 ```bash
 # 1. Write specs as .md files (see references/writing-specs.md)
 # 2. Run them in parallel
-forge run --spec-dir ./specs/ -P "implement all specs"
+forge run --spec-dir ./specs/ "implement all specs"
 # 3. Rerun any failures
-forge run --rerun-failed -P "fix failures"
+forge run --rerun-failed "fix failures"
 # 4. Check results
 forge status
 ```
@@ -211,7 +211,7 @@ forge specs --pending
 # Auto-resolve specs that are already implemented in the codebase
 forge specs --check
 # Run whatever is still pending
-forge run --pending -P "implement remaining"
+forge run --pending "implement remaining"
 ```
 
 ### Dependency-aware execution
@@ -225,7 +225,7 @@ depends: [01-database-schema.md, 02-api-models.md]
 ```
 
 ```bash
-forge run --spec-dir ./specs/ -P "implement all"
+forge run --spec-dir ./specs/ "implement all"
 # Automatically runs in topological order based on depends: declarations
 ```
 
@@ -234,7 +234,7 @@ forge run --spec-dir ./specs/ -P "implement all"
 When not using `depends:`, number-prefix specs for ordering. Foundations run sequentially before the parallel phase:
 
 ```bash
-forge run --spec-dir ./specs/ -P --sequential-first 2 "implement"
+forge run --spec-dir ./specs/ --sequential-first 2 "implement"
 # Runs 01-*.md, 02-*.md sequentially, then 03+ in parallel
 ```
 
@@ -242,7 +242,7 @@ forge run --spec-dir ./specs/ -P --sequential-first 2 "implement"
 
 ```bash
 forge audit specs/ -C ~/project                 # Find gaps
-forge run --spec-dir specs/audit/ -P -C ~/project "fix remaining"
+forge run --spec-dir specs/audit/ -C ~/project "fix remaining"
 ```
 
 ### Resume or fork after interruption

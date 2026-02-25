@@ -1449,4 +1449,72 @@ describe('resolveSpecDir', () => {
     const result = await resolveSpecDir('nonexistent-dir', dir);
     expect(result).toBeNull();
   });
+
+  test('shorthand resolves against .bonfire/specs', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.bonfire', 'specs', 'gtmeng-572'), { recursive: true });
+    await fs.writeFile(path.join(dir, '.bonfire', 'specs', 'gtmeng-572', 'task.md'), '# task');
+
+    const result = await resolveSpecDir('gtmeng-572', dir);
+    expect(result).toBe(path.join(dir, '.bonfire', 'specs', 'gtmeng-572'));
+  });
+
+  test('nested path resolves against known spec dirs', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.bonfire', 'specs', 'project', 'feature'), { recursive: true });
+    await fs.writeFile(path.join(dir, '.bonfire', 'specs', 'project', 'feature', 'spec.md'), '# spec');
+
+    const result = await resolveSpecDir('project/feature', dir);
+    expect(result).toBe(path.join(dir, '.bonfire', 'specs', 'project', 'feature'));
+  });
+
+  test('absolute path short-circuits to direct resolution', async () => {
+    const dir = await makeTmpDir();
+    const absDir = path.join(dir, 'absolute-specs');
+    await fs.mkdir(absDir, { recursive: true });
+
+    const result = await resolveSpecDir(absDir, dir);
+    expect(result).toBe(absDir);
+  });
+
+  test('multi-segment input does not false-match by basename alone', async () => {
+    const dir = await makeTmpDir();
+    // Create two dirs: wrong one (just basename match) and correct one (full path match)
+    await fs.mkdir(path.join(dir, '.bonfire', 'specs', 'feature'), { recursive: true });
+    await fs.mkdir(path.join(dir, '.bonfire', 'specs', 'project', 'feature'), { recursive: true });
+
+    const result = await resolveSpecDir('project/feature', dir);
+    expect(result).toBe(path.join(dir, '.bonfire', 'specs', 'project', 'feature'));
+  });
+
+  test('resolves against specs/ well-known dir for nested input', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, 'specs', 'auth', 'login'), { recursive: true });
+
+    const result = await resolveSpecDir('auth/login', dir);
+    expect(result).toBe(path.join(dir, 'specs', 'auth', 'login'));
+  });
+
+  test('fresh repo with no known spec dirs returns null for shorthand', async () => {
+    const dir = await makeTmpDir();
+    // No specs/, no .bonfire/specs/, no manifest
+
+    const result = await resolveSpecDir('some-feature', dir);
+    expect(result).toBeNull();
+  });
+
+  test('resolves shorthand from manifest parent dirs', async () => {
+    const dir = await makeTmpDir();
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'custom-specs', 'batch-42'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'custom-specs', 'existing.md'), '# existing');
+
+    // Track a spec so custom-specs/ becomes a known dir
+    await withManifestLock(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'custom-specs/existing.md', 'file');
+    });
+
+    const result = await resolveSpecDir('batch-42', dir);
+    expect(result).toBe(path.join(dir, 'custom-specs', 'batch-42'));
+  });
 });

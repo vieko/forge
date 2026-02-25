@@ -7,6 +7,54 @@ import { runQuery } from './core.js';
 import { resolveConfig, ensureForgeDir } from './utils.js';
 import { parseSource } from './deps.js';
 
+// ── Spec complexity assessment ───────────────────────────────
+
+export interface ComplexityWarning {
+  file: string;
+  criteria: number;
+  words: number;
+  sections: number;
+  reasons: string[];
+}
+
+const MAX_CRITERIA = 8;
+const MAX_WORDS = 500;
+const MAX_SECTIONS = 6;
+
+/**
+ * Assess a spec's complexity. Returns a warning if the spec exceeds thresholds,
+ * or null if within acceptable limits.
+ */
+export function assessSpecComplexity(file: string, content: string): ComplexityWarning | null {
+  const reasons: string[] = [];
+
+  // Count acceptance criteria: lines matching "- " under "## Acceptance Criteria"
+  const acMatch = content.match(/## Acceptance Criteria\s*\n([\s\S]*?)(?=\n## |\n---|\s*$)/);
+  const criteria = acMatch
+    ? acMatch[1].split('\n').filter(line => /^\s*- /.test(line)).length
+    : 0;
+  if (criteria > MAX_CRITERIA) {
+    reasons.push(`${criteria} acceptance criteria (recommended: 6-8)`);
+  }
+
+  // Count words (excluding frontmatter)
+  const bodyContent = content.replace(/^---[\s\S]*?---\s*/, '');
+  const words = bodyContent.split(/\s+/).filter(w => w.length > 0).length;
+  if (words > MAX_WORDS) {
+    reasons.push(`${words} words (recommended: <${MAX_WORDS})`);
+  }
+
+  // Count H2 sections
+  const sections = (content.match(/^## /gm) || []).length;
+  if (sections > MAX_SECTIONS) {
+    reasons.push(`${sections} sections (recommended: <=${MAX_SECTIONS})`);
+  }
+
+  if (reasons.length === 0) return null;
+
+  return { file, criteria, words, sections, reasons };
+}
+
 // ── Manifest path ────────────────────────────────────────────
 
 const MANIFEST_FILE = 'specs.json';
@@ -612,10 +660,11 @@ export async function resolveSpecDir(input: string, workingDir: string): Promise
 
   // 2. Scan known spec dirs for a subdirectory matching by name or trailing path
   const dirs = await knownSpecDirs(workingDir);
+  const isMultiSegment = input.includes('/');
   const inputName = path.basename(input);
   for (const dir of dirs) {
-    // Check if the input matches as a direct child
-    const candidate = path.join(dir, inputName);
+    // Check if the input matches as a subtree (uses full input, not just basename)
+    const candidate = path.join(dir, input);
     try {
       const stat = await fs.stat(candidate);
       if (stat.isDirectory()) return candidate;
@@ -627,8 +676,14 @@ export async function resolveSpecDir(input: string, workingDir: string): Promise
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
         const fullPath = path.join(entry.parentPath || dir, entry.name);
-        if (entry.name === inputName || fullPath.endsWith('/' + input)) {
-          return fullPath;
+        if (isMultiSegment) {
+          // Multi-segment: only match by trailing path to avoid false positives
+          if (fullPath.endsWith('/' + input)) return fullPath;
+        } else {
+          // Single-segment: match by name or trailing path
+          if (entry.name === inputName || fullPath.endsWith('/' + input)) {
+            return fullPath;
+          }
         }
       }
     } catch {}
@@ -650,11 +705,11 @@ export interface HintCounts {
 export function buildHints(counts: HintCounts): string[] {
   const hints: string[] = [];
   if (counts.pending > 0) {
-    hints.push(`${CMD}forge run --pending -P "implement"${RESET}  run pending specs`);
+    hints.push(`${CMD}forge run --pending "implement"${RESET}     run pending specs`);
     hints.push(`${CMD}forge specs --check${RESET}               auto-resolve implemented specs`);
   }
   if (counts.failed > 0) {
-    hints.push(`${CMD}forge run --rerun-failed -P "fix"${RESET}  rerun failed specs`);
+    hints.push(`${CMD}forge run --rerun-failed "fix"${RESET}     rerun failed specs`);
   }
   if (counts.untracked > 0) {
     hints.push(`${CMD}forge specs --add${RESET}                  register untracked specs`);

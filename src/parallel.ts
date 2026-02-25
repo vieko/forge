@@ -6,8 +6,9 @@ import { ForgeError, execAsync, createWorktree, commitWorktree, cleanupWorktree 
 import { DIM, RESET, BOLD, CMD, AGENT_VERBS, SPINNER_FRAMES, formatElapsed, showBanner } from './display.js';
 import { runSingleSpec, type BatchResult } from './run.js';
 import { loadSpecDeps, topoSort, hasDependencies, type SpecDep, type DepLevel } from './deps.js';
-import { withManifestLock, findOrCreateEntry, specKey, loadManifest, resolveSpecFile, resolveSpecDir, resolveSpecSource } from './specs.js';
+import { withManifestLock, findOrCreateEntry, specKey, loadManifest, resolveSpecFile, resolveSpecDir, resolveSpecSource, assessSpecComplexity } from './specs.js';
 import { resolveWorkingDir } from './utils.js';
+import { runDefine } from './define.js';
 
 // Worker pool: runs tasks with bounded concurrency
 async function workerPool<T, R>(
@@ -243,6 +244,49 @@ function createProgressTracker(specNames: string[], quiet?: boolean) {
   };
 }
 
+// ── Smart dispatch ───────────────────────────────────────────
+
+export interface SmartDispatchResult {
+  specDir?: string;
+  specPath?: string;
+  prompt: string;
+}
+
+/**
+ * Detect if a prompt string resolves to a spec directory or spec file.
+ * Returns updated options if matched, or null if the prompt is plain text.
+ * Tries resultDir first, then effectiveWorkingDir as fallback.
+ */
+export async function smartDispatch(
+  prompt: string,
+  resultDir: string,
+  effectiveWorkingDir: string,
+): Promise<SmartDispatchResult | null> {
+  // Try directory match first
+  const resolvedDir = await resolveSpecDir(prompt, resultDir)
+    ?? (resultDir !== effectiveWorkingDir ? await resolveSpecDir(prompt, effectiveWorkingDir) : null);
+
+  if (resolvedDir) {
+    // Verify it contains .md files
+    try {
+      const dirFiles = await fs.readdir(resolvedDir);
+      if (dirFiles.some(f => f.endsWith('.md'))) {
+        return { specDir: resolvedDir, prompt: 'implement this specification' };
+      }
+    } catch {}
+  }
+
+  // Fall back to file match
+  const resolvedFile = await resolveSpecFile(prompt, resultDir)
+    ?? (resultDir !== effectiveWorkingDir ? await resolveSpecFile(prompt, effectiveWorkingDir) : null);
+
+  if (resolvedFile) {
+    return { specPath: resolvedFile, prompt: 'implement this specification' };
+  }
+
+  return null;
+}
+
 // Internal options type: ForgeOptions + worktree result dir
 type RunOptions = ForgeOptions & { _resultDir?: string };
 
@@ -332,7 +376,6 @@ async function runSpecsParallel(
         specPath: specFilePath,
         specContent,
         specDir: undefined,
-        parallel: undefined,
         quiet: true,
         _silent: true,
         _onActivity: (detail) => display.activity(i, detail),
@@ -370,7 +413,8 @@ async function runSpecBatch(
   satisfiedDeps?: Set<string>,
 ): Promise<{ results: BatchResult[]; hasTracker: boolean }> {
   const results: BatchResult[] = [];
-  const { quiet, parallel, sequentialFirst = 0 } = options;
+  const { quiet, sequential, sequentialFirst = 0 } = options;
+  const parallel = !sequential;
 
   // Load dependency metadata from spec frontmatter
   const specDeps = await loadSpecDeps(specFilePaths, specFileNames);
@@ -594,7 +638,7 @@ function printBatchSummary(
       console.log(`    forge audit ${specDir} "verify implementation"`);
     } else if (!allPassed) {
       console.log(`\n  ${DIM}Next step:${RESET}`);
-      console.log(`    forge run --rerun-failed -P "fix failures"`);
+      console.log(`    forge run --rerun-failed "fix failures"`);
     }
   }
 }
@@ -628,7 +672,7 @@ export async function filterPassedSpecs(
 
 // Main entry point - handles single spec or spec directory
 export async function runForge(options: ForgeOptions): Promise<void> {
-  const { specDir, specPath, quiet, parallel, sequentialFirst = 0, rerunFailed, pendingOnly, force, branch } = options;
+  const { specDir, specPath, quiet, sequential, sequentialFirst = 0, rerunFailed, pendingOnly, force, branch } = options;
 
   if (!quiet) {
     showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS');
@@ -663,7 +707,7 @@ export async function runForge(options: ForgeOptions): Promise<void> {
     : options;
 
   try {
-    const { anyPassed } = await runForgeInner(runOptions, workingDir, resultDir, quiet, parallel, sequentialFirst, rerunFailed, pendingOnly, force);
+    const { anyPassed } = await runForgeInner(runOptions, workingDir, resultDir, quiet, sequential, sequentialFirst, rerunFailed, pendingOnly, force);
 
     // Auto-commit on branch — skip if all specs failed
     if (worktreePath && originalRepoDir) {
@@ -700,13 +744,13 @@ async function runForgeInner(
   workingDir: string,
   resultDir: string,
   quiet: boolean | undefined,
-  parallel: boolean | undefined,
+  sequential: boolean | undefined,
   sequentialFirst: number,
   rerunFailed: boolean | undefined,
   pendingOnly: boolean | undefined,
   force: boolean | undefined,
 ): Promise<{ anyPassed: boolean }> {
-  const { specDir, specPath } = options;
+  const parallel = !sequential;
 
   // Re-resolve working dir since cwd may have been overridden for worktree
   const effectiveWorkingDir = await resolveWorkingDir(options.cwd);
@@ -716,6 +760,22 @@ async function runForgeInner(
 
   // Generate a unique run ID for batch grouping
   const runId = `${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
+
+  // ── Smart dispatch: detect if prompt is a spec dir or file ──
+  if (!options.specDir && !options.specPath && !rerunFailed && !pendingOnly) {
+    const dispatched = await smartDispatch(options.prompt, resultDir, effectiveWorkingDir);
+    if (dispatched) {
+      options = { ...options, ...dispatched };
+      if (!quiet) {
+        const label = dispatched.specDir ? 'spec directory' : 'spec file';
+        const target = dispatched.specDir || dispatched.specPath!;
+        console.log(`${DIM}[forge]${RESET} Detected ${label}: ${DIM}${path.relative(resultDir, target) || target}${RESET}\n`);
+      }
+    }
+  }
+
+  // Re-destructure after smart dispatch may have modified options
+  const { specDir, specPath } = options;
 
   // Rerun failed specs from latest batch
   if (rerunFailed) {
@@ -740,7 +800,7 @@ async function runForgeInner(
     const { results, hasTracker } = await runSpecBatch(failedPaths, failedNames, options, concurrency, runId);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
-    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false, undefined, hasTracker);
+    printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, undefined, hasTracker);
     return { anyPassed: results.some(r => r.status === 'success') };
   }
 
@@ -767,7 +827,7 @@ async function runForgeInner(
     const { results, hasTracker } = await runSpecBatch(pendingPaths, pendingNames, options, concurrency, runId);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
-    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false, undefined, hasTracker);
+    printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, undefined, hasTracker);
     return { anyPassed: results.some(r => r.status === 'success') };
   }
 
@@ -851,7 +911,7 @@ async function runForgeInner(
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
     const displayDir = path.relative(resultDir, resolvedDir) || resolvedDir;
-    printBatchSummary(results, wallClockDuration, parallel ?? false, quiet ?? false, displayDir, hasTracker);
+    printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, displayDir, hasTracker);
 
     return { anyPassed: results.some(r => r.status === 'success') };
   }
@@ -903,6 +963,89 @@ async function runForgeInner(
         findOrCreateEntry(manifest, key, resolveSpecSource(content, absSpec));
       }
     });
+  }
+
+  // ── Spec preflight: assess complexity and auto-split if needed ──
+  if (effectiveOptions.specPath && !options.noSplit) {
+    let preflightContent: string | undefined;
+    try {
+      preflightContent = await fs.readFile(effectiveOptions.specPath, 'utf-8');
+    } catch {}
+
+    if (preflightContent) {
+      const warning = assessSpecComplexity(path.basename(effectiveOptions.specPath), preflightContent);
+
+      if (warning) {
+        if (!quiet) {
+          console.log(`${DIM}[forge]${RESET} Spec appears complex (${warning.reasons.join('; ')}). Auto-splitting...\n`);
+        }
+
+        const outputDir = path.dirname(effectiveOptions.specPath);
+        const originalPath = effectiveOptions.specPath;
+        const originalContent = preflightContent;
+
+        // Track existing files before split (hoisted for catch cleanup)
+        const existingFiles = new Set(
+          (await fs.readdir(outputDir)).filter(f => f.endsWith('.md'))
+        );
+
+        try {
+
+          await runDefine({
+            prompt: originalContent,
+            outputDir,
+            cwd: effectiveWorkingDir,
+            model: options.model,
+            quiet: true,
+          });
+
+          // Identify newly generated files
+          const allFiles = (await fs.readdir(outputDir)).filter(f => f.endsWith('.md'));
+          const newFiles = allFiles.filter(f => !existingFiles.has(f)).sort();
+
+          if (newFiles.length > 0) {
+            // Remove original spec after successful split
+            await fs.unlink(originalPath);
+
+            if (!quiet) {
+              console.log(`${DIM}[forge]${RESET} Split into ${BOLD}${newFiles.length}${RESET} sub-specs\n`);
+            }
+
+            const specFilePaths = newFiles.map(f => path.join(outputDir, f));
+            const wallClockStart = Date.now();
+            const { results, hasTracker } = await runSpecBatch(specFilePaths, newFiles, options, concurrency, runId);
+            const wallClockDuration = (Date.now() - wallClockStart) / 1000;
+
+            const displayDir = path.relative(resultDir, outputDir) || outputDir;
+            printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, displayDir, hasTracker);
+
+            return { anyPassed: results.some(r => r.status === 'success') };
+          }
+
+          if (!quiet) {
+            console.log(`${DIM}[forge]${RESET} Auto-split produced no new specs. Running original...\n`);
+          }
+          // Fall through to run original spec
+        } catch {
+          // Clean up orphaned sub-specs from failed split
+          try {
+            const postFiles = (await fs.readdir(outputDir)).filter(f => f.endsWith('.md'));
+            const orphans = postFiles.filter(f => !existingFiles.has(f));
+            for (const orphan of orphans) {
+              await fs.unlink(path.join(outputDir, orphan)).catch(() => {});
+            }
+          } catch {}
+          // Restore original if it was deleted during failed split
+          try { await fs.access(originalPath); } catch {
+            await fs.writeFile(originalPath, originalContent);
+          }
+          if (!quiet) {
+            console.log(`${DIM}[forge]${RESET} Auto-split failed. Running original spec...\n`);
+          }
+          // Fall through to run original spec
+        }
+      }
+    }
   }
 
   // Single spec or no spec - run directly (throws on failure)
