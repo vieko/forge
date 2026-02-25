@@ -148,10 +148,11 @@ src/
 └── types.test.ts  # Type validation tests
 
 .forge/
-├── specs.json    # Spec lifecycle manifest (tracked specs, run history)
-├── audit.jsonl   # Tool call audit log (with spec filename)
-├── latest-session.json  # Session persistence for resume
-└── results/      # Run results (auto-created, gitignored)
+├── .gitignore    # Auto-created: tracks only specs.json
+├── specs.json    # Spec lifecycle manifest (committed to git)
+├── audit.jsonl   # Tool call audit log (gitignored)
+├── latest-session.json  # Session persistence for resume (gitignored)
+└── results/      # Run results (gitignored)
     └── <timestamp>/
         ├── summary.json  # Structured metadata (includes runId)
         └── result.md     # Full result text

@@ -17,6 +17,32 @@ export class ForgeError extends Error {
 
 export const execAsync = promisify(exec);
 
+// ── .forge/ directory bootstrap ──────────────────────────────
+
+const FORGE_GITIGNORE = `# Ignore everything except the manifest
+*
+!.gitignore
+!specs.json
+`;
+
+/**
+ * Ensure .forge/ exists and contains a .gitignore that tracks only specs.json.
+ * Idempotent — skips writing if .gitignore already exists.
+ */
+export async function ensureForgeDir(baseDir: string): Promise<string> {
+  const forgeDir = path.join(baseDir, '.forge');
+  await fs.mkdir(forgeDir, { recursive: true });
+
+  const gitignorePath = path.join(forgeDir, '.gitignore');
+  try {
+    await fs.access(gitignorePath);
+  } catch {
+    await fs.writeFile(gitignorePath, FORGE_GITIGNORE);
+  }
+
+  return forgeDir;
+}
+
 // ── Config ───────────────────────────────────────────────────
 
 export interface ForgeConfig {
@@ -211,6 +237,7 @@ export async function saveResult(
   const timestamp = result.startedAt.replace(/[:.]/g, '-');
   const resultsDir = path.join(workingDir, '.forge', 'results', timestamp);
 
+  await ensureForgeDir(workingDir);
   await fs.mkdir(resultsDir, { recursive: true });
 
   // Save structured summary

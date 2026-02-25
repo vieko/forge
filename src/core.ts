@@ -2,7 +2,7 @@ import { query as sdkQuery, type HookCallback } from '@anthropic-ai/claude-agent
 import type { ForgeResult, MonorepoContext } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { ForgeError, isTransientError, sleep, saveResult } from './utils.js';
+import { ForgeError, isTransientError, sleep, saveResult, ensureForgeDir } from './utils.js';
 import { DIM, RESET, CMD, AGENT_VERBS, createInlineSpinner, formatProgress } from './display.js';
 import { rewriteBuildCommand } from './verify.js';
 
@@ -154,7 +154,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
   const persistSession = async () => {
     const logPath = sessionId ? path.join(sessionDir, sessionId, 'stream.log') : undefined;
     const state = { sessionId, startedAt: startTime.toISOString(), model: modelName, cwd: workingDir, logPath, ...sessionExtra };
-    await fs.mkdir(path.join(persistBase, '.forge'), { recursive: true });
+    await ensureForgeDir(persistBase);
     await fs.writeFile(latestSessionPath, JSON.stringify(state, null, 2));
   };
   const stopHandler: HookCallback = async () => {
@@ -177,7 +177,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
         input: inp.tool_input,
       };
       if (!forgeDirCreated) {
-        await fs.mkdir(path.join(persistBase, '.forge'), { recursive: true });
+        await ensureForgeDir(persistBase);
         forgeDirCreated = true;
       }
       await fs.appendFile(auditPath, JSON.stringify(entry) + '\n');

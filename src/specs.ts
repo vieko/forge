@@ -4,7 +4,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { DIM, RESET, BOLD, CMD, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
-import { resolveConfig } from './utils.js';
+import { resolveConfig, ensureForgeDir } from './utils.js';
 import { parseSource } from './deps.js';
 
 // ── Manifest path ────────────────────────────────────────────
@@ -25,7 +25,7 @@ function lockPath(workingDir: string): string {
 
 async function acquireLock(workingDir: string, maxRetries = 10): Promise<void> {
   const lp = lockPath(workingDir);
-  await fs.mkdir(path.dirname(lp), { recursive: true });
+  await ensureForgeDir(workingDir);
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -82,7 +82,7 @@ export async function saveManifest(workingDir: string, manifest: SpecManifest): 
   const mp = manifestPath(workingDir);
   const tmp = mp + '.tmp';
 
-  await fs.mkdir(path.dirname(mp), { recursive: true });
+  await ensureForgeDir(workingDir);
   await fs.writeFile(tmp, JSON.stringify(manifest, null, 2));
   await fs.rename(tmp, mp);
 }
