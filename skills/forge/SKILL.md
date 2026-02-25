@@ -11,7 +11,7 @@ description: >-
   or straightforward work in the current repo that doesn't need autonomous agent execution.
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.7.0
+  version: 3.7.2
   author: vieko
 ---
 
@@ -71,6 +71,8 @@ forge audit specs/ "focus on auth module"       # With additional context
 forge audit specs/ -o ./remediation/            # Custom output dir
 forge audit specs/ -C ~/target-repo             # Different repo
 forge audit specs/ --watch                      # Auto-split tmux pane with live logs
+forge audit specs/ --fix                        # Audit-fix loop (audit -> fix -> re-audit)
+forge audit specs/ --fix --fix-rounds 5         # Custom max rounds (default: 3)
 ```
 
 ### forge define
@@ -241,8 +243,13 @@ forge run --spec-dir ./specs/ --sequential-first 2 "implement"
 ### Audit-then-fix loop
 
 ```bash
+# Manual: audit then run remediation specs
 forge audit specs/ -C ~/project                 # Find gaps
 forge run --spec-dir specs/audit/ -C ~/project "fix remaining"
+
+# Automated: convergence loop (audit -> fix -> re-audit, up to 3 rounds)
+forge audit specs/ --fix -C ~/project
+forge audit specs/ --fix --fix-rounds 5         # More rounds if needed
 ```
 
 ### Resume or fork after interruption

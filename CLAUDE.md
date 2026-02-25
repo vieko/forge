@@ -15,26 +15,30 @@ forge run "implement feature X"
 # With spec file
 forge run --spec .bonfire/specs/feature.md "implement this"
 
-# Run all specs in a directory sequentially
+# Run all specs in a directory (parallel by default, dep-graph aware)
 forge run --spec-dir ./specs/ "implement these"
 
-# Run specs in parallel (concurrency: auto-detected)
-forge run --spec-dir ./specs/ --parallel "implement these"
+# Smart dispatch: auto-detects spec dir or file from positional arg
+forge gtmeng-572                                # Detects spec dir, runs parallel
+forge auth.md                                   # Detects spec file, runs it
 
-# Run specs in parallel with custom concurrency
-forge run --spec-dir ./specs/ -P --concurrency 5 "implement these"
+# Run specs sequentially (opt out of auto-parallel)
+forge run --spec-dir ./specs/ --sequential "implement these"
+
+# Custom concurrency
+forge run --spec-dir ./specs/ --concurrency 5 "implement these"
 
 # Run first spec sequentially, then parallelize the rest
-forge run --spec-dir ./specs/ -P --sequential-first 1 "implement these"
+forge run --spec-dir ./specs/ --sequential-first 1 "implement these"
 
 # Rerun only failed specs from the latest batch
-forge run --rerun-failed -P -C ~/target-repo "fix failures"
+forge run --rerun-failed -C ~/target-repo "fix failures"
 
 # Run only pending specs from the manifest
-forge run --pending -P "implement pending specs"
+forge run --pending "implement pending specs"
 
 # Force re-run of already passed specs
-forge run --spec-dir ./specs/ -P --force "re-verify all"
+forge run --spec-dir ./specs/ --force "re-verify all"
 
 # Configurable max turns (default: 250)
 forge run --max-turns 150 "large task"
@@ -76,6 +80,8 @@ forge audit specs/ -C ~/target-repo             # Audit a different repo
 forge audit specs/ -o ./remediation/            # Custom output directory
 forge audit specs/ "focus on auth module"       # With additional context
 forge audit specs/ --watch                      # Auto-split tmux pane with live logs
+forge audit specs/ --fix                        # Audit-fix loop (audit → fix → re-audit)
+forge audit specs/ --fix --fix-rounds 5         # Custom max rounds (default: 3)
 
 # View run results
 forge status                    # Latest run
@@ -103,7 +109,7 @@ forge specs -C ~/other-repo     # Different working directory
 ## Architecture
 
 ```
-~4500 lines (source) + ~2000 lines (tests)
+~5000 lines (source) + ~2200 lines (tests)
 
 User Prompt
     ↓
@@ -132,11 +138,11 @@ src/
 ├── verify.ts      # detectVerification, runVerification, monorepo detection + scoping
 ├── core.ts        # QueryConfig, QueryResult, runQuery (SDK wrapper with hooks/streaming)
 ├── run.ts         # runSingleSpec, BatchResult
-├── specs.ts       # Spec manifest (lifecycle, reconcile, prune, addSpecs, resolveSpecs, showSpecs)
+├── specs.ts       # Spec manifest (lifecycle, reconcile, prune, addSpecs, resolveSpecs, assessSpecComplexity, showSpecs)
 ├── deps.ts        # Dependency parsing, topological sort, cycle detection, parseSource
-├── parallel.ts    # workerPool, autoDetectConcurrency, dep-aware execution, runForge, progressTracker
+├── parallel.ts    # workerPool, autoDetectConcurrency, dep-aware execution, runForge, smartDispatch, progressTracker
 ├── watch.ts       # WatchOptions, colorWatchLine, runWatch
-├── audit.ts       # runAudit + manifest integration
+├── audit.ts       # runAudit, runAuditRound, runAuditFixLoop + manifest integration
 ├── define.ts      # runDefine (spec generation from descriptions)
 ├── review.ts      # runReview
 ├── status.ts      # showStatus
@@ -162,21 +168,24 @@ src/
 
 1. **Prompt construction** — wraps user prompt in outcome-focused template with acceptance criteria
 2. **Agent execution** — single SDK `query()` call; agent decides its own approach (direct coding, task breakdown, etc.)
-3. **Parallel execution** — worker pool runs specs concurrently with auto-tuned concurrency (freeMem/2GB, capped at CPUs), braille spinner showing per-spec status and live tool activity
-4. **Sequential progress** — progress tracker shows checkpoint between each spec (`+` pass, `x` fail, `>` running, `-` pending); deduplicates with batch summary
-5. **Sequential-first** — optionally run foundation specs sequentially before parallelizing the rest
-6. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
-7. **Result persistence** — saves structured metadata (with runId for batch grouping) and full result text to `.forge/results/`
-8. **Cost tracking** — per-spec and total cost shown in batch summary, with next-step hint (audit on all-pass, rerun-failed on failures)
-9. **Rerun failed** — `--rerun-failed` finds failed specs from latest batch and reruns them
-10. **Run pending** — `--pending` runs only pending/stuck specs from the manifest
-11. **Status** — `forge status` shows results from recent runs grouped by batch
-12. **Retry on transient errors** — auto-retries rate limits and network errors (3 attempts, exponential backoff)
-13. **Audit** — `forge audit` reviews the codebase against specs via a single read-heavy `query()` call and produces new spec files for any remaining work; output feeds directly into `forge run --spec-dir`
-14. **Spec lifecycle** — `.forge/specs.json` manifest tracks every spec from registration through execution; `forge specs` shows status, run history, cost, and detects orphaned/untracked specs
-15. **Resolve specs** — `forge specs --resolve` marks specs as passed without running (for manually completed work)
-16. **Check specs** — `forge specs --check` uses a Sonnet agent to triage pending specs against the codebase and auto-resolve implemented ones
-17. **Watch auto-follow** — `forge watch` auto-follows to next session during sequential batch runs; renders spec divider headers (`Spec 1/3: name.md`) between sessions
+3. **Auto-parallel** — multi-spec runs are parallel by default with dep-graph-aware level ordering; `--sequential` opts out
+4. **Smart dispatch** — positional arg that resolves to a spec dir/file auto-dispatches as specs with "implement" prompt
+5. **Spec preflight** — single specs assessed for complexity; auto-split via `runDefine()` if too complex (>8 criteria, >500 words, >6 sections); `--no-split` opts out
+6. **Sequential progress** — progress tracker shows checkpoint between each spec (`+` pass, `x` fail, `>` running, `-` pending); deduplicates with batch summary
+7. **Sequential-first** — optionally run foundation specs sequentially before parallelizing the rest
+8. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts
+9. **Result persistence** — saves structured metadata (with runId for batch grouping) and full result text to `.forge/results/`
+10. **Cost tracking** — per-spec and total cost shown in batch summary, with next-step hint (audit on all-pass, rerun-failed on failures)
+11. **Rerun failed** — `--rerun-failed` finds failed specs from latest batch and reruns them
+12. **Run pending** — `--pending` runs only pending/stuck specs from the manifest
+13. **Status** — `forge status` shows results from recent runs grouped by batch
+14. **Retry on transient errors** — auto-retries rate limits, network errors, and 500 server errors (3 attempts, exponential backoff)
+15. **Audit** — `forge audit` reviews the codebase against specs via a single read-heavy `query()` call and produces new spec files for any remaining work; output feeds directly into `forge run --spec-dir`
+16. **Audit fix loop** — `forge audit --fix` runs a convergence cycle: audit → run remediation → re-audit, up to 3 rounds (configurable). Flat `remediation/` directory with round-prefixed specs (`r1-`, `r2-`)
+17. **Spec lifecycle** — `.forge/specs.json` manifest tracks every spec from registration through execution; `forge specs` shows status, run history, cost, and detects orphaned/untracked specs
+18. **Resolve specs** — `forge specs --resolve` marks specs as passed without running (for manually completed work)
+19. **Check specs** — `forge specs --check` uses a Sonnet agent to triage pending specs against the codebase and auto-resolve implemented ones
+20. **Watch auto-follow** — `forge watch` auto-follows to next session during sequential batch runs; renders spec divider headers (`Spec 1/3: name.md`) between sessions
 
 ## Spec Naming
 
