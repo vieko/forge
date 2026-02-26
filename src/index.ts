@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { program } from 'commander';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { runForge } from './parallel.js';
@@ -399,6 +399,56 @@ if (args.length > 0 && !COMMANDS.has(args[0])) {
     process.argv.splice(2, 0, 'run');
   }
 }
+
+// ── Extra Positional Arg Detection ──────────────────────────
+
+function detectExtraSpecArgs(): void {
+  const args = process.argv.slice(2);
+  const runIndex = args.indexOf('run');
+  if (runIndex === -1) return;
+
+  // Flags for the run command that consume the next arg as a value
+  const flagsWithValues = new Set([
+    '-s', '--spec', '-S', '--spec-dir', '-C', '--cwd', '-m', '--model',
+    '-t', '--max-turns', '-b', '--max-budget', '-r', '--resume', '-f', '--fork',
+    '--concurrency', '--sequential-first', '-B', '--branch',
+  ]);
+
+  const positionalArgs: string[] = [];
+  let i = runIndex + 1;
+  while (i < args.length) {
+    const arg = args[i];
+    if (arg === '--') {
+      break;
+    } else if (arg.startsWith('-')) {
+      // Handle --flag=value and -f=value
+      const flagName = arg.split('=')[0];
+      if (flagsWithValues.has(flagName)) {
+        i += arg.includes('=') ? 1 : 2;
+      } else {
+        i += 1;
+      }
+    } else {
+      positionalArgs.push(arg);
+      i++;
+    }
+  }
+
+  if (positionalArgs.length <= 1) return;
+
+  const extraArgs = positionalArgs.slice(1);
+  const specLikeExtras = extraArgs.filter(a => a.endsWith('.md') || existsSync(a));
+  if (specLikeExtras.length === 0) return;
+
+  // Include the first arg in the list if it also looks like a spec
+  const allSpecLike = positionalArgs.filter(a => a.endsWith('.md') || existsSync(a));
+  console.error(`Error: Multiple spec files detected as positional args (${allSpecLike.join(', ')}).`);
+  console.error('Use --spec-dir <dir> for batch runs, or --spec <file> for a single spec.');
+  process.exit(1);
+}
+
+// Run detection after shorthand alias injection, before Commander parses
+detectExtraSpecArgs();
 
 // Parse -C/--cwd early for SIGINT handler (before commander parses)
 function getTargetCwd(): string {

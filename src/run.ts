@@ -15,6 +15,36 @@ export interface BatchResult {
   duration: number;
 }
 
+/**
+ * Detect API error patterns in result text that indicate a false-pass.
+ * Returns true if the result text appears to be an SDK error rather than
+ * legitimate agent output.
+ *
+ * To avoid false-flagging legitimate responses that mention error handling,
+ * patterns must appear at the start of the result or anywhere within a short
+ * response (under 200 characters).
+ */
+export function isApiErrorResult(resultText: string): boolean {
+  const trimmed = (resultText || '').trim();
+  if (!trimmed) return false;
+
+  const errorPatterns = ['API Error:', 'Internal Server Error', 'overloaded_error'];
+
+  // Pattern at the start of resultText -- clear signal regardless of length
+  for (const pattern of errorPatterns) {
+    if (trimmed.startsWith(pattern)) return true;
+  }
+
+  // Pattern anywhere in a short response (under 200 chars) -- likely the entire response is an error
+  if (trimmed.length < 200) {
+    for (const pattern of errorPatterns) {
+      if (trimmed.includes(pattern)) return true;
+    }
+  }
+
+  return false;
+}
+
 export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string; _resultDir?: string }): Promise<ForgeResult> {
   const { prompt, specPath, specContent, cwd, model, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir } = options;
   const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
@@ -251,6 +281,53 @@ forge run --resume ${qr.sessionId} "fix verification errors"
         if (!quiet) console.log(`${DIM}[forge]${RESET} \x1b[32mVerification passed!\x1b[0m\n`);
         if (qr.logPath) streamLogAppend(qr.logPath, 'Verify: + passed');
       }
+    }
+
+    // Guard: detect API error in result text (bug #19 -- false-pass on 500 after verification)
+    const apiErrorDetected = isApiErrorResult(qr.resultText);
+    const emptyWithNoCost = (qr.resultText || '').trim().length < 20 && (!qr.costUsd || qr.costUsd === 0);
+    if (apiErrorDetected || emptyWithNoCost) {
+      const note = '[forge] Result overridden to failed: API error detected in response.';
+      if (!quiet) console.log(`\n${DIM}[forge]${RESET} \x1b[33m${note}\x1b[0m`);
+      if (qr.logPath) streamLogAppend(qr.logPath, `Override: x ${note}`);
+
+      const overrideResult: ForgeResult = {
+        startedAt: startTime.toISOString(),
+        completedAt: endTime.toISOString(),
+        durationSeconds,
+        status: 'error_execution',
+        costUsd: qr.costUsd,
+        specPath,
+        prompt,
+        model: modelName,
+        cwd: workingDir,
+        sessionId: qr.sessionId,
+        forkedFrom: isFork ? options.fork : undefined,
+        runId: _runId,
+        error: note,
+      };
+
+      const overriddenText = `${qr.resultText}\n\n${note}`;
+      const errorResultsDir = await saveResult(resultDir, overrideResult, overriddenText);
+
+      // Update spec manifest as failed
+      const failSpecId = specPath ? specKey(specPath, resultDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
+      if (failSpecId) {
+        await withManifestLock(resultDir, (manifest) => {
+          const entry = findOrCreateEntry(manifest, failSpecId, resolveSpecSource(finalSpecContent, specPath));
+          entry.runs.push({
+            runId: _runId || overrideResult.startedAt,
+            timestamp: overrideResult.startedAt,
+            resultPath: path.relative(resultDir, errorResultsDir),
+            status: 'failed',
+            costUsd: overrideResult.costUsd,
+            durationSeconds: overrideResult.durationSeconds,
+          });
+          updateEntryStatus(entry);
+        });
+      }
+
+      throw new ForgeError(note, overrideResult);
     }
 
     // Save result to .forge/results/
