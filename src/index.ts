@@ -71,7 +71,6 @@ program
   .option('--rerun-failed', 'Rerun only failed specs from latest batch')
   .option('--pending', 'Run only pending specs from the manifest')
   .option('-F, --force', 'Re-run all specs including already passed')
-  .option('--no-split', 'Skip automatic spec splitting for complex specs')
   .option('-B, --branch <name>', 'Run in an isolated git worktree on the named branch')
   .option('-w, --watch', 'Open a tmux pane with live session logs')
   .action(async (prompt: string, options: {
@@ -93,7 +92,6 @@ program
     rerunFailed?: boolean;
     pending?: boolean;
     force?: boolean;
-    noSplit?: boolean;
     branch?: string;
     watch?: boolean;
   }) => {
@@ -137,7 +135,6 @@ program
         rerunFailed: options.rerunFailed,
         pendingOnly: options.pending,
         force: options.force,
-        noSplit: options.noSplit,
         branch: options.branch,
       });
     } catch (error) {

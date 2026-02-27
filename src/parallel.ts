@@ -8,7 +8,6 @@ import { runSingleSpec, type BatchResult } from './run.js';
 import { loadSpecDeps, topoSort, hasDependencies, type SpecDep, type DepLevel } from './deps.js';
 import { withManifestLock, findOrCreateEntry, specKey, loadManifest, resolveSpecFile, resolveSpecDir, resolveSpecSource, assessSpecComplexity } from './specs.js';
 import { resolveWorkingDir } from './utils.js';
-import { runDefine } from './define.js';
 
 // Worker pool: runs tasks with bounded concurrency
 async function workerPool<T, R>(
@@ -906,102 +905,17 @@ async function runForgeInner(
 
     const specFilePaths = specFiles.map(f => path.join(resolvedDir, f));
 
-    // ── Spec-dir preflight: assess complexity and auto-split, respecting dependency targets ──
-    if (!options.noSplit && specFiles.length > 1) {
-      specFiles = [...specFiles]; // avoid mutating allSpecFiles
-      let batchDeps: SpecDep[] | null = null;
-      try {
-        batchDeps = await loadSpecDeps(specFilePaths, specFiles);
-      } catch {
-        // Dependency scan failed — skip all preflight splits conservatively
-      }
-
-      if (batchDeps) {
-        for (let i = specFiles.length - 1; i >= 0; i--) {
-          const specFile = specFiles[i];
-          const specFilePath = specFilePaths[i];
-
-          let preflightContent: string | undefined;
-          try {
-            preflightContent = await fs.readFile(specFilePath, 'utf-8');
-          } catch {
-            continue;
+    // ── Spec-dir preflight: warn about complex specs ──
+    if (!quiet) {
+      for (const specFile of specFiles) {
+        const specFilePath = path.join(resolvedDir, specFile);
+        try {
+          const content = await fs.readFile(specFilePath, 'utf-8');
+          const warning = assessSpecComplexity(specFile, content);
+          if (warning) {
+            console.log(`\x1b[33m[forge]\x1b[0m ${specFile}: ${warning.reasons.join('; ')}. Consider splitting with: forge define --spec ${specFile}`);
           }
-
-          const warning = assessSpecComplexity(specFile, preflightContent);
-          if (!warning) continue;
-
-          // Check if any other spec in the batch depends on this one
-          const isDependedUpon = batchDeps.some(dep =>
-            dep.name !== specFile &&
-            dep.depends.some(d => d === specFile || path.basename(d) === path.basename(specFile))
-          );
-
-          if (isDependedUpon) {
-            console.error(`${DIM}[forge]${RESET} Skipping auto-split for ${specFile}: other specs depend on it`);
-            continue;
-          }
-
-          if (!quiet) {
-            console.log(`${DIM}[forge]${RESET} Spec ${specFile} appears complex (${warning.reasons.join('; ')}). Auto-splitting...`);
-          }
-
-          const existingDirFiles = new Set(
-            (await fs.readdir(resolvedDir)).filter(f => f.endsWith('.md'))
-          );
-
-          const splitStart = Date.now();
-          const splitTimer = !quiet ? setInterval(() => {
-            const elapsed = ((Date.now() - splitStart) / 1000).toFixed(0);
-            process.stdout.write(`\r${DIM}[forge]${RESET} Splitting ${specFile}... ${DIM}${elapsed}s${RESET}`);
-          }, 1000) : undefined;
-
-          try {
-            await runDefine({
-              prompt: preflightContent,
-              outputDir: resolvedDir,
-              cwd: effectiveWorkingDir,
-              model: options.model,
-              quiet: true,
-            });
-
-            if (splitTimer) clearInterval(splitTimer);
-            if (!quiet) process.stdout.write('\n');
-
-            const allDirFiles = (await fs.readdir(resolvedDir)).filter(f => f.endsWith('.md'));
-            const newFiles = allDirFiles.filter(f => !existingDirFiles.has(f)).sort();
-
-            if (newFiles.length > 0) {
-              await fs.unlink(specFilePath);
-              specFiles.splice(i, 1, ...newFiles);
-              specFilePaths.splice(i, 1, ...newFiles.map(f => path.join(resolvedDir, f)));
-
-              if (!quiet) {
-                console.log(`${DIM}[forge]${RESET} Split ${specFile} into ${BOLD}${newFiles.length}${RESET} sub-specs\n`);
-              }
-            }
-          } catch {
-            if (splitTimer) clearInterval(splitTimer);
-            if (!quiet) process.stdout.write('\n');
-            // Clean up orphaned sub-specs from failed split
-            try {
-              const postFiles = (await fs.readdir(resolvedDir)).filter(f => f.endsWith('.md'));
-              const orphans = postFiles.filter(f => !existingDirFiles.has(f));
-              for (const orphan of orphans) {
-                await fs.unlink(path.join(resolvedDir, orphan)).catch(() => {});
-              }
-            } catch {}
-            // Restore original if deleted during failed split
-            try {
-              await fs.access(specFilePath);
-            } catch {
-              await fs.writeFile(specFilePath, preflightContent!);
-            }
-            if (!quiet) {
-              console.log(`${DIM}[forge]${RESET} Auto-split failed for ${specFile}. Running original...\n`);
-            }
-          }
-        }
+        } catch {}
       }
     }
 
@@ -1064,97 +978,15 @@ async function runForgeInner(
     });
   }
 
-  // ── Spec preflight: assess complexity and auto-split if needed ──
-  if (effectiveOptions.specPath && !options.noSplit) {
-    let preflightContent: string | undefined;
+  // ── Spec preflight: warn about complex specs ──
+  if (effectiveOptions.specPath && !quiet) {
     try {
-      preflightContent = await fs.readFile(effectiveOptions.specPath, 'utf-8');
-    } catch {}
-
-    if (preflightContent) {
-      const warning = assessSpecComplexity(path.basename(effectiveOptions.specPath), preflightContent);
-
+      const content = await fs.readFile(effectiveOptions.specPath, 'utf-8');
+      const warning = assessSpecComplexity(path.basename(effectiveOptions.specPath), content);
       if (warning) {
-        if (!quiet) {
-          console.log(`${DIM}[forge]${RESET} Spec appears complex (${warning.reasons.join('; ')}). Auto-splitting...`);
-        }
-
-        const outputDir = path.dirname(effectiveOptions.specPath);
-        const originalPath = effectiveOptions.specPath;
-        const originalContent = preflightContent;
-
-        // Track existing files before split (hoisted for catch cleanup)
-        const existingFiles = new Set(
-          (await fs.readdir(outputDir)).filter(f => f.endsWith('.md'))
-        );
-
-        const splitStart = Date.now();
-        const splitTimer = !quiet ? setInterval(() => {
-          const elapsed = ((Date.now() - splitStart) / 1000).toFixed(0);
-          process.stdout.write(`\r${DIM}[forge]${RESET} Splitting ${path.basename(effectiveOptions.specPath!)}... ${DIM}${elapsed}s${RESET}`);
-        }, 1000) : undefined;
-
-        try {
-          await runDefine({
-            prompt: originalContent,
-            outputDir,
-            cwd: effectiveWorkingDir,
-            model: options.model,
-            quiet: true,
-          });
-
-          if (splitTimer) clearInterval(splitTimer);
-          if (!quiet) process.stdout.write('\n');
-
-          // Identify newly generated files
-          const allFiles = (await fs.readdir(outputDir)).filter(f => f.endsWith('.md'));
-          const newFiles = allFiles.filter(f => !existingFiles.has(f)).sort();
-
-          if (newFiles.length > 0) {
-            // Remove original spec after successful split
-            await fs.unlink(originalPath);
-
-            if (!quiet) {
-              console.log(`${DIM}[forge]${RESET} Split into ${BOLD}${newFiles.length}${RESET} sub-specs\n`);
-            }
-
-            const specFilePaths = newFiles.map(f => path.join(outputDir, f));
-            const wallClockStart = Date.now();
-            const { results, hasTracker } = await runSpecBatch(specFilePaths, newFiles, options, concurrency, runId);
-            const wallClockDuration = (Date.now() - wallClockStart) / 1000;
-
-            const displayDir = path.relative(resultDir, outputDir) || outputDir;
-            printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, displayDir, hasTracker);
-
-            return { anyPassed: results.some(r => r.status === 'success') };
-          }
-
-          if (!quiet) {
-            console.log(`${DIM}[forge]${RESET} Auto-split produced no new specs. Running original...\n`);
-          }
-          // Fall through to run original spec
-        } catch {
-          if (splitTimer) clearInterval(splitTimer);
-          if (!quiet) process.stdout.write('\n');
-          // Clean up orphaned sub-specs from failed split
-          try {
-            const postFiles = (await fs.readdir(outputDir)).filter(f => f.endsWith('.md'));
-            const orphans = postFiles.filter(f => !existingFiles.has(f));
-            for (const orphan of orphans) {
-              await fs.unlink(path.join(outputDir, orphan)).catch(() => {});
-            }
-          } catch {}
-          // Restore original if it was deleted during failed split
-          try { await fs.access(originalPath); } catch {
-            await fs.writeFile(originalPath, originalContent);
-          }
-          if (!quiet) {
-            console.log(`${DIM}[forge]${RESET} Auto-split failed. Running original spec...\n`);
-          }
-          // Fall through to run original spec
-        }
+        console.log(`\x1b[33m[forge]\x1b[0m ${path.basename(effectiveOptions.specPath)}: ${warning.reasons.join('; ')}. Consider splitting with: forge define --spec ${path.basename(effectiveOptions.specPath)}\n`);
       }
-    }
+    } catch {}
   }
 
   // Single spec or no spec - run directly (throws on failure)
