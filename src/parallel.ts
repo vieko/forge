@@ -851,8 +851,9 @@ async function runForgeInner(
       throw err;
     }
 
+    const SKIP_FILES = new Set(['index.md', 'readme.md']);
     const allSpecFiles = files
-      .filter(f => f.endsWith('.md'))
+      .filter(f => f.endsWith('.md') && !SKIP_FILES.has(f.toLowerCase()))
       .sort(); // Alphabetical order for predictable execution
 
     if (allSpecFiles.length === 0) {
