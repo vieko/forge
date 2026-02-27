@@ -943,12 +943,18 @@ async function runForgeInner(
           }
 
           if (!quiet) {
-            console.log(`${DIM}[forge]${RESET} Spec ${specFile} appears complex (${warning.reasons.join('; ')}). Auto-splitting...\n`);
+            console.log(`${DIM}[forge]${RESET} Spec ${specFile} appears complex (${warning.reasons.join('; ')}). Auto-splitting...`);
           }
 
           const existingDirFiles = new Set(
             (await fs.readdir(resolvedDir)).filter(f => f.endsWith('.md'))
           );
+
+          const splitStart = Date.now();
+          const splitTimer = !quiet ? setInterval(() => {
+            const elapsed = ((Date.now() - splitStart) / 1000).toFixed(0);
+            process.stdout.write(`\r${DIM}[forge]${RESET} Splitting ${specFile}... ${DIM}${elapsed}s${RESET}`);
+          }, 1000) : undefined;
 
           try {
             await runDefine({
@@ -958,6 +964,9 @@ async function runForgeInner(
               model: options.model,
               quiet: true,
             });
+
+            if (splitTimer) clearInterval(splitTimer);
+            if (!quiet) process.stdout.write('\n');
 
             const allDirFiles = (await fs.readdir(resolvedDir)).filter(f => f.endsWith('.md'));
             const newFiles = allDirFiles.filter(f => !existingDirFiles.has(f)).sort();
@@ -972,6 +981,8 @@ async function runForgeInner(
               }
             }
           } catch {
+            if (splitTimer) clearInterval(splitTimer);
+            if (!quiet) process.stdout.write('\n');
             // Clean up orphaned sub-specs from failed split
             try {
               const postFiles = (await fs.readdir(resolvedDir)).filter(f => f.endsWith('.md'));
@@ -1065,7 +1076,7 @@ async function runForgeInner(
 
       if (warning) {
         if (!quiet) {
-          console.log(`${DIM}[forge]${RESET} Spec appears complex (${warning.reasons.join('; ')}). Auto-splitting...\n`);
+          console.log(`${DIM}[forge]${RESET} Spec appears complex (${warning.reasons.join('; ')}). Auto-splitting...`);
         }
 
         const outputDir = path.dirname(effectiveOptions.specPath);
@@ -1077,8 +1088,13 @@ async function runForgeInner(
           (await fs.readdir(outputDir)).filter(f => f.endsWith('.md'))
         );
 
-        try {
+        const splitStart = Date.now();
+        const splitTimer = !quiet ? setInterval(() => {
+          const elapsed = ((Date.now() - splitStart) / 1000).toFixed(0);
+          process.stdout.write(`\r${DIM}[forge]${RESET} Splitting ${path.basename(effectiveOptions.specPath!)}... ${DIM}${elapsed}s${RESET}`);
+        }, 1000) : undefined;
 
+        try {
           await runDefine({
             prompt: originalContent,
             outputDir,
@@ -1086,6 +1102,9 @@ async function runForgeInner(
             model: options.model,
             quiet: true,
           });
+
+          if (splitTimer) clearInterval(splitTimer);
+          if (!quiet) process.stdout.write('\n');
 
           // Identify newly generated files
           const allFiles = (await fs.readdir(outputDir)).filter(f => f.endsWith('.md'));
@@ -1115,6 +1134,8 @@ async function runForgeInner(
           }
           // Fall through to run original spec
         } catch {
+          if (splitTimer) clearInterval(splitTimer);
+          if (!quiet) process.stdout.write('\n');
           // Clean up orphaned sub-specs from failed split
           try {
             const postFiles = (await fs.readdir(outputDir)).filter(f => f.endsWith('.md'));
