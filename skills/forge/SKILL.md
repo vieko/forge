@@ -11,7 +11,7 @@ description: >-
   or straightforward work in the current repo that doesn't need autonomous agent execution.
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.7.4
+  version: 3.7.5
   author: vieko
 ---
 
@@ -77,7 +77,7 @@ forge audit specs/ --fix --fix-rounds 5         # Custom max rounds (default: 3)
 
 ### forge define
 
-Analyzes codebase and generates outcome spec files from a high-level description. Closes the loop: `forge define` → `forge specs` → `forge run --spec-dir`.
+Analyzes codebase and generates outcome spec files from a high-level description. Closes the loop: `forge define` → `forge specs` → `forge <spec-dir> "implement"`.
 
 ```bash
 forge define "build auth system"                # Generate specs in specs/
