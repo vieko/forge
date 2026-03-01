@@ -82,6 +82,18 @@ export async function showStatus(options: { cwd?: string; all?: boolean; last?: 
     console.log(`  Duration: ${BOLD}${totalDuration.toFixed(1)}s${RESET}`);
     console.log(`  Cost:     ${BOLD}$${totalCost.toFixed(2)}${RESET}`);
     console.log(`  Result:   ${successCount === specs.length ? '\x1b[32m' : '\x1b[33m'}${successCount}/${specs.length} successful\x1b[0m`);
+
+    // Next-step hint (only for the most recent group)
+    if (key === displayed[0][0]) {
+      const specDir = specs[0].specPath ? path.dirname(specs[0].specPath) : null;
+      if (successCount < specs.length) {
+        console.log(`\n  ${DIM}Next step:${RESET}`);
+        console.log(`    forge run --rerun-failed "fix failures"`);
+      } else if (specDir && isBatch) {
+        console.log(`\n  ${DIM}Next step:${RESET}`);
+        console.log(`    forge audit ${specDir} --fix "verify and fix"`);
+      }
+    }
   }
 
   console.log('');

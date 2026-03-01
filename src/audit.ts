@@ -68,7 +68,8 @@ async function resolveAuditInputs(
       resolvedSpecDir = resolvedDir;
       try {
         const files = await fs.readdir(resolvedSpecDir);
-        specFiles = files.filter(f => f.endsWith('.md')).sort();
+        const SKIP_FILES = new Set(['index.md', 'readme.md']);
+        specFiles = files.filter(f => f.endsWith('.md') && !SKIP_FILES.has(f.toLowerCase())).sort();
       } catch {
         throw new Error(`Spec path not found: ${resolvedSpecDir}`);
       }
@@ -77,7 +78,8 @@ async function resolveAuditInputs(
     resolvedSpecDir = directPath;
     try {
       const files = await fs.readdir(resolvedSpecDir);
-      specFiles = files.filter(f => f.endsWith('.md')).sort();
+      const SKIP_FILES = new Set(['index.md', 'readme.md']);
+      specFiles = files.filter(f => f.endsWith('.md') && !SKIP_FILES.has(f.toLowerCase())).sort();
     } catch {
       throw new Error(`Spec directory not found: ${resolvedSpecDir}`);
     }
@@ -327,7 +329,8 @@ export async function runAudit(options: AuditOptions): Promise<void> {
       const relOutputDir = path.relative(workingDir, outputDir) || outputDir;
       console.log(`\n  ${BOLD}${result.outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
       result.outputSpecs.forEach((f, i) => console.log(`    ${DIM}${i + 1}.${RESET} ${f}`));
-      console.log(`\n  Next step:\n    ${CMD}forge audit ${relOutputDir.includes(' ') ? `"${relOutputDir}"` : relOutputDir} --fix${RESET}`);
+      const relSpecDir = path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir;
+      console.log(`\n  Next step:\n    ${CMD}forge audit ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir} --fix "verify and fix"${RESET}`);
     }
     console.log('');
   }

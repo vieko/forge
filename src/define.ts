@@ -204,7 +204,7 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
       const relOutput = path.relative(workingDir, outputDir);
       const dirArg = relOutput.startsWith('..') ? outputDir : relOutput;
       const cwdFlag = workingDir !== process.cwd() ? ` -C ${workingDir}` : '';
-      console.log(`\n  Next step:\n    ${CMD}forge run --spec-dir ${dirArg}${cwdFlag} "implement"${RESET}`);
+      console.log(`\n  Next step:\n    ${CMD}forge ${dirArg}${cwdFlag} "implement"${RESET}`);
     }
     console.log('');
   }

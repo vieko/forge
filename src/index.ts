@@ -54,7 +54,7 @@ program
   .description('Run a task with AI agents')
   .argument('<prompt>', 'The task to accomplish')
   .option('-s, --spec <path>', 'Path to spec file (.md)')
-  .option('-S, --spec-dir <path>', 'Path to specs directory (runs each .md sequentially)')
+  .option('-S, --spec-dir <path>', 'Path to specs directory (runs each .md in parallel)')
   .option('-C, --cwd <path>', 'Working directory (target repo)')
   .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'opus')
   .option('-t, --max-turns <n>', 'Maximum turns per spec (default: 250)', '250')

@@ -386,7 +386,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       // Next-step hint for spec runs
       if (specPath && !dryRun && !planOnly) {
         console.log(`\n  ${DIM}Next step:${RESET}`);
-        console.log(`    forge audit ${path.basename(specPath)} "verify implementation"`);
+        console.log(`    forge audit ${path.basename(specPath)} --fix "verify and fix"`);
       }
     }
 

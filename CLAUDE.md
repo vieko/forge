@@ -64,6 +64,12 @@ forge run --resume <session-id> "continue"
 # Fork from a previous session (new session, same history)
 forge run --fork <session-id> "try different approach"
 
+# Run in isolated git worktree
+forge run --spec-dir ./specs/ --branch feat "implement"
+
+# Auto-split tmux pane with live logs
+forge run --watch "implement feature X"
+
 # Quick alias (no 'run' needed)
 forge "simple task"
 
@@ -104,12 +110,22 @@ forge specs --check             # Auto-resolve already-implemented pending specs
 forge specs --reconcile         # Backfill manifest from .forge/results/ history
 forge specs --prune             # Remove orphaned entries from manifest
 forge specs -C ~/other-repo     # Different working directory
+
+# Review recent git changes
+forge review                    # Review main...HEAD
+forge review HEAD~5...HEAD      # Specific range
+forge review -C ~/other-repo    # Different repo
+
+# Watch live session logs
+forge watch                     # Watch latest session (auto-follows batch)
+forge watch <session-id>        # Watch specific session
+forge watch -C ~/other-repo     # Different repo
 ```
 
 ## Architecture
 
 ```
-~5000 lines (source) + ~2200 lines (tests)
+~6000 lines (source) + ~3200 lines (tests)
 
 User Prompt
     ↓
@@ -119,7 +135,7 @@ Agent SDK query()  ────────────────────�
     ↓                                    │ parallel mode:
 Agent works autonomously                 │ worker pool with
     ↓                                    │ auto-tuned concurrency,
-System-level verification                │ braille spinner display,
+System-level verification                │ ASCII spinner display,
     ├── Auto-detect project (Node/Cargo/Go)  live tool activity
     ├── Run: tsc --noEmit, npm run build, npm test
     ├── Pass → save results
@@ -147,11 +163,13 @@ src/
 ├── review.ts      # runReview
 ├── status.ts      # showStatus
 ├── types.ts       # TypeScript types (ForgeResult, SpecManifest, SpecEntry, SpecRun, DefineOptions, MonorepoContext)
-├── query.test.ts  # Tests for core utilities
-├── deps.test.ts   # Tests for dependency + parseSource
-├── specs.test.ts  # Tests for manifest CRUD, locking, integration lifecycle
-├── verify.test.ts # Tests for monorepo detection, scoping, rewriting
-└── types.test.ts  # Type validation tests
+├── query.test.ts    # Tests for core utilities
+├── deps.test.ts     # Tests for dependency + parseSource
+├── specs.test.ts    # Tests for manifest CRUD, locking, integration lifecycle
+├── verify.test.ts   # Tests for monorepo detection, scoping, rewriting
+├── worktree.test.ts # Tests for worktree create, commit, cleanup
+├── define.test.ts   # Tests for spec complexity assessment
+└── types.test.ts    # Type validation tests
 
 .forge/
 ├── .gitignore    # Auto-created: tracks only specs.json
@@ -170,7 +188,7 @@ src/
 2. **Agent execution** — single SDK `query()` call; agent decides its own approach (direct coding, task breakdown, etc.)
 3. **Auto-parallel** — multi-spec runs are parallel by default with dep-graph-aware level ordering; `--sequential` opts out
 4. **Smart dispatch** — positional arg that resolves to a spec dir/file auto-dispatches as specs with "implement" prompt
-5. **Spec preflight** — single specs assessed for complexity; auto-split via `runDefine()` if too complex (>8 criteria, >500 words, >6 sections); `--no-split` opts out
+5. **Spec preflight** — single specs assessed for complexity; warns if over thresholds (>8 criteria, >500 words, >6 sections)
 6. **Sequential progress** — progress tracker shows checkpoint between each spec (`+` pass, `x` fail, `>` running, `-` pending); deduplicates with batch summary
 7. **Sequential-first** — optionally run foundation specs sequentially before parallelizing the rest
 8. **Verification** — auto-detects project type, runs build/test commands, feeds errors back for up to 3 fix attempts

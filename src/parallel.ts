@@ -634,7 +634,7 @@ function printBatchSummary(
     // Next-step hint
     if (allPassed && specDir) {
       console.log(`\n  ${DIM}Next step:${RESET}`);
-      console.log(`    forge audit ${specDir} "verify implementation"`);
+      console.log(`    forge audit ${specDir} --fix "verify and fix"`);
     } else if (!allPassed) {
       console.log(`\n  ${DIM}Next step:${RESET}`);
       console.log(`    forge run --rerun-failed "fix failures"`);
@@ -914,7 +914,7 @@ async function runForgeInner(
           const content = await fs.readFile(specFilePath, 'utf-8');
           const warning = assessSpecComplexity(specFile, content);
           if (warning) {
-            console.log(`\x1b[33m[forge]\x1b[0m ${specFile}: ${warning.reasons.join('; ')}. Consider splitting with: forge define --spec ${specFile}`);
+            console.log(`\x1b[33m[forge]\x1b[0m ${specFile}: ${warning.reasons.join('; ')}. Consider splitting with: forge define "${specFile}"`);
           }
         } catch {}
       }
@@ -985,7 +985,7 @@ async function runForgeInner(
       const content = await fs.readFile(effectiveOptions.specPath, 'utf-8');
       const warning = assessSpecComplexity(path.basename(effectiveOptions.specPath), content);
       if (warning) {
-        console.log(`\x1b[33m[forge]\x1b[0m ${path.basename(effectiveOptions.specPath)}: ${warning.reasons.join('; ')}. Consider splitting with: forge define --spec ${path.basename(effectiveOptions.specPath)}\n`);
+        console.log(`\x1b[33m[forge]\x1b[0m ${path.basename(effectiveOptions.specPath)}: ${warning.reasons.join('; ')}. Consider splitting with: forge define "${path.basename(effectiveOptions.specPath)}"\n`);
       }
     } catch {}
   }
