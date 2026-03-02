@@ -5,6 +5,7 @@ import path from 'path';
 import { ForgeError, isTransientError, sleep, saveResult, ensureForgeDir } from './utils.js';
 import { DIM, RESET, CMD, AGENT_VERBS, createInlineSpinner, formatProgress } from './display.js';
 import { rewriteBuildCommand } from './verify.js';
+import { getAbortController } from './abort.js';
 
 // What callers pass to runQuery()
 export interface QueryConfig {
@@ -215,6 +216,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
           },
           maxTurns,
           maxBudgetUsd,
+          abortController: getAbortController(),
           ...(resume && { resume }),
           ...(forkSession && { forkSession: true }),
         }

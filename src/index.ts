@@ -12,6 +12,7 @@ import { runWatch } from './watch.js';
 import { showSpecs } from './specs.js';
 import { runDefine } from './define.js';
 import { showStats } from './stats.js';
+import { triggerAbort, isInterrupted } from './abort.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -41,6 +42,21 @@ function parseBudget(value?: string): number | undefined {
 
 function parseTurns(value: string | undefined, fallback: number): number {
   return value ? parseInt(value, 10) : fallback;
+}
+
+// Block SDK-invoking commands when running inside Claude Code.
+// Claude Code sets CLAUDECODE=1 in the env of every Bash subprocess.
+// The Agent SDK can't nest inside an active session.
+function guardNestedSession(): void {
+  if (process.env.CLAUDECODE !== '1') return;
+  if (process.env.FORGE_ALLOW_NESTED === '1') return;
+
+  // Reconstruct the command with proper quoting for args containing spaces
+  const cmd = process.argv.slice(2).map(a => a.includes(' ') ? `"${a}"` : a).join(' ');
+  console.error(`forge: Cannot run inside Claude Code (nested SDK).`);
+  console.error(`\nRun in a separate terminal:\n`);
+  console.error(`  forge ${cmd}\n`);
+  process.exit(1);
 }
 
 // ── Commands ─────────────────────────────────────────────────
@@ -96,6 +112,7 @@ program
     branch?: string;
     watch?: boolean;
   }) => {
+    guardNestedSession();
     validateSession(options.resume, options.fork);
     validateBudget(options.maxBudget);
 
@@ -104,11 +121,12 @@ program
       if (process.env.TMUX) {
         const watchCwd = options.cwd ? ` -C ${options.cwd}` : '';
         const { exec: execCb } = await import('child_process');
-        execCb(`tmux split-window -h "forge watch${watchCwd}"`, (err) => {
+        const child = execCb(`tmux split-window -h "forge watch${watchCwd}"`, (err) => {
           if (err && !options.quiet) {
             console.error('\x1b[2m[forge]\x1b[0m Could not open tmux watch pane:', err.message);
           }
         });
+        child.unref();
       } else if (!options.quiet) {
         console.log("\x1b[2m[forge]\x1b[0m Tip: Run '\x1b[36mforge watch\x1b[0m' in another terminal for live logs");
         console.log("\x1b[2m[forge]\x1b[0m (or use --watch inside tmux for auto-split)\n");
@@ -194,6 +212,7 @@ program
     fork?: string;
     watch?: boolean;
   }) => {
+    guardNestedSession();
     validateSession(options.resume, options.fork);
     validateBudget(options.maxBudget);
 
@@ -201,11 +220,12 @@ program
       if (process.env.TMUX) {
         const watchCwd = options.cwd ? ` -C ${options.cwd}` : '';
         const { exec: execCb } = await import('child_process');
-        execCb(`tmux split-window -h "forge watch${watchCwd}"`, (err) => {
+        const child = execCb(`tmux split-window -h "forge watch${watchCwd}"`, (err) => {
           if (err && !options.quiet) {
             console.error('\x1b[2m[forge]\x1b[0m Could not open tmux watch pane:', err.message);
           }
         });
+        child.unref();
       } else if (!options.quiet) {
         console.log("\x1b[2m[forge]\x1b[0m Tip: Run '\x1b[36mforge watch\x1b[0m' in another terminal for live logs");
         console.log("\x1b[2m[forge]\x1b[0m (or use --watch inside tmux for auto-split)\n");
@@ -258,6 +278,7 @@ program
     resume?: string;
     fork?: string;
   }) => {
+    guardNestedSession();
     validateSession(options.resume, options.fork);
     validateBudget(options.maxBudget);
     try {
@@ -301,6 +322,7 @@ program
     dryRun?: boolean;
     output?: string;
   }) => {
+    guardNestedSession();
     validateBudget(options.maxBudget);
     try {
       await runReview({
@@ -366,6 +388,7 @@ program
     unresolve?: string;
     check?: boolean;
   }) => {
+    if (options.check) guardNestedSession();
     try {
       await showSpecs({
         cwd: options.cwd,
@@ -491,19 +514,26 @@ function getTargetCwd(): string {
   return process.cwd();
 }
 
-// Handle SIGINT gracefully
+// Handle SIGINT gracefully — two-phase shutdown
+// First Ctrl-C: abort running SDK queries, skip pending specs
+// Second Ctrl-C: force exit immediately
 process.on('SIGINT', () => {
-  console.log('\nInterrupted.');
-  try {
-    const targetCwd = getTargetCwd();
-    const data = JSON.parse(readFileSync(join(targetCwd, '.forge', 'latest-session.json'), 'utf-8'));
-    if (data.sessionId) {
-      console.log(`Session: ${data.sessionId}`);
-      console.log(`Resume: \x1b[36mforge run --resume ${data.sessionId} "continue"\x1b[0m`);
-      console.log(`Fork:   \x1b[36mforge run --fork ${data.sessionId} "try different approach"\x1b[0m`);
-    }
-  } catch {}
-  process.exit(0);
+  if (!isInterrupted()) {
+    triggerAbort();
+    console.log('\nInterrupted. Stopping...');
+    try {
+      const targetCwd = getTargetCwd();
+      const data = JSON.parse(readFileSync(join(targetCwd, '.forge', 'latest-session.json'), 'utf-8'));
+      if (data.sessionId) {
+        console.log(`Session: ${data.sessionId}`);
+        console.log(`Resume:  \x1b[36mforge run --resume ${data.sessionId} "continue"\x1b[0m`);
+      }
+    } catch {}
+    console.log('Press Ctrl-C again to force exit.');
+  } else {
+    console.log('\nForce exit.');
+    process.exit(1);
+  }
 });
 
 program.parse();

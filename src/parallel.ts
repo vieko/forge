@@ -8,8 +8,10 @@ import { runSingleSpec, type BatchResult } from './run.js';
 import { loadSpecDeps, topoSort, hasDependencies, type SpecDep, type DepLevel } from './deps.js';
 import { withManifestLock, findOrCreateEntry, specKey, loadManifest, resolveSpecFile, resolveSpecDir, resolveSpecSource, assessSpecComplexity } from './specs.js';
 import { resolveWorkingDir } from './utils.js';
+import { isInterrupted } from './abort.js';
 
 // Worker pool: runs tasks with bounded concurrency
+// Checks isInterrupted() before picking up each new item.
 async function workerPool<T, R>(
   items: T[],
   concurrency: number,
@@ -19,7 +21,7 @@ async function workerPool<T, R>(
   let nextIndex = 0;
 
   async function runNext(): Promise<void> {
-    while (nextIndex < items.length) {
+    while (nextIndex < items.length && !isInterrupted()) {
       const i = nextIndex++;
       results[i] = await worker(items[i], i);
     }
@@ -303,6 +305,14 @@ async function runSpecsSequential(
   const useTracker = tracker && trackerIndices && trackerIndices.length === specs.length;
 
   for (let i = 0; i < specs.length; i++) {
+    // Skip remaining specs if interrupted
+    if (isInterrupted()) {
+      for (let j = i; j < specs.length; j++) {
+        results.push({ spec: specs[j].name, status: 'cancelled', duration: 0 });
+      }
+      break;
+    }
+
     const { name: specFile, path: specFilePath } = specs[i];
 
     if (useTracker) {
@@ -333,6 +343,17 @@ async function runSpecsSequential(
     } catch (err) {
       const duration = (Date.now() - startTime) / 1000;
       const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
+
+      // Distinguish interrupted specs from real failures
+      if (isInterrupted()) {
+        results.push({ spec: specFile, status: 'cancelled', cost, duration });
+        // Mark remaining specs as cancelled too
+        for (let j = i + 1; j < specs.length; j++) {
+          results.push({ spec: specs[j].name, status: 'cancelled', duration: 0 });
+        }
+        break;
+      }
+
       results.push({
         spec: specFile,
         status: `failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
@@ -362,43 +383,54 @@ async function runSpecsParallel(
   const names = specs.map(s => s.name);
   const display = createSpecDisplay(names);
 
-  await workerPool(names, concurrency, async (specFile, i) => {
-    const specFilePath = specs[i].path;
-    display.start(i);
+  try {
+    await workerPool(names, concurrency, async (specFile, i) => {
+      const specFilePath = specs[i].path;
+      display.start(i);
 
-    const startTime = Date.now();
-    try {
-      const specContent = await fs.readFile(specFilePath, 'utf-8');
+      const startTime = Date.now();
+      try {
+        const specContent = await fs.readFile(specFilePath, 'utf-8');
 
-      const result = await runSingleSpec({
-        ...options,
-        specPath: specFilePath,
-        specContent,
-        specDir: undefined,
-        quiet: true,
-        _silent: true,
-        _onActivity: (detail) => display.activity(i, detail),
-        _runId: runId,
-      });
+        const result = await runSingleSpec({
+          ...options,
+          specPath: specFilePath,
+          specContent,
+          specDir: undefined,
+          quiet: true,
+          _silent: true,
+          _onActivity: (detail) => display.activity(i, detail),
+          _runId: runId,
+        });
 
-      const duration = (Date.now() - startTime) / 1000;
-      display.done(i, duration);
-      results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration });
-    } catch (err) {
-      const duration = (Date.now() - startTime) / 1000;
-      const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
-      const errMsg = err instanceof Error ? err.message : 'Unknown error';
-      display.fail(i, errMsg);
-      results.push({
-        spec: specFile,
-        status: `failed: ${errMsg}`,
-        cost,
-        duration
-      });
+        const duration = (Date.now() - startTime) / 1000;
+        display.done(i, duration);
+        results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration });
+      } catch (err) {
+        const duration = (Date.now() - startTime) / 1000;
+        const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
+        const errMsg = isInterrupted() ? 'cancelled' : (err instanceof Error ? err.message : 'Unknown error');
+        display.fail(i, errMsg);
+        results.push({
+          spec: specFile,
+          status: isInterrupted() ? 'cancelled' : `failed: ${errMsg}`,
+          cost,
+          duration
+        });
+      }
+    });
+  } finally {
+    display.stop();
+  }
+
+  // Mark any specs that were never started (skipped by interrupted worker pool)
+  const started = new Set(results.map(r => r.spec));
+  for (const specFile of names) {
+    if (!started.has(specFile)) {
+      results.push({ spec: specFile, status: 'cancelled', duration: 0 });
     }
-  });
+  }
 
-  display.stop();
   return results;
 }
 
@@ -460,6 +492,16 @@ export async function runSpecBatch(
     }
 
     for (let i = 0; i < levels.length; i++) {
+      // Skip remaining levels if interrupted
+      if (isInterrupted()) {
+        for (let j = i; j < levels.length; j++) {
+          for (const s of levels[j].specs) {
+            results.push({ spec: s.name, status: 'cancelled', duration: 0 });
+          }
+        }
+        break;
+      }
+
       const level = levels[i];
       const levelSpecs = level.specs.map(s => ({ name: s.name, path: s.path }));
       const levelIndices = levelSpecs.map(s => specIndexMap.get(s.name)!);
@@ -607,17 +649,22 @@ export function printBatchSummary(
 
   if (!quiet || parallel) {
     const successCount = results.filter(r => r.status === 'success').length;
+    const cancelledCount = results.filter(r => r.status === 'cancelled').length;
+    const failedCount = results.length - successCount - cancelledCount;
     const allPassed = successCount === results.length;
+    const wasInterrupted = cancelledCount > 0;
 
     if (hasTracker) {
       // Tracker already printed per-spec results — just show aggregates
       console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
     } else {
       console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
-      console.log(`${BOLD}SPEC BATCH SUMMARY${RESET}`);
+      console.log(`${BOLD}SPEC BATCH SUMMARY${RESET}${wasInterrupted ? '  \x1b[33m(interrupted)\x1b[0m' : ''}`);
       console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
       results.forEach(r => {
-        const icon = r.status === 'success' ? '\x1b[32m+\x1b[0m' : '\x1b[31mx\x1b[0m';
+        const icon = r.status === 'success' ? '\x1b[32m+\x1b[0m'
+          : r.status === 'cancelled' ? '\x1b[33m-\x1b[0m'
+          : '\x1b[31mx\x1b[0m';
         const cost = r.cost !== undefined ? `$${r.cost.toFixed(2)}` : '   -';
         console.log(`  ${icon} ${r.spec.padEnd(30)} ${r.duration.toFixed(1).padStart(6)}s  ${cost}`);
       });
@@ -629,12 +676,25 @@ export function printBatchSummary(
       console.log(`  Spec total: ${totalSpecDuration.toFixed(1)}s`);
     }
     console.log(`  Cost:       ${BOLD}$${totalCost.toFixed(2)}${RESET}`);
-    console.log(`  Result:     ${allPassed ? '\x1b[32m' : '\x1b[33m'}${successCount}/${results.length} successful\x1b[0m`);
+
+    // Result line with cancelled count if applicable
+    if (wasInterrupted) {
+      const parts: string[] = [];
+      if (successCount > 0) parts.push(`\x1b[32m${successCount} passed\x1b[0m`);
+      if (failedCount > 0) parts.push(`\x1b[31m${failedCount} failed\x1b[0m`);
+      parts.push(`\x1b[33m${cancelledCount} cancelled\x1b[0m`);
+      console.log(`  Result:     ${parts.join(', ')}`);
+    } else {
+      console.log(`  Result:     ${allPassed ? '\x1b[32m' : '\x1b[33m'}${successCount}/${results.length} successful\x1b[0m`);
+    }
 
     // Next-step hint
     if (allPassed && specDir) {
       console.log(`\n  ${DIM}Next step:${RESET}`);
       console.log(`    forge audit ${specDir} --fix "verify and fix"`);
+    } else if (wasInterrupted) {
+      console.log(`\n  ${DIM}Next step:${RESET}`);
+      console.log(`    forge run --pending "resume remaining specs"`);
     } else if (!allPassed) {
       console.log(`\n  ${DIM}Next step:${RESET}`);
       console.log(`    forge run --rerun-failed "fix failures"`);

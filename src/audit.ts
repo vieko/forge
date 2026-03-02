@@ -6,6 +6,7 @@ import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js
 import { runQuery } from './core.js';
 import { withManifestLock, findOrCreateEntry, specKey, resolveSpecDir, resolveSpecFile, resolveSpecSource } from './specs.js';
 import { runForge } from './parallel.js';
+import { isInterrupted } from './abort.js';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -359,7 +360,7 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
   let round = 0;
   const roundSummaries: Array<{ round: number; gaps: number; fixesRan: boolean; durationSeconds: number; costUsd: number }> = [];
 
-  while (round < maxRounds) {
+  while (round < maxRounds && !isInterrupted()) {
     round++;
 
     if (!quiet) {

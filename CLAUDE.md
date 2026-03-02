@@ -132,7 +132,7 @@ forge watch -C ~/other-repo     # Different repo
 ## Architecture
 
 ```
-~6500 lines (source) + ~4700 lines (tests)
+~6650 lines (source) + ~4700 lines (tests)
 
 User Prompt
     ↓
@@ -155,7 +155,8 @@ System-level verification                │ ASCII spinner display,
 
 ```
 src/
-├── index.ts       # CLI entry + arg parsing + validators
+├── index.ts       # CLI entry + arg parsing + validators + nested session guard
+├── abort.ts       # Global AbortController for graceful Ctrl-C shutdown
 ├── display.ts     # ANSI constants, banner, spinners, printRunSummary, formatElapsed
 ├── utils.ts       # ForgeError, execAsync, config, resolveSession, isTransientError, sleep, saveResult
 ├── verify.ts      # detectVerification, runVerification, monorepo detection + scoping
@@ -216,6 +217,8 @@ src/
 20. **Watch auto-follow** — `forge watch` auto-follows to next session during sequential batch runs; renders spec divider headers (`Spec 1/3: name.md`) between sessions
 21. **Structured run logs** — `ForgeResult` includes `numTurns`, `toolCalls`, `toolBreakdown`, `verifyAttempts`, `retryAttempts`, `logPath` for post-run analysis
 22. **Stats** — `forge stats` aggregates across all runs: total cost, success rate, avg duration. `--by-spec` and `--by-model` breakdowns, `--since` date filter
+23. **Graceful Ctrl-C** — two-phase shutdown: first Ctrl-C aborts running SDK queries via `AbortController` and skips pending specs; second Ctrl-C force-exits. Batch summary shows cancelled specs with `--pending` hint
+24. **Nested session guard** — SDK-invoking commands (`run`, `audit`, `define`, `review`, `specs --check`) are blocked when running inside Claude Code (`CLAUDECODE=1`). Prints the command to copy. Bypass with `FORGE_ALLOW_NESTED=1` (for debugging only — the nested SDK limitation is real)
 
 ## Spec Naming
 

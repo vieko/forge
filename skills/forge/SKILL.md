@@ -11,7 +11,7 @@ description: >-
   or straightforward work in the current repo that doesn't need autonomous agent execution.
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.8.0
+  version: 3.9.0
   author: vieko
 ---
 
@@ -25,6 +25,24 @@ Delegate complex, multi-step development work to an autonomous agent that builds
 - The work is complex enough to benefit from autonomous agent execution with verification
 - You have spec files describing outcomes to implement
 - You want to run multiple specs in parallel
+
+## Running Forge Commands
+
+Forge uses the Agent SDK internally. SDK-invoking commands **cannot run inside Claude Code** (nested SDK restriction). The CLI will block with a clear error if you try.
+
+**SDK commands** (`run`, `audit`, `define`, `review`, `specs --check`): Build the command and present it to the user. Do NOT execute via Bash.
+
+```
+The forge command to run:
+
+  forge run --spec-dir specs/ "implement all"
+
+Run this in your forge tmux pane. I can run `forge watch` here for live progress.
+```
+
+**Non-SDK commands** (`specs`, `status`, `stats`, `watch`): Run directly via Bash — these are safe, read-only operations.
+
+After presenting an SDK command, offer to run `forge watch` for live tailing (it's read-only and works inside Claude Code).
 
 ## Commands
 
