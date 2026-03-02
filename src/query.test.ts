@@ -2,7 +2,11 @@ import { describe, test, expect } from 'bun:test';
 import { ForgeError, isTransientError } from './utils.js';
 import { formatElapsed, formatProgress } from './display.js';
 import { autoDetectConcurrency } from './parallel.js';
+import { countToolCalls } from './run.js';
 import type { ForgeResult } from './types.js';
+import { promises as fs } from 'fs';
+import path from 'path';
+import os from 'os';
 
 // ── isTransientError ─────────────────────────────────────────
 
@@ -177,5 +181,67 @@ describe('ForgeError', () => {
   test('instanceof Error', () => {
     const error = new ForgeError('test');
     expect(error instanceof Error).toBe(true);
+  });
+});
+
+// ── countToolCalls ───────────────────────────────────────────
+
+describe('countToolCalls', () => {
+  const tmpDir = path.join(os.tmpdir(), `forge-test-${Date.now()}`);
+  const auditPath = path.join(tmpDir, 'audit.jsonl');
+
+  test('returns zeros when audit file does not exist', async () => {
+    const result = await countToolCalls('/nonexistent/path/audit.jsonl', 'sess-123');
+    expect(result.toolCalls).toBe(0);
+    expect(result.toolBreakdown).toEqual({});
+  });
+
+  test('returns zeros when sessionId is undefined', async () => {
+    const result = await countToolCalls(auditPath, undefined);
+    expect(result.toolCalls).toBe(0);
+    expect(result.toolBreakdown).toEqual({});
+  });
+
+  test('counts tool calls for a specific session', async () => {
+    await fs.mkdir(tmpDir, { recursive: true });
+    const lines = [
+      JSON.stringify({ sessionId: 'sess-A', tool: 'Bash' }),
+      JSON.stringify({ sessionId: 'sess-A', tool: 'Read' }),
+      JSON.stringify({ sessionId: 'sess-A', tool: 'Bash' }),
+      JSON.stringify({ sessionId: 'sess-B', tool: 'Edit' }),
+      JSON.stringify({ sessionId: 'sess-A', tool: 'Edit' }),
+    ];
+    await fs.writeFile(auditPath, lines.join('\n') + '\n');
+
+    const result = await countToolCalls(auditPath, 'sess-A');
+    expect(result.toolCalls).toBe(4);
+    expect(result.toolBreakdown).toEqual({ Bash: 2, Read: 1, Edit: 1 });
+  });
+
+  test('filters out entries from other sessions', async () => {
+    const result = await countToolCalls(auditPath, 'sess-B');
+    expect(result.toolCalls).toBe(1);
+    expect(result.toolBreakdown).toEqual({ Edit: 1 });
+  });
+
+  test('returns zeros for a session with no entries', async () => {
+    const result = await countToolCalls(auditPath, 'sess-nonexistent');
+    expect(result.toolCalls).toBe(0);
+    expect(result.toolBreakdown).toEqual({});
+  });
+
+  test('skips malformed lines gracefully', async () => {
+    const malformedPath = path.join(tmpDir, 'malformed.jsonl');
+    const lines = [
+      JSON.stringify({ sessionId: 'sess-X', tool: 'Bash' }),
+      'not valid json {{{',
+      '',
+      JSON.stringify({ sessionId: 'sess-X', tool: 'Read' }),
+    ];
+    await fs.writeFile(malformedPath, lines.join('\n') + '\n');
+
+    const result = await countToolCalls(malformedPath, 'sess-X');
+    expect(result.toolCalls).toBe(2);
+    expect(result.toolBreakdown).toEqual({ Bash: 1, Read: 1 });
   });
 });

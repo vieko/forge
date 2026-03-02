@@ -76,6 +76,18 @@ export interface ForgeResult {
   runId?: string;
   /** Type of run */
   type?: 'run' | 'audit' | 'review' | 'define';
+  /** Agent turns used */
+  numTurns?: number;
+  /** Total tool invocations */
+  toolCalls?: number;
+  /** Count per tool type (e.g. { Bash: 12, Read: 8, Edit: 4 }) */
+  toolBreakdown?: Record<string, number>;
+  /** How many verification cycles ran (0 if passed first time) */
+  verifyAttempts?: number;
+  /** Transient error retries needed */
+  retryAttempts?: number;
+  /** Path to stream.log for this session */
+  logPath?: string;
 }
 
 /**
@@ -146,6 +158,10 @@ export interface SpecRun {
   status: 'passed' | 'failed';
   costUsd?: number;
   durationSeconds: number;
+  /** Agent turns used */
+  numTurns?: number;
+  /** How many verification cycles ran */
+  verifyAttempts?: number;
 }
 
 /** A tracked spec entry in the manifest. */

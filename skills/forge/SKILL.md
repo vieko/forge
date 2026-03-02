@@ -11,7 +11,7 @@ description: >-
   or straightforward work in the current repo that doesn't need autonomous agent execution.
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.7.5
+  version: 3.8.0
   author: vieko
 ---
 
@@ -113,6 +113,18 @@ forge status                                    # Latest run
 forge status --all                              # All runs
 forge status -n 5                               # Last 5 runs
 forge status -C ~/other-repo                    # Different repo
+```
+
+### forge stats
+
+Aggregate run statistics across all results.
+
+```bash
+forge stats                                     # Dashboard: runs, cost, success rate
+forge stats --by-spec                           # Per-spec breakdown from manifest
+forge stats --by-model                          # Per-model breakdown
+forge stats --since 2026-03-01                  # Filter runs after date
+forge stats -C ~/other-repo                     # Different repo
 ```
 
 ### forge specs

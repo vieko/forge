@@ -403,7 +403,7 @@ async function runSpecsParallel(
 }
 
 // Run a batch of spec files with dependency-aware execution
-async function runSpecBatch(
+export async function runSpecBatch(
   specFilePaths: string[],
   specFileNames: string[],
   options: RunOptions,
@@ -530,7 +530,7 @@ async function runSpecBatch(
 }
 
 // Find failed specs from latest batch in .forge/results/
-async function findFailedSpecs(workingDir: string): Promise<{ runId: string; specPaths: string[] }> {
+export async function findFailedSpecs(workingDir: string): Promise<{ runId: string; specPaths: string[] }> {
   const resultsBase = path.join(workingDir, '.forge', 'results');
 
   let dirs: string[];
@@ -570,7 +570,7 @@ async function findFailedSpecs(workingDir: string): Promise<{ runId: string; spe
 }
 
 // Find pending specs from the manifest
-async function findPendingSpecs(workingDir: string): Promise<string[]> {
+export async function findPendingSpecs(workingDir: string): Promise<string[]> {
   const manifest = await loadManifest(workingDir);
   const pending: string[] = [];
 
@@ -594,7 +594,7 @@ async function findPendingSpecs(workingDir: string): Promise<string[]> {
 
 // Print batch summary with cost tracking and next-step hint
 // When hasTracker is true, the progress tracker already printed per-spec results — skip the duplicate listing.
-function printBatchSummary(
+export function printBatchSummary(
   results: BatchResult[],
   wallClockDuration: number,
   parallel: boolean,

@@ -1,11 +1,53 @@
 import type { ForgeOptions, ForgeResult, MonorepoContext } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { createReadStream } from 'fs';
+import { createInterface } from 'readline';
 import { ForgeError, resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
 import { DIM, RESET, CMD, BOLD, printRunSummary } from './display.js';
 import { runVerification, detectMonorepo, determineAffectedPackages } from './verify.js';
 import { runQuery, streamLogAppend } from './core.js';
 import { withManifestLock, findOrCreateEntry, updateEntryStatus, specKey, pipeSpecId, resolveSpecSource } from './specs.js';
+
+/**
+ * Count tool calls from audit.jsonl for a specific session.
+ * Returns total count and per-tool breakdown.
+ */
+export async function countToolCalls(
+  auditPath: string,
+  sessionId: string | undefined
+): Promise<{ toolCalls: number; toolBreakdown: Record<string, number> }> {
+  if (!sessionId) return { toolCalls: 0, toolBreakdown: {} };
+
+  try {
+    await fs.access(auditPath);
+  } catch {
+    return { toolCalls: 0, toolBreakdown: {} };
+  }
+
+  const breakdown: Record<string, number> = {};
+  let total = 0;
+
+  const rl = createInterface({
+    input: createReadStream(auditPath),
+    crlfDelay: Infinity,
+  });
+
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line) as { sessionId?: string; tool?: string };
+      if (entry.sessionId === sessionId && entry.tool) {
+        total++;
+        breakdown[entry.tool] = (breakdown[entry.tool] || 0) + 1;
+      }
+    } catch {
+      // Skip malformed lines
+    }
+  }
+
+  return { toolCalls: total, toolBreakdown: breakdown };
+}
 
 // Batch result type (used by parallel.ts)
 export interface BatchResult {
@@ -224,6 +266,10 @@ ${verification.errors}
           const endTime = new Date();
           const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
 
+          // Count tool calls from audit.jsonl for this session
+          const verifyAuditPath = path.join(resultDir, '.forge', 'audit.jsonl');
+          const verifyToolStats = await countToolCalls(verifyAuditPath, qr.sessionId);
+
           const forgeResult: ForgeResult = {
             startedAt: startTime.toISOString(),
             completedAt: endTime.toISOString(),
@@ -238,6 +284,12 @@ ${verification.errors}
             forkedFrom: isFork ? options.fork : undefined,
             runId: _runId,
             error: `Verification failed after ${maxVerifyAttempts} attempts:\n${verification.errors}`,
+            numTurns: qr.numTurns,
+            toolCalls: verifyToolStats.toolCalls,
+            toolBreakdown: verifyToolStats.toolBreakdown,
+            verifyAttempts: verifyAttempt,
+            retryAttempts: qr.retryAttempts,
+            logPath: qr.logPath,
           };
 
           const errorResultText = `# Verification Failed
@@ -270,6 +322,8 @@ forge run --resume ${qr.sessionId} "fix verification errors"
                 status: 'failed',
                 costUsd: forgeResult.costUsd,
                 durationSeconds: forgeResult.durationSeconds,
+                numTurns: forgeResult.numTurns,
+                verifyAttempts: forgeResult.verifyAttempts,
               });
               updateEntryStatus(entry);
             });
@@ -291,6 +345,10 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       if (!quiet) console.log(`\n${DIM}[forge]${RESET} \x1b[33m${note}\x1b[0m`);
       if (qr.logPath) streamLogAppend(qr.logPath, `Override: x ${note}`);
 
+      // Count tool calls from audit.jsonl for this session
+      const overrideAuditPath = path.join(resultDir, '.forge', 'audit.jsonl');
+      const overrideToolStats = await countToolCalls(overrideAuditPath, qr.sessionId);
+
       const overrideResult: ForgeResult = {
         startedAt: startTime.toISOString(),
         completedAt: endTime.toISOString(),
@@ -305,6 +363,12 @@ forge run --resume ${qr.sessionId} "fix verification errors"
         forkedFrom: isFork ? options.fork : undefined,
         runId: _runId,
         error: note,
+        numTurns: qr.numTurns,
+        toolCalls: overrideToolStats.toolCalls,
+        toolBreakdown: overrideToolStats.toolBreakdown,
+        verifyAttempts: verifyAttempt,
+        retryAttempts: qr.retryAttempts,
+        logPath: qr.logPath,
       };
 
       const overriddenText = `${qr.resultText}\n\n${note}`;
@@ -322,6 +386,8 @@ forge run --resume ${qr.sessionId} "fix verification errors"
             status: 'failed',
             costUsd: overrideResult.costUsd,
             durationSeconds: overrideResult.durationSeconds,
+            numTurns: overrideResult.numTurns,
+            verifyAttempts: overrideResult.verifyAttempts,
           });
           updateEntryStatus(entry);
         });
@@ -329,6 +395,10 @@ forge run --resume ${qr.sessionId} "fix verification errors"
 
       throw new ForgeError(note, overrideResult);
     }
+
+    // Count tool calls from audit.jsonl for this session
+    const auditPath = path.join(resultDir, '.forge', 'audit.jsonl');
+    const { toolCalls, toolBreakdown } = await countToolCalls(auditPath, qr.sessionId);
 
     // Save result to .forge/results/
     const forgeResult: ForgeResult = {
@@ -343,7 +413,13 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       cwd: workingDir,
       sessionId: qr.sessionId,
       forkedFrom: isFork ? options.fork : undefined,
-      runId: _runId
+      runId: _runId,
+      numTurns: qr.numTurns,
+      toolCalls,
+      toolBreakdown,
+      verifyAttempts: verifyAttempt,
+      retryAttempts: qr.retryAttempts,
+      logPath: qr.logPath,
     };
 
     const resultsDir = await saveResult(resultDir, forgeResult, qr.resultText);
@@ -360,6 +436,8 @@ forge run --resume ${qr.sessionId} "fix verification errors"
           status: 'passed',
           costUsd: forgeResult.costUsd,
           durationSeconds: forgeResult.durationSeconds,
+          numTurns: forgeResult.numTurns,
+          verifyAttempts: forgeResult.verifyAttempts,
         });
         updateEntryStatus(entry);
       });

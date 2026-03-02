@@ -95,6 +95,13 @@ forge status --all              # All runs
 forge status -n 5               # Last 5 runs
 forge status -C ~/other-repo    # Different repo
 
+# Aggregate run statistics
+forge stats                     # Dashboard: total runs, cost, success rate
+forge stats --by-spec           # Per-spec breakdown
+forge stats --by-model          # Per-model breakdown
+forge stats --since 2026-03-01  # Filter by date
+forge stats -C ~/other-repo    # Different repo
+
 # Spec lifecycle tracking
 forge specs                     # List all tracked specs with status
 forge specs --pending           # Show only pending specs
@@ -125,7 +132,7 @@ forge watch -C ~/other-repo     # Different repo
 ## Architecture
 
 ```
-~6000 lines (source) + ~3200 lines (tests)
+~6500 lines (source) + ~4700 lines (tests)
 
 User Prompt
     ↓
@@ -153,7 +160,7 @@ src/
 ├── utils.ts       # ForgeError, execAsync, config, resolveSession, isTransientError, sleep, saveResult
 ├── verify.ts      # detectVerification, runVerification, monorepo detection + scoping
 ├── core.ts        # QueryConfig, QueryResult, runQuery (SDK wrapper with hooks/streaming)
-├── run.ts         # runSingleSpec, BatchResult
+├── run.ts         # runSingleSpec, BatchResult, countToolCalls
 ├── specs.ts       # Spec manifest (lifecycle, reconcile, prune, addSpecs, resolveSpecs, assessSpecComplexity, showSpecs)
 ├── deps.ts        # Dependency parsing, topological sort, cycle detection, parseSource
 ├── parallel.ts    # workerPool, autoDetectConcurrency, dep-aware execution, runForge, smartDispatch, progressTracker
@@ -161,14 +168,17 @@ src/
 ├── audit.ts       # runAudit, runAuditRound, runAuditFixLoop + manifest integration
 ├── define.ts      # runDefine (spec generation from descriptions)
 ├── review.ts      # runReview
-├── status.ts      # showStatus
-├── types.ts       # TypeScript types (ForgeResult, SpecManifest, SpecEntry, SpecRun, DefineOptions, MonorepoContext)
+├── status.ts        # showStatus
+├── stats.ts         # showStats (aggregate run statistics)
+├── types.ts         # TypeScript types (ForgeResult, SpecManifest, SpecEntry, SpecRun, DefineOptions, MonorepoContext)
 ├── query.test.ts    # Tests for core utilities
 ├── deps.test.ts     # Tests for dependency + parseSource
 ├── specs.test.ts    # Tests for manifest CRUD, locking, integration lifecycle
 ├── verify.test.ts   # Tests for monorepo detection, scoping, rewriting
 ├── worktree.test.ts # Tests for worktree create, commit, cleanup
 ├── define.test.ts   # Tests for spec complexity assessment
+├── parallel.test.ts # Tests for smartDispatch, runSpecBatch, filterPassedSpecs
+├── stats.test.ts    # Tests for stats aggregation
 └── types.test.ts    # Type validation tests
 
 .forge/
@@ -204,6 +214,8 @@ src/
 18. **Resolve specs** — `forge specs --resolve` marks specs as passed without running (for manually completed work)
 19. **Check specs** — `forge specs --check` uses a Sonnet agent to triage pending specs against the codebase and auto-resolve implemented ones
 20. **Watch auto-follow** — `forge watch` auto-follows to next session during sequential batch runs; renders spec divider headers (`Spec 1/3: name.md`) between sessions
+21. **Structured run logs** — `ForgeResult` includes `numTurns`, `toolCalls`, `toolBreakdown`, `verifyAttempts`, `retryAttempts`, `logPath` for post-run analysis
+22. **Stats** — `forge stats` aggregates across all runs: total cost, success rate, avg duration. `--by-spec` and `--by-model` breakdowns, `--since` date filter
 
 ## Spec Naming
 

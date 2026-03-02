@@ -37,6 +37,8 @@ export interface QueryResult {
   durationSeconds: number;
   numTurns?: number;
   logPath?: string;
+  /** Number of transient error retries that were needed (0 if none) */
+  retryAttempts?: number;
 }
 
 // Append a timestamped line to a stream log file (fire-and-forget)
@@ -365,6 +367,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
               durationSeconds,
               numTurns: message.num_turns,
               logPath: streamLog.current?.logPath,
+              retryAttempts: attempt - 1,
             };
           }
 

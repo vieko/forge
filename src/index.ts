@@ -11,6 +11,7 @@ import { runReview } from './review.js';
 import { runWatch } from './watch.js';
 import { showSpecs } from './specs.js';
 import { runDefine } from './define.js';
+import { showStats } from './stats.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -386,9 +387,35 @@ program
     }
   });
 
+program
+  .command('stats')
+  .description('Show aggregated run statistics')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('--since <date>', 'Only include runs after this ISO date')
+  .option('--by-spec', 'Show per-spec breakdown from manifest')
+  .option('--by-model', 'Show per-model breakdown')
+  .action(async (options: {
+    cwd?: string;
+    since?: string;
+    bySpec?: boolean;
+    byModel?: boolean;
+  }) => {
+    try {
+      await showStats({
+        cwd: options.cwd,
+        since: options.since,
+        bySpec: options.bySpec,
+        byModel: options.byModel,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
 // Quick alias: `forge "do something"` = `forge run "do something"`
 // Also handles `forge --spec-dir ... "prompt"` → `forge run --spec-dir ... "prompt"`
-const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'watch', 'specs', 'help']);
+const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'watch', 'specs', 'stats', 'help']);
 const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--dry-run', '--sequential-first', '--branch']);
 const args = process.argv.slice(2);
 if (args.length > 0 && !COMMANDS.has(args[0])) {
