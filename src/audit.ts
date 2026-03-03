@@ -326,6 +326,8 @@ export async function runAudit(options: AuditOptions): Promise<void> {
 
     if (result.outputSpecs.length === 0) {
       console.log(`\n  \x1b[32mAll specs fully implemented — no remaining work.\x1b[0m`);
+      const relSpecDir = path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir;
+      console.log(`\n  ${DIM}Next step:${RESET}\n    ${CMD}forge prove ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir}${RESET}`);
     } else {
       const relOutputDir = path.relative(workingDir, outputDir) || outputDir;
       console.log(`\n  ${BOLD}${result.outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
@@ -369,16 +371,8 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
       console.log(`${DIM}${'─'.repeat(60)}${RESET}\n`);
     }
 
-    // Clean up remediation directory before each round
-    // Previous round's fixes are already applied to the codebase
-    try {
-      const existing = await fs.readdir(remediationDir);
-      for (const file of existing.filter(f => f.endsWith('.md'))) {
-        await fs.unlink(path.join(remediationDir, file));
-      }
-    } catch {
-      // Directory doesn't exist yet -- that's fine
-    }
+    // Previous round's remediation files are kept for audit trail
+    // Round-prefixed names (r1-, r2-) prevent collisions across rounds
 
     // 1. Audit against original specs
     const specPrefix = `r${round}-`;
@@ -485,6 +479,8 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
 
     if (converged) {
       console.log(`\n  \x1b[32mAll specs fully implemented after ${roundSummaries.length} round(s).\x1b[0m`);
+      const relSpecDir = path.relative(workingDir, ctx.resolvedSpecDir) || ctx.resolvedSpecDir;
+      console.log(`\n  ${DIM}Next step:${RESET}\n    ${CMD}forge prove ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir}${RESET}`);
     } else {
       console.log(`\n  \x1b[33mMax rounds (${maxRounds}) reached. Some gaps may remain.\x1b[0m`);
       const relRemDir = path.relative(workingDir, remediationDir) || remediationDir;

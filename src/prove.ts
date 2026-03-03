@@ -242,7 +242,7 @@ Write the test protocol as a markdown document with these sections:
 
       const relOutput = path.relative(workingDir, outputDir);
       const dirArg = relOutput.startsWith('..') ? outputDir : relOutput;
-      console.log(`\n  ${DIM}Next step: work through the proof checklist in ${dirArg}${RESET}`);
+      console.log(`\n  ${DIM}Next step: review and execute proofs in ${dirArg}${RESET}`);
     }
     console.log('');
   }
