@@ -116,6 +116,7 @@ forge specs --unresolve game.md # Reset a spec back to pending
 forge specs --check             # Auto-resolve already-implemented pending specs
 forge specs --reconcile         # Backfill manifest from .forge/results/ history
 forge specs --prune             # Remove orphaned entries from manifest
+forge specs --summary           # Directory-level roll-up (compact view)
 forge specs -C ~/other-repo     # Different working directory
 
 # Generate test protocol (proof) from implemented specs
@@ -218,8 +219,8 @@ src/
 13. **Status** — `forge status` shows results from recent runs grouped by batch
 14. **Retry on transient errors** — auto-retries rate limits, network errors, and 500 server errors (3 attempts, exponential backoff)
 15. **Audit** — `forge audit` reviews the codebase against specs via a single read-heavy `query()` call and produces new spec files for any remaining work; output feeds directly into `forge run --spec-dir`
-16. **Audit fix loop** — `forge audit --fix` runs a convergence cycle: audit → run remediation → re-audit, up to 3 rounds (configurable). Flat `remediation/` directory with round-prefixed specs (`r1-`, `r2-`)
-17. **Spec lifecycle** — `.forge/specs.json` manifest tracks every spec from registration through execution; `forge specs` shows status, run history, cost, and detects orphaned/untracked specs
+16. **Audit fix loop** — `forge audit --fix` runs a convergence cycle: audit → run remediation → re-audit, up to 3 rounds (configurable). Flat `remediation/` directory with round-prefixed specs (`r1-`, `r2-`). Remediation files are preserved for audit trail. Clean-pass hints point to `forge prove`
+17. **Spec lifecycle** — `.forge/specs.json` manifest tracks every spec from registration through execution; `forge specs` shows status, run history, cost, and detects orphaned/untracked specs. `--summary` shows directory-level roll-up for large manifests
 18. **Resolve specs** — `forge specs --resolve` marks specs as passed without running (for manually completed work)
 19. **Check specs** — `forge specs --check` uses a Sonnet agent to triage pending specs against the codebase and auto-resolve implemented ones
 20. **Watch auto-follow** — `forge watch` auto-follows to next session during sequential batch runs; renders spec divider headers (`Spec 1/3: name.md`) between sessions

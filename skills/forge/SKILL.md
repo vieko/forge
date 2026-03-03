@@ -12,7 +12,7 @@ description: >-
   or straightforward work in the current repo that doesn't need autonomous agent execution.
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.10.1
+  version: 3.11.0
   author: vieko
 ---
 
@@ -176,6 +176,7 @@ forge specs --unresolve game.md                 # Reset a spec back to pending
 forge specs --check                             # Triage pending specs: auto-resolve already-implemented ones via Sonnet agent
 forge specs --reconcile                         # Backfill from .forge/results/ history
 forge specs --prune                             # Remove orphaned entries from manifest
+forge specs --summary                           # Directory-level roll-up (compact view)
 ```
 
 ## Important
