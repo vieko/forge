@@ -423,6 +423,7 @@ program
   .option('--resolve <spec>', 'Mark a pending/failed spec as passed without running')
   .option('--unresolve <spec>', 'Reset a spec back to pending (clears run history)')
   .option('--check', 'Triage pending specs: auto-resolve already-implemented ones')
+  .option('--summary', 'Show directory-level summary instead of individual specs')
   .action(async (options: {
     cwd?: string;
     pending?: boolean;
@@ -436,6 +437,7 @@ program
     resolve?: string;
     unresolve?: string;
     check?: boolean;
+    summary?: boolean;
   }) => {
     if (options.check) guardNestedSession();
     try {
@@ -452,6 +454,7 @@ program
         resolve: options.resolve,
         unresolve: options.unresolve,
         check: options.check,
+        summary: options.summary,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);

@@ -735,6 +735,7 @@ export interface ShowSpecsOptions {
   resolve?: string;
   unresolve?: string;
   check?: boolean;
+  summary?: boolean;
 }
 
 export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
@@ -940,33 +941,67 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
   let totalCost = 0;
   let totalDuration = 0;
 
-  for (const [dir, items] of sortedGroups) {
-    if (sortedGroups.length > 1 && dir !== '.') {
-      console.log(`  ${BOLD}${dir}/${RESET}`);
+  // Summary mode: directory-level roll-up
+  if (options.summary) {
+    // Compute max dir name width for alignment
+    const dirWidth = Math.max(20, ...sortedGroups.map(([dir]) => (dir === '.' ? '(root)' : dir + '/').length));
+
+    for (const [dir, items] of sortedGroups) {
+      const dirLabel = dir === '.' ? '(root)' : dir + '/';
+      const groupPassed = items.filter(e => e.status === 'passed').length;
+      const groupFailed = items.filter(e => e.status === 'failed').length;
+      const groupPending = items.filter(e => e.status === 'pending').length;
+      const groupOrphaned = items.filter(e => e.orphaned).length;
+      const groupUntracked = items.filter(e => e.untracked).length;
+      const groupCost = items.reduce((sum, e) => sum + e.cost, 0);
+      const groupDuration = items.reduce((sum, e) => sum + e.duration, 0);
+
+      totalCost += groupCost;
+      totalDuration += groupDuration;
+
+      const parts: string[] = [];
+      if (groupPassed > 0) parts.push(`\x1b[32m${groupPassed} passed\x1b[0m`);
+      if (groupFailed > 0) parts.push(`\x1b[31m${groupFailed} failed\x1b[0m`);
+      if (groupPending > 0) parts.push(`${DIM}${groupPending} pending${RESET}`);
+      if (groupOrphaned > 0) parts.push(`\x1b[33m${groupOrphaned} orphaned\x1b[0m`);
+      if (groupUntracked > 0) parts.push(`${groupUntracked} untracked`);
+
+      const count = items.length;
+      const costStr = groupCost > 0 ? `  ${DIM}$${groupCost.toFixed(2)}${RESET}` : '';
+      console.log(`  ${BOLD}${dirLabel.padEnd(dirWidth)}${RESET} ${String(count).padStart(3)} spec(s)  ${parts.join(', ')}${costStr}`);
     }
 
-    for (const e of items) {
-      const stripped = commonPrefix ? e.spec.slice(commonPrefix.length) : e.spec;
-      const name = stripped.includes('/') ? stripped.split('/').pop()! : stripped;
-      const color = e.untracked ? DIM : statusColor(e.status);
-      const status = e.untracked ? 'untracked' : e.status;
-      const indent = sortedGroups.length > 1 && dir !== '.' ? '    ' : '  ';
-
-      totalCost += e.cost;
-      totalDuration += e.duration;
-
-      if (e.runs > 0) {
-        const runLabel = e.runs === 1 ? '1 run ' : `${e.runs} runs`;
-        const costStr = e.cost > 0 ? `$${e.cost.toFixed(2)}` : '';
-        const durStr = e.duration > 0 ? `${Math.round(e.duration)}s` : '';
-        const suffix = e.orphaned ? `  ${DIM}(file missing)${RESET}` : '';
-        console.log(`${indent}${color}${status.padEnd(10)}${RESET} ${name.padEnd(nameWidth)} ${runLabel.padEnd(8)} ${costStr.padStart(7)}   ${durStr.padStart(5)}${suffix}`);
-      } else {
-        console.log(`${indent}${color}${status.padEnd(10)}${RESET} ${name}`);
+    console.log('');
+  } else {
+    // Detail mode: individual specs
+    for (const [dir, items] of sortedGroups) {
+      if (sortedGroups.length > 1 && dir !== '.') {
+        console.log(`  ${BOLD}${dir}/${RESET}`);
       }
-    }
 
-    if (sortedGroups.length > 1) console.log('');
+      for (const e of items) {
+        const stripped = commonPrefix ? e.spec.slice(commonPrefix.length) : e.spec;
+        const name = stripped.includes('/') ? stripped.split('/').pop()! : stripped;
+        const color = e.untracked ? DIM : statusColor(e.status);
+        const status = e.untracked ? 'untracked' : e.status;
+        const indent = sortedGroups.length > 1 && dir !== '.' ? '    ' : '  ';
+
+        totalCost += e.cost;
+        totalDuration += e.duration;
+
+        if (e.runs > 0) {
+          const runLabel = e.runs === 1 ? '1 run ' : `${e.runs} runs`;
+          const costStr = e.cost > 0 ? `$${e.cost.toFixed(2)}` : '';
+          const durStr = e.duration > 0 ? `${Math.round(e.duration)}s` : '';
+          const suffix = e.orphaned ? `  ${DIM}(file missing)${RESET}` : '';
+          console.log(`${indent}${color}${status.padEnd(10)}${RESET} ${name.padEnd(nameWidth)} ${runLabel.padEnd(8)} ${costStr.padStart(7)}   ${durStr.padStart(5)}${suffix}`);
+        } else {
+          console.log(`${indent}${color}${status.padEnd(10)}${RESET} ${name}`);
+        }
+      }
+
+      if (sortedGroups.length > 1) console.log('');
+    }
   }
 
   // Summary
