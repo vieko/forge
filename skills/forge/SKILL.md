@@ -3,15 +3,16 @@ name: forge
 description: >-
   Verification boundary CLI that delegates tasks to autonomous agents. Use when the user wants to run forge, execute specs,
   run specs in parallel, run pending specs, define specs from a description, resolve specs, audit code against specs,
-  review changes, watch live logs, check run status, resume a session, or delegate complex multi-step work
-  to an autonomous agent. Triggers include "forge run", "run this spec",
-  "run specs in parallel", "run pending", "forge define", "define specs", "audit the codebase", "review changes",
-  "forge watch", "forge status", "rerun failed", "resolve spec", "delegate this to forge".
+  generate test protocols (prove), review changes, watch live logs, check run status, resume a session, or delegate
+  complex multi-step work to an autonomous agent. Triggers include "forge run", "run this spec",
+  "run specs in parallel", "run pending", "forge define", "define specs", "audit the codebase", "forge prove",
+  "generate proof", "test protocol", "review changes", "forge watch", "forge status", "rerun failed",
+  "resolve spec", "delegate this to forge".
   Do NOT use for simple edits you can make directly, questions that don't require implementation,
   or straightforward work in the current repo that doesn't need autonomous agent execution.
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.9.0
+  version: 3.10.0
   author: vieko
 ---
 
@@ -30,7 +31,7 @@ Delegate complex, multi-step development work to an autonomous agent that builds
 
 Forge uses the Agent SDK internally. SDK-invoking commands **cannot run inside Claude Code** (nested SDK restriction). The CLI will block with a clear error if you try.
 
-**SDK commands** (`run`, `audit`, `define`, `review`, `specs --check`): Build the command and present it to the user. Do NOT execute via Bash.
+**SDK commands** (`run`, `audit`, `define`, `review`, `prove`, `specs --check`): Build the command and present it to the user. Do NOT execute via Bash.
 
 ```
 The forge command to run:
@@ -112,6 +113,18 @@ forge review                                    # Review main...HEAD
 forge review HEAD~5...HEAD                      # Specific range
 forge review --dry-run -o findings.md           # Report only, write to file
 forge review -C ~/other-repo                    # Different repo
+```
+
+### forge prove
+
+Generates a structured test protocol (proof) from implemented specs. Reads specs + codebase, produces a verification document with automated tests, manual checks, visual checks, and edge cases. Completes the pipeline: `forge define` -> `forge run` -> `forge audit` -> `forge prove`.
+
+```bash
+forge prove specs/feature.md                    # Single spec proof
+forge prove specs/                              # One proof per spec in directory
+forge prove specs/ -o ./custom-proofs/          # Custom output dir
+forge prove specs/ -C ~/other-repo              # Different repo
+forge prove specs/auth.md "focus on security"   # With additional context
 ```
 
 ### forge watch

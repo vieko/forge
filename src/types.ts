@@ -75,7 +75,7 @@ export interface ForgeResult {
   /** Batch run ID for grouping specs in the same run */
   runId?: string;
   /** Type of run */
-  type?: 'run' | 'audit' | 'review' | 'define';
+  type?: 'run' | 'audit' | 'review' | 'define' | 'prove';
   /** Agent turns used */
   numTurns?: number;
   /** Total tool invocations */
@@ -137,6 +137,34 @@ export interface DefineOptions {
   /** Maximum turns (default: 100) */
   maxTurns?: number;
   /** Maximum budget in USD (default: $10) */
+  maxBudgetUsd?: number;
+  /** Show detailed output */
+  verbose?: boolean;
+  /** Suppress progress output */
+  quiet?: boolean;
+  /** Resume a previous session */
+  resume?: string;
+  /** Fork from a previous session (new session, same history) */
+  fork?: string;
+}
+
+/**
+ * Options for generating a test protocol (proof) from implemented specs.
+ */
+export interface ProveOptions {
+  /** Path to a spec file or directory to generate proof for */
+  specPath: string;
+  /** Output directory for generated proof files (default: .forge/proofs/) */
+  outputDir?: string;
+  /** Additional context prompt */
+  prompt?: string;
+  /** Working directory (target repo) */
+  cwd?: string;
+  /** Model to use (shorthand like 'opus'/'sonnet' or full ID) */
+  model?: string;
+  /** Maximum turns (default: 100) */
+  maxTurns?: number;
+  /** Maximum budget in USD (default: $5) */
   maxBudgetUsd?: number;
   /** Show detailed output */
   verbose?: boolean;

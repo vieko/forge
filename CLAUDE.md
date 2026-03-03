@@ -118,6 +118,12 @@ forge specs --reconcile         # Backfill manifest from .forge/results/ history
 forge specs --prune             # Remove orphaned entries from manifest
 forge specs -C ~/other-repo     # Different working directory
 
+# Generate test protocol (proof) from implemented specs
+forge prove specs/feature.md                    # Single spec proof
+forge prove specs/                              # One proof per spec in directory
+forge prove specs/ -o ./custom-proofs/          # Custom output directory
+forge prove specs/ -C ~/other-repo              # Different repo
+
 # Review recent git changes
 forge review                    # Review main...HEAD
 forge review HEAD~5...HEAD      # Specific range
@@ -168,6 +174,7 @@ src/
 ├── watch.ts       # WatchOptions, colorWatchLine, runWatch
 ├── audit.ts       # runAudit, runAuditRound, runAuditFixLoop + manifest integration
 ├── define.ts      # runDefine (spec generation from descriptions)
+├── prove.ts       # runProve (test protocol generation from specs)
 ├── review.ts      # runReview
 ├── status.ts        # showStatus
 ├── stats.ts         # showStats (aggregate run statistics)
@@ -187,6 +194,7 @@ src/
 ├── specs.json    # Spec lifecycle manifest (committed to git)
 ├── audit.jsonl   # Tool call audit log (gitignored)
 ├── latest-session.json  # Session persistence for resume (gitignored)
+├── proofs/       # Generated test protocols (gitignored)
 └── results/      # Run results (gitignored)
     └── <timestamp>/
         ├── summary.json  # Structured metadata (includes runId)
@@ -218,7 +226,8 @@ src/
 21. **Structured run logs** — `ForgeResult` includes `numTurns`, `toolCalls`, `toolBreakdown`, `verifyAttempts`, `retryAttempts`, `logPath` for post-run analysis
 22. **Stats** — `forge stats` aggregates across all runs: total cost, success rate, avg duration. `--by-spec` and `--by-model` breakdowns, `--since` date filter
 23. **Graceful Ctrl-C** — two-phase shutdown: first Ctrl-C aborts running SDK queries via `AbortController` and skips pending specs; second Ctrl-C force-exits. Batch summary shows cancelled specs with `--pending` hint
-24. **Nested session guard** — SDK-invoking commands (`run`, `audit`, `define`, `review`, `specs --check`) are blocked when running inside Claude Code (`CLAUDECODE=1`). Prints the command to copy. Bypass with `FORGE_ALLOW_NESTED=1` (for debugging only — the nested SDK limitation is real)
+25. **Prove** — `forge prove` reads specs and the codebase, then generates a structured test protocol (proof) with automated tests, manual checks, visual checks, and edge cases. Output goes to `.forge/proofs/` by default. Completes the pipeline: define -> run -> audit -> prove
+26. **Nested session guard** — SDK-invoking commands (`run`, `audit`, `define`, `review`, `prove`, `specs --check`) are blocked when running inside Claude Code (`CLAUDECODE=1`). Prints the command to copy. Bypass with `FORGE_ALLOW_NESTED=1` (for debugging only — the nested SDK limitation is real)
 
 ## Spec Naming
 

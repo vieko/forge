@@ -11,6 +11,7 @@ import { runReview } from './review.js';
 import { runWatch } from './watch.js';
 import { showSpecs } from './specs.js';
 import { runDefine } from './define.js';
+import { runProve } from './prove.js';
 import { showStats } from './stats.js';
 import { triggerAbort, isInterrupted } from './abort.js';
 
@@ -343,6 +344,54 @@ program
   });
 
 program
+  .command('prove')
+  .description('Generate a structured test protocol (proof) from implemented specs')
+  .argument('<spec-path>', 'Spec file or directory to generate proof for')
+  .argument('[prompt]', 'Additional context')
+  .option('-o, --output-dir <path>', 'Output directory for proof files (default: .forge/proofs/)')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'sonnet')
+  .option('-t, --max-turns <n>', 'Maximum turns (default: 100)', '100')
+  .option('-b, --max-budget <usd>', 'Maximum budget in USD')
+  .option('-v, --verbose', 'Show detailed output')
+  .option('-q, --quiet', 'Suppress progress output')
+  .option('-r, --resume <session>', 'Resume a previous session')
+  .option('-f, --fork <session>', 'Fork from a previous session')
+  .action(async (specPath: string, prompt: string | undefined, options: {
+    outputDir?: string;
+    cwd?: string;
+    model?: string;
+    maxTurns?: string;
+    maxBudget?: string;
+    verbose?: boolean;
+    quiet?: boolean;
+    resume?: string;
+    fork?: string;
+  }) => {
+    guardNestedSession();
+    validateSession(options.resume, options.fork);
+    validateBudget(options.maxBudget);
+    try {
+      await runProve({
+        specPath,
+        outputDir: options.outputDir,
+        prompt,
+        cwd: options.cwd,
+        model: options.model,
+        maxTurns: parseTurns(options.maxTurns, 100),
+        maxBudgetUsd: parseBudget(options.maxBudget),
+        verbose: options.verbose,
+        quiet: options.quiet,
+        resume: options.resume,
+        fork: options.fork,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+program
   .command('watch')
   .description('Watch live session logs')
   .argument('[session-id]', 'Session ID to watch (default: latest)')
@@ -438,7 +487,7 @@ program
 
 // Quick alias: `forge "do something"` = `forge run "do something"`
 // Also handles `forge --spec-dir ... "prompt"` → `forge run --spec-dir ... "prompt"`
-const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'watch', 'specs', 'stats', 'help']);
+const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'prove', 'watch', 'specs', 'stats', 'help']);
 const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--dry-run', '--sequential-first', '--branch']);
 const args = process.argv.slice(2);
 if (args.length > 0 && !COMMANDS.has(args[0])) {
