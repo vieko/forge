@@ -506,7 +506,64 @@ server.registerTool('forge_watch', {
       };
     }
 
-    // Read the log file
+    const maxLines = Math.min(lines || 40, 200);
+
+    // Check for structured events.jsonl alongside stream.log
+    const eventsPath = logPath.replace(/stream\.log$/, 'events.jsonl');
+    let hasEvents = false;
+    if (eventsPath !== logPath) {
+      try {
+        await fs.access(eventsPath);
+        hasEvents = true;
+      } catch {
+        // events.jsonl does not exist, fall back to stream.log
+      }
+    }
+
+    if (hasEvents) {
+      // Structured mode: read events.jsonl
+      let eventsContent: string;
+      try {
+        eventsContent = await fs.readFile(eventsPath, 'utf-8');
+      } catch {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ session: sessionId, status: 'waiting', message: 'Session log not yet created. The agent may still be starting.' }) }],
+        };
+      }
+
+      const allEventLines = eventsContent.split('\n').filter(l => l.trim());
+      const recentEventLines = allEventLines.slice(-maxLines);
+
+      // Parse each line as JSON, skip malformed lines
+      const events: Record<string, unknown>[] = [];
+      for (const line of recentEventLines) {
+        try {
+          events.push(JSON.parse(line));
+        } catch {
+          // Skip malformed JSON lines
+        }
+      }
+
+      // Detect completion from session_end event
+      const lastEvent = events[events.length - 1];
+      const isComplete = lastEvent != null && (lastEvent as Record<string, unknown>).type === 'session_end';
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            session: sessionId,
+            format: 'structured',
+            status: isComplete ? 'complete' : 'running',
+            total_events: allEventLines.length,
+            showing: events.length,
+            events,
+          }, null, 2),
+        }],
+      };
+    }
+
+    // Legacy mode: read stream.log
     let content: string;
     try {
       content = await fs.readFile(logPath, 'utf-8');
@@ -517,7 +574,6 @@ server.registerTool('forge_watch', {
     }
 
     const allLines = content.split('\n').filter(l => l.trim());
-    const maxLines = Math.min(lines || 40, 200);
     const recentLines = allLines.slice(-maxLines);
 
     // Detect if session is complete (last line contains "Result:")
@@ -532,6 +588,7 @@ server.registerTool('forge_watch', {
         type: 'text' as const,
         text: JSON.stringify({
           session: sessionId,
+          format: 'legacy',
           status: isComplete ? 'complete' : 'running',
           total_lines: allLines.length,
           showing: cleanLines.length,

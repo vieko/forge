@@ -269,6 +269,69 @@ export interface MonorepoContext {
   affected: string[];
 }
 
+// ── Structured Session Event Log ─────────────────────────────
+
+/** Base fields shared by all session events. */
+interface SessionEventBase {
+  /** ISO 8601 timestamp */
+  timestamp: string;
+}
+
+/** Written at session start with metadata. */
+export interface SessionStartEvent extends SessionEventBase {
+  type: 'session_start';
+  sessionId: string;
+  model: string;
+  specPath?: string;
+  prompt: string;
+}
+
+/** Captures accumulated extended thinking block content. */
+export interface ThinkingDeltaEvent extends SessionEventBase {
+  type: 'thinking_delta';
+  content: string;
+}
+
+/** Captures accumulated text block content. */
+export interface TextDeltaEvent extends SessionEventBase {
+  type: 'text_delta';
+  content: string;
+}
+
+/** Captures tool call with full input object. */
+export interface ToolCallStartEvent extends SessionEventBase {
+  type: 'tool_call_start';
+  toolName: string;
+  toolUseId?: string;
+  input: Record<string, unknown>;
+}
+
+/** Captures tool call result output. */
+export interface ToolCallResultEvent extends SessionEventBase {
+  type: 'tool_call_result';
+  toolName: string;
+  toolUseId?: string;
+  output: string;
+}
+
+/** Written at session end with summary metrics. */
+export interface SessionEndEvent extends SessionEventBase {
+  type: 'session_end';
+  numTurns?: number;
+  costUsd?: number;
+  durationSeconds: number;
+  status: 'success' | 'error_max_turns' | 'error_budget' | 'error_execution';
+}
+
+/** Discriminated union of all session event types. */
+export type SessionEvent =
+  | SessionStartEvent
+  | ThinkingDeltaEvent
+  | TextDeltaEvent
+  | ToolCallStartEvent
+  | ToolCallResultEvent
+  | SessionEndEvent;
+
 /**
  * Options for running a review.
  */

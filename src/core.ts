@@ -1,5 +1,5 @@
 import { query as sdkQuery, type HookCallback } from '@anthropic-ai/claude-agent-sdk';
-import type { ForgeResult, MonorepoContext } from './types.js';
+import type { ForgeResult, MonorepoContext, SessionEvent } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { ForgeError, isTransientError, sleep, saveResult, ensureForgeDir } from './utils.js';
@@ -107,12 +107,18 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
   interface StreamLog { write: (line: string) => void; close: () => void; logPath: string }
   const streamLog: { current: StreamLog | null } = { current: null };
 
+  // Structured JSONL event log (parallel to stream.log)
+  interface EventLog { write: (event: SessionEvent) => void; close: () => void }
+  const eventLog: { current: EventLog | null } = { current: null };
+
   // Streaming state
   let currentAgent: string | null = null;
   let currentToolName: string | null = null;
+  let currentToolUseId: string | undefined;
   let toolInputJson = '';
   let toolCount = 0;
   let textDeltaBuffer = ''; // Accumulate text deltas for batched logging
+  let thinkingDeltaBuffer = ''; // Accumulate thinking deltas for batched logging
 
   // Spinner
   const useSpinner = !silent && !verbose && !quiet;
@@ -190,6 +196,26 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
     return {};
   };
 
+  // Hook: Tool call result logger (writes tool output to JSONL event log)
+  const toolResultLogger: HookCallback = async (input, toolUseID) => {
+    const el = eventLog.current;
+    if (!el) return {};
+    try {
+      const inp = input as Record<string, unknown>;
+      const output = String(inp.tool_output ?? inp.output ?? '');
+      el.write({
+        type: 'tool_call_result',
+        timestamp: new Date().toISOString(),
+        toolName: String(inp.tool_name ?? 'unknown'),
+        toolUseId: toolUseID,
+        output,
+      });
+    } catch {
+      // Never crash on event log failures
+    }
+    return {};
+  };
+
   // Retry configuration
   const maxRetries = 3;
   const baseDelayMs = 5000; // 5 seconds, doubles each retry
@@ -211,7 +237,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
           includePartialMessages: true,
           hooks: {
             PreToolUse: [{ matcher: 'Bash', hooks: [bashGuardrail, monorepoRewriter] }],
-            PostToolUse: [{ hooks: [auditLog] }],
+            PostToolUse: [{ hooks: [auditLog, toolResultLogger] }],
             Stop: [{ hooks: [stopHandler] }],
           },
           maxTurns,
@@ -233,10 +259,11 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
             agentSpinner.start();
           }
 
-          // Initialize stream log for this session
+          // Initialize stream log and event log for this session
           if (sessionId) {
             const logDir = path.join(sessionDir, sessionId);
             fs.mkdir(logDir, { recursive: true }).then(() => {
+              // Stream log (human-readable, backwards-compatible)
               const logFilePath = path.join(logDir, 'stream.log');
               fs.open(logFilePath, 'a').then(fd => {
                 streamLog.current = {
@@ -250,20 +277,40 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
                   : '';
                 streamLog.current.write(`[${new Date().toISOString()}] Session started (model: ${modelName}${specTag})`);
               }).catch(() => {});
+
+              // Structured JSONL event log
+              const eventFilePath = path.join(logDir, 'events.jsonl');
+              fs.open(eventFilePath, 'a').then(fd => {
+                eventLog.current = {
+                  write: (event: SessionEvent) => { fd.write(JSON.stringify(event) + '\n').catch(() => {}); },
+                  close: () => { fd.close().catch(() => {}); },
+                };
+                eventLog.current.write({
+                  type: 'session_start',
+                  timestamp: new Date().toISOString(),
+                  sessionId: sessionId!,
+                  model: modelName,
+                  specPath: auditLogExtra.spec as string | undefined,
+                  prompt,
+                });
+              }).catch(() => {});
             }).catch(() => {});
           }
         }
 
-        // Stream real-time progress via partial messages
-        if (message.type === 'stream_event' && (!quiet || onActivity)) {
+        // Stream real-time progress via partial messages (always process for JSONL event log)
+        if (message.type === 'stream_event') {
           const event = message.event;
 
           if (event.type === 'content_block_start') {
             if (event.content_block.type === 'tool_use') {
               currentToolName = event.content_block.name;
+              currentToolUseId = (event.content_block as Record<string, unknown>).id as string | undefined;
               toolInputJson = '';
             } else if (event.content_block.type === 'text') {
               textDeltaBuffer = ''; // Reset buffer for new text block
+            } else if (event.content_block.type === 'thinking') {
+              thinkingDeltaBuffer = ''; // Reset buffer for new thinking block
             }
           } else if (event.type === 'content_block_delta') {
             if (event.delta.type === 'text_delta') {
@@ -274,13 +321,29 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
               textDeltaBuffer += event.delta.text;
             } else if (event.delta.type === 'input_json_delta') {
               toolInputJson += event.delta.partial_json;
+            } else if (event.delta.type === 'thinking_delta') {
+              const thinking = (event.delta as Record<string, unknown>).thinking as string;
+              if (thinking) thinkingDeltaBuffer += thinking;
             }
           } else if (event.type === 'content_block_stop') {
-            // Flush accumulated text delta buffer to stream log
+            // Flush accumulated thinking delta buffer to event log
+            if (thinkingDeltaBuffer) {
+              const el = eventLog.current;
+              if (el) {
+                el.write({ type: 'thinking_delta', timestamp: new Date().toISOString(), content: thinkingDeltaBuffer });
+              }
+              thinkingDeltaBuffer = '';
+            }
+
+            // Flush accumulated text delta buffer to stream log + event log
             if (textDeltaBuffer) {
               const log = streamLog.current;
               if (log) {
                 log.write(`[${new Date().toISOString()}] Text: ${textDeltaBuffer.replace(/\n/g, '\\n')}`);
+              }
+              const el = eventLog.current;
+              if (el) {
+                el.write({ type: 'text_delta', timestamp: new Date().toISOString(), content: textDeltaBuffer });
               }
               textDeltaBuffer = '';
             }
@@ -288,6 +351,21 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
             if (!currentToolName) continue; // No tool to process
             try {
               const input = JSON.parse(toolInputJson || '{}') as Record<string, unknown>;
+
+              // Write tool_call_start event to JSONL log
+              {
+                const el = eventLog.current;
+                if (el) {
+                  el.write({
+                    type: 'tool_call_start',
+                    timestamp: new Date().toISOString(),
+                    toolName: currentToolName,
+                    toolUseId: currentToolUseId,
+                    input,
+                  });
+                }
+              }
+
               const activity = deriveActivity(currentToolName, input);
 
               if (onActivity && activity) {
@@ -344,6 +422,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
               // JSON parse failed - skip progress for this tool
             }
             currentToolName = null;
+            currentToolUseId = undefined;
             toolInputJson = '';
           }
         }
@@ -361,6 +440,21 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
             if (log) {
               log.write(`[${new Date().toISOString()}] Result: success (${message.num_turns} turns, $${message.total_cost_usd?.toFixed(2) ?? 'N/A'}, ${durationSeconds.toFixed(0)}s)`);
               log.close();
+            }
+            // Write session_end event and close event log
+            {
+              const el = eventLog.current;
+              if (el) {
+                el.write({
+                  type: 'session_end',
+                  timestamp: new Date().toISOString(),
+                  numTurns: message.num_turns,
+                  costUsd: message.total_cost_usd,
+                  durationSeconds,
+                  status: 'success',
+                });
+                el.close();
+              }
             }
             return {
               resultText: message.result || '',
@@ -424,6 +518,21 @@ forge run --resume ${message.session_id || sessionId} "continue"
               log.close();
             }
           }
+          // Write session_end event and close event log
+          {
+            const el = eventLog.current;
+            if (el) {
+              el.write({
+                type: 'session_end',
+                timestamp: new Date().toISOString(),
+                numTurns: message.num_turns,
+                costUsd: message.total_cost_usd,
+                durationSeconds,
+                status,
+              });
+              el.close();
+            }
+          }
 
           await saveResult(persistBase, forgeResult, errorResultText);
           throw new ForgeError(label, forgeResult);
@@ -445,6 +554,7 @@ forge run --resume ${message.session_id || sessionId} "continue"
 
       if (error instanceof Error && error.message.includes('not installed')) {
         streamLog.current?.close();
+        eventLog.current?.close();
         throw new Error('Agent SDK not properly installed. Run: bun install @anthropic-ai/claude-agent-sdk');
       }
 
@@ -462,6 +572,7 @@ forge run --resume ${message.session_id || sessionId} "continue"
       // Non-transient error or out of retries — save result before throwing
       if (error instanceof ForgeError) {
         streamLog.current?.close();
+        eventLog.current?.close();
         throw error;
       }
       const endTime = new Date();
@@ -480,11 +591,13 @@ forge run --resume ${message.session_id || sessionId} "continue"
       };
       await saveResult(persistBase, forgeResult, `Error:\n${errMsg}`).catch(() => {});
       streamLog.current?.close();
+      eventLog.current?.close();
       throw new ForgeError(errMsg, forgeResult);
     }
   }
 
   // Should not reach here — success returns, errors throw
   streamLog.current?.close();
+  eventLog.current?.close();
   throw new ForgeError('Query completed without result');
 }

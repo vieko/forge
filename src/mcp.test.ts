@@ -575,6 +575,168 @@ describe('forge_watch', () => {
     const { json } = await callTool('forge_watch', { cwd: dir });
     expect(json.activity[0]).toBe('Green text');
   });
+
+  test('returns format: legacy when only stream.log exists', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+    const sessionDir = path.join(dir, '.forge', 'sessions', 'test-session');
+    await fs.mkdir(sessionDir, { recursive: true });
+    const logPath = path.join(sessionDir, 'stream.log');
+    await fs.writeFile(logPath, 'Line 1\nLine 2\n');
+    await fs.writeFile(
+      path.join(dir, '.forge', 'latest-session.json'),
+      JSON.stringify({ sessionId: 'test-session', logPath }),
+    );
+
+    const { json } = await callTool('forge_watch', { cwd: dir });
+    expect(json.format).toBe('legacy');
+    expect(json.activity).toBeDefined();
+    expect(json.events).toBeUndefined();
+  });
+
+  test('returns structured events from events.jsonl when available', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+    const sessionDir = path.join(dir, '.forge', 'sessions', 'test-session');
+    await fs.mkdir(sessionDir, { recursive: true });
+    const logPath = path.join(sessionDir, 'stream.log');
+    const eventsPath = path.join(sessionDir, 'events.jsonl');
+
+    // Write both stream.log and events.jsonl
+    await fs.writeFile(logPath, 'Line 1\nLine 2\n');
+    const events = [
+      { type: 'session_start', timestamp: '2026-01-01T00:00:00Z', sessionId: 'test-session', model: 'sonnet', prompt: 'test' },
+      { type: 'thinking_delta', timestamp: '2026-01-01T00:00:01Z', content: 'Analyzing the codebase...' },
+      { type: 'tool_call_start', timestamp: '2026-01-01T00:00:02Z', toolName: 'Read', input: { file_path: 'src/index.ts' } },
+      { type: 'tool_call_result', timestamp: '2026-01-01T00:00:03Z', toolName: 'Read', output: 'file contents here' },
+      { type: 'text_delta', timestamp: '2026-01-01T00:00:04Z', content: 'I found the issue.' },
+    ];
+    await fs.writeFile(eventsPath, events.map(e => JSON.stringify(e)).join('\n'));
+    await fs.writeFile(
+      path.join(dir, '.forge', 'latest-session.json'),
+      JSON.stringify({ sessionId: 'test-session', logPath }),
+    );
+
+    const { json } = await callTool('forge_watch', { cwd: dir });
+    expect(json.format).toBe('structured');
+    expect(json.events).toBeDefined();
+    expect(json.events.length).toBe(5);
+    expect(json.total_events).toBe(5);
+    expect(json.status).toBe('running');
+    // Verify event types are preserved
+    expect(json.events[0].type).toBe('session_start');
+    expect(json.events[1].type).toBe('thinking_delta');
+    expect(json.events[1].content).toBe('Analyzing the codebase...');
+    expect(json.events[2].type).toBe('tool_call_start');
+    expect(json.events[2].toolName).toBe('Read');
+    expect(json.events[3].type).toBe('tool_call_result');
+    expect(json.events[3].output).toBe('file contents here');
+    expect(json.events[4].type).toBe('text_delta');
+    // Legacy fields should not be present in structured mode
+    expect(json.activity).toBeUndefined();
+  });
+
+  test('structured mode detects complete session from session_end event', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+    const sessionDir = path.join(dir, '.forge', 'sessions', 'test-session');
+    await fs.mkdir(sessionDir, { recursive: true });
+    const logPath = path.join(sessionDir, 'stream.log');
+    const eventsPath = path.join(sessionDir, 'events.jsonl');
+
+    await fs.writeFile(logPath, 'Line 1\n');
+    const events = [
+      { type: 'session_start', timestamp: '2026-01-01T00:00:00Z', sessionId: 'test-session', model: 'sonnet', prompt: 'test' },
+      { type: 'text_delta', timestamp: '2026-01-01T00:00:01Z', content: 'Done.' },
+      { type: 'session_end', timestamp: '2026-01-01T00:00:10Z', durationSeconds: 10, status: 'success' },
+    ];
+    await fs.writeFile(eventsPath, events.map(e => JSON.stringify(e)).join('\n'));
+    await fs.writeFile(
+      path.join(dir, '.forge', 'latest-session.json'),
+      JSON.stringify({ sessionId: 'test-session', logPath }),
+    );
+
+    const { json } = await callTool('forge_watch', { cwd: dir });
+    expect(json.format).toBe('structured');
+    expect(json.status).toBe('complete');
+  });
+
+  test('structured mode respects lines parameter for event count', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+    const sessionDir = path.join(dir, '.forge', 'sessions', 'test-session');
+    await fs.mkdir(sessionDir, { recursive: true });
+    const logPath = path.join(sessionDir, 'stream.log');
+    const eventsPath = path.join(sessionDir, 'events.jsonl');
+
+    await fs.writeFile(logPath, 'Line 1\n');
+    const events = Array.from({ length: 20 }, (_, i) => ({
+      type: 'text_delta',
+      timestamp: `2026-01-01T00:00:${String(i).padStart(2, '0')}Z`,
+      content: `Message ${i}`,
+    }));
+    await fs.writeFile(eventsPath, events.map(e => JSON.stringify(e)).join('\n'));
+    await fs.writeFile(
+      path.join(dir, '.forge', 'latest-session.json'),
+      JSON.stringify({ sessionId: 'test-session', logPath }),
+    );
+
+    const { json } = await callTool('forge_watch', { cwd: dir, lines: 5 });
+    expect(json.format).toBe('structured');
+    expect(json.total_events).toBe(20);
+    expect(json.showing).toBe(5);
+    expect(json.events.length).toBe(5);
+    // Should be the last 5 events
+    expect(json.events[0].content).toBe('Message 15');
+  });
+
+  test('structured mode skips malformed JSON lines', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+    const sessionDir = path.join(dir, '.forge', 'sessions', 'test-session');
+    await fs.mkdir(sessionDir, { recursive: true });
+    const logPath = path.join(sessionDir, 'stream.log');
+    const eventsPath = path.join(sessionDir, 'events.jsonl');
+
+    await fs.writeFile(logPath, 'Line 1\n');
+    const eventLines = [
+      JSON.stringify({ type: 'session_start', timestamp: '2026-01-01T00:00:00Z', sessionId: 's1', model: 'sonnet', prompt: 'test' }),
+      'not valid json {{{',
+      JSON.stringify({ type: 'text_delta', timestamp: '2026-01-01T00:00:01Z', content: 'hello' }),
+    ];
+    await fs.writeFile(eventsPath, eventLines.join('\n'));
+    await fs.writeFile(
+      path.join(dir, '.forge', 'latest-session.json'),
+      JSON.stringify({ sessionId: 'test-session', logPath }),
+    );
+
+    const { json } = await callTool('forge_watch', { cwd: dir });
+    expect(json.format).toBe('structured');
+    // Malformed line is skipped, only 2 valid events
+    expect(json.events.length).toBe(2);
+    expect(json.events[0].type).toBe('session_start');
+    expect(json.events[1].type).toBe('text_delta');
+  });
+
+  test('falls back to legacy when events.jsonl does not exist', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+    const sessionDir = path.join(dir, '.forge', 'sessions', 'test-session');
+    await fs.mkdir(sessionDir, { recursive: true });
+    const logPath = path.join(sessionDir, 'stream.log');
+    // Only stream.log, no events.jsonl
+    await fs.writeFile(logPath, 'Tool: Read src/index.ts\nTool: Edit src/index.ts\n');
+    await fs.writeFile(
+      path.join(dir, '.forge', 'latest-session.json'),
+      JSON.stringify({ sessionId: 'test-session', logPath }),
+    );
+
+    const { json } = await callTool('forge_watch', { cwd: dir });
+    expect(json.format).toBe('legacy');
+    expect(json.activity).toBeDefined();
+    expect(json.activity.length).toBe(2);
+    expect(json.events).toBeUndefined();
+  });
 });
 
 // ── forge_start ──────────────────────────────────────────────

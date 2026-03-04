@@ -521,9 +521,23 @@ program
     }
   });
 
+program
+  .command('tui')
+  .description('Interactive sessions viewer')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .action(async (options: { cwd?: string }) => {
+    try {
+      const { runTui } = await import('./tui.js');
+      await runTui({ cwd: options.cwd });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
 // Quick alias: `forge "do something"` = `forge run "do something"`
 // Also handles `forge --spec-dir ... "prompt"` → `forge run --spec-dir ... "prompt"`
-const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'prove', 'verify', 'watch', 'specs', 'stats', 'help']);
+const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'prove', 'verify', 'watch', 'specs', 'stats', 'tui', 'help']);
 const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--dry-run', '--sequential-first', '--branch']);
 const args = process.argv.slice(2);
 if (args.length > 0 && !COMMANDS.has(args[0])) {
