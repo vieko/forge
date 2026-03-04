@@ -125,6 +125,12 @@ forge prove specs/                              # One proof per spec in director
 forge prove specs/ -o ./custom-proofs/          # Custom output directory
 forge prove specs/ -C ~/other-repo              # Different repo
 
+# Execute proof test protocols and create PR
+forge verify .forge/proofs/                     # Verify all proofs
+forge verify .forge/proofs/ --dry-run           # Preview what would be verified
+forge verify .forge/proofs/ -C ~/other-repo     # Different repo
+forge verify .forge/proofs/ -m opus             # Use opus model
+
 # Review recent git changes
 forge review                    # Review main...HEAD
 forge review HEAD~5...HEAD      # Specific range
@@ -139,7 +145,7 @@ forge watch -C ~/other-repo     # Different repo
 ## Architecture
 
 ```
-~7550 lines (source) + ~5280 lines (tests)
+~8090 lines (source) + ~5280 lines (tests)
 
 User Prompt
     ↓
@@ -179,6 +185,7 @@ src/
 ├── review.ts      # runReview
 ├── status.ts        # showStatus
 ├── stats.ts         # showStats (aggregate run statistics)
+├── proof-runner.ts   # forge verify (proof parser, check runner, PR creation)
 ├── mcp.ts           # MCP server (6 tools, stdio transport, async task spawn)
 ├── types.ts         # TypeScript types (ForgeResult, SpecManifest, SpecEntry, SpecRun, DefineOptions, MonorepoContext)
 ├── query.test.ts    # Tests for core utilities
@@ -229,8 +236,9 @@ src/
 21. **Structured run logs** — `ForgeResult` includes `numTurns`, `toolCalls`, `toolBreakdown`, `verifyAttempts`, `retryAttempts`, `logPath` for post-run analysis
 22. **Stats** — `forge stats` aggregates across all runs: total cost, success rate, avg duration. `--by-spec` and `--by-model` breakdowns, `--since` date filter
 23. **Graceful Ctrl-C** — two-phase shutdown: first Ctrl-C aborts running SDK queries via `AbortController` and skips pending specs; second Ctrl-C force-exits. Batch summary shows cancelled specs with `--pending` hint
-25. **Prove** — `forge prove` reads specs and the codebase, then generates a structured test protocol (proof) with automated tests, manual checks, visual checks, and edge cases. Output goes to `.forge/proofs/` by default. Completes the pipeline: define -> run -> audit -> prove
-26. **Nested session guard** — SDK-invoking commands (`run`, `audit`, `define`, `review`, `prove`, `specs --check`) are blocked when running inside Claude Code (`CLAUDECODE=1`). Prints the command to copy. Bypass with `FORGE_ALLOW_NESTED=1` (for debugging only — the nested SDK limitation is real)
+25. **Prove** — `forge prove` reads specs and the codebase, then generates a structured test protocol (proof) with automated tests, manual checks, visual checks, and edge cases. Output goes to `.forge/proofs/` by default
+26. **Verify** — `forge verify` reads proofs, runs all automated checks via single agent query per proof, collects human-only steps, and creates a single GitHub PR with a results summary table and human verification task list. Completes the pipeline: define -> run -> audit -> prove -> verify
+27. **Nested session guard** — SDK-invoking commands (`run`, `audit`, `define`, `review`, `prove`, `verify`, `specs --check`) are blocked when running inside Claude Code (`CLAUDECODE=1`). Prints the command to copy. Bypass with `FORGE_ALLOW_NESTED=1` (for debugging only — the nested SDK limitation is real)
 
 ## Spec Naming
 
