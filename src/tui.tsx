@@ -53,6 +53,19 @@ function formatCost(usd?: number): string {
   return `$${usd.toFixed(2)}`;
 }
 
+function formatRelativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return 'just now';
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days}d ago`;
+  return `${Math.floor(days / 7)}w ago`;
+}
+
 function truncate(str: string, max: number): string {
   if (str.length <= max) return str;
   return str.substring(0, max - 2) + '..';
@@ -157,14 +170,51 @@ async function loadSessions(cwd: string): Promise<SessionInfo[]> {
   return sessions;
 }
 
-async function loadEvents(eventsPath: string): Promise<SessionEvent[]> {
+async function loadEvents(eventsPath: string): Promise<{ events: SessionEvent[]; legacy: boolean }> {
+  // Try structured events.jsonl first
   try {
     const raw = await readFile(eventsPath, 'utf-8');
     const lines = raw.trim().split('\n').filter(Boolean);
-    return lines.map(line => JSON.parse(line) as SessionEvent);
+    if (lines.length > 0) {
+      return { events: lines.map(line => JSON.parse(line) as SessionEvent), legacy: false };
+    }
   } catch {
-    return [];
+    // Fall through to stream.log
   }
+
+  // Fallback: read stream.log and parse into typed events
+  const streamLogPath = eventsPath.replace(/events\.jsonl$/, 'stream.log');
+  try {
+    const raw = await readFile(streamLogPath, 'utf-8');
+    const lines = raw.trim().split('\n').filter(Boolean);
+    if (lines.length > 0) {
+      const events: SessionEvent[] = lines.map(line => {
+        const ts = line.match(/^\[([^\]]+)\]/)?.[1] || new Date().toISOString();
+        const content = line.replace(/^\[[^\]]+\]\s*/, '');
+
+        // Parse stream.log line format into typed events
+        if (content.startsWith('Session started')) {
+          return { type: 'session_start' as const, timestamp: ts, sessionId: '', model: content.match(/model: (\w+)/)?.[1] || '', prompt: '' };
+        }
+        if (content.startsWith('Result:')) {
+          return { type: 'session_end' as const, timestamp: ts, durationSeconds: 0, status: content.includes('success') ? 'success' as const : 'error_execution' as const };
+        }
+        if (content.startsWith('$ ') || content.match(/^Reading |^Editing |^Writing |^Searching /)) {
+          const isCmd = content.startsWith('$ ');
+          return { type: 'tool_call_start' as const, timestamp: ts, toolName: isCmd ? 'Bash' : 'Read', input: { command: isCmd ? content.slice(2) : content } };
+        }
+        if (content.startsWith('Text: ')) {
+          return { type: 'text_delta' as const, timestamp: ts, content: content.slice(6) };
+        }
+        return { type: 'text_delta' as const, timestamp: ts, content };
+      });
+      return { events, legacy: true };
+    }
+  } catch {
+    // No log at all
+  }
+
+  return { events: [], legacy: false };
 }
 
 // ── Components ───────────────────────────────────────────────
@@ -176,6 +226,7 @@ function SessionRow({ session, selected }: { session: SessionInfo; selected: boo
   const model = pad(session.model, 8);
   const cost = padStart(formatCost(session.costUsd), 8);
   const dur = padStart(formatDuration(session.durationSeconds), 8);
+  const ago = padStart(formatRelativeTime(session.startedAt), 9);
 
   return (
     <box
@@ -194,18 +245,20 @@ function SessionRow({ session, selected }: { session: SessionInfo; selected: boo
         <span fg="#777777">{model}</span>
         <span fg="#777777">{cost}</span>
         <span fg="#777777">{dur}</span>
+        <span fg="#555555">{ago}</span>
       </text>
     </box>
   );
 }
 
-function SessionsList({ sessions, cwd, onSelect, onQuit }: {
+function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit }: {
   sessions: SessionInfo[];
   cwd: string;
-  onSelect: (s: SessionInfo) => void;
+  initialIndex?: number;
+  onSelect: (s: SessionInfo, index: number) => void;
   onQuit: () => void;
 }) {
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
   const [scrollOffset, setScrollOffset] = useState(0);
   const { height } = useTerminalDimensions();
 
@@ -240,7 +293,7 @@ function SessionsList({ sessions, cwd, onSelect, onQuit }: {
       setSelectedIndex(i => Math.min(sessions.length - 1, i + 1));
     } else if (key.name === 'return') {
       if (sessions.length > 0 && sessions[selectedIndex]) {
-        onSelect(sessions[selectedIndex]);
+        onSelect(sessions[selectedIndex], selectedIndex);
       }
     }
   });
@@ -361,6 +414,7 @@ function SessionDetail({ session, onBack, onQuit }: {
   onQuit: () => void;
 }) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
+  const [isLegacy, setIsLegacy] = useState(false);
   const { height } = useTerminalDimensions();
 
   // Load events and poll for running sessions
@@ -369,8 +423,11 @@ function SessionDetail({ session, onBack, onQuit }: {
     let interval: ReturnType<typeof setInterval> | null = null;
 
     const load = async () => {
-      const loaded = await loadEvents(session.eventsPath);
-      if (mounted) setEvents(loaded);
+      const { events: loaded, legacy } = await loadEvents(session.eventsPath);
+      if (mounted) {
+        setEvents(loaded);
+        setIsLegacy(legacy);
+      }
     };
 
     load();
@@ -414,6 +471,7 @@ function SessionDetail({ session, onBack, onQuit }: {
             <span fg="#888888">{'  '}{formatDuration(session.durationSeconds)}</span>
           ) : null}
           {session.isRunning ? <span fg="#36b5f0">{'  '}(live)</span> : null}
+          {isLegacy ? <span fg="#555555">{'  '}(stream.log)</span> : null}
         </text>
       </box>
 
@@ -450,6 +508,7 @@ function App({ cwd }: { cwd: string }) {
   const [view, setView] = useState<'list' | 'detail'>('list');
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
+  const [listIndex, setListIndex] = useState(0);
 
   // Load sessions initially and refresh periodically
   useEffect(() => {
@@ -481,7 +540,9 @@ function App({ cwd }: { cwd: string }) {
     <SessionsList
       sessions={sessions}
       cwd={cwd}
-      onSelect={(s) => {
+      initialIndex={listIndex}
+      onSelect={(s, i) => {
+        setListIndex(i);
         setSelectedSession(s);
         setView('detail');
       }}
@@ -513,23 +574,16 @@ export function shutdownTui(): void {
     _root = null;
   }
   if (_renderer) {
+    // renderer.destroy() restores terminal state (mouse tracking, alt screen, cursor)
     const r = _renderer as Record<string, unknown>;
-    if (typeof r.dispose === 'function') {
-      try { (r.dispose as () => void)(); } catch {}
+    if (typeof r.destroy === 'function') {
+      try { (r.destroy as () => void)(); } catch {}
     }
     _renderer = null;
   }
-  // Drain any buffered mouse events from stdin before returning to shell
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(false);
-    process.stdin.pause();
-  }
-  // Ensure terminal reset is flushed before exit
-  process.stdout.write(TERMINAL_RESET, () => {
-    process.exit(0);
-  });
-  // Fallback if callback never fires
-  setTimeout(() => process.exit(0), 100);
+  // Belt-and-suspenders: write reset sequences in case destroy() missed anything
+  process.stdout.write(TERMINAL_RESET);
+  process.exit(0);
 }
 
 export async function runTui(options: TuiOptions): Promise<void> {
@@ -549,10 +603,13 @@ export async function runTui(options: TuiOptions): Promise<void> {
     process.exit(1);
   }
 
-  // Enter alt screen buffer so TUI content doesn't linger after exit
-  process.stdout.write('\x1b[?1049h');
-
   _renderer = await createCliRenderer({ exitOnCtrlC: false });
   _root = createRoot(_renderer);
+
+  // Handle all termination paths — OpenTUI does NOT auto-cleanup on process.exit
+  process.on('SIGINT', shutdownTui);
+  process.on('SIGTERM', shutdownTui);
+  process.on('SIGHUP', shutdownTui);
+
   _root.render(<App cwd={cwd} />);
 }
