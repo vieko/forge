@@ -75,7 +75,7 @@ export interface ForgeResult {
   /** Batch run ID for grouping specs in the same run */
   runId?: string;
   /** Type of run */
-  type?: 'run' | 'audit' | 'review' | 'define' | 'prove';
+  type?: 'run' | 'audit' | 'review' | 'define' | 'prove' | 'verify';
   /** Agent turns used */
   numTurns?: number;
   /** Total tool invocations */
@@ -174,6 +174,52 @@ export interface ProveOptions {
   resume?: string;
   /** Fork from a previous session (new session, same history) */
   fork?: string;
+}
+
+/**
+ * Options for running verification against proof files.
+ */
+export interface VerifyOptions {
+  /** Path to a directory of proof files to verify */
+  proofDir: string;
+  /** Output directory for verification results (default: .forge/verify/) */
+  outputDir?: string;
+  /** Additional context prompt */
+  prompt?: string;
+  /** Working directory (target repo) */
+  cwd?: string;
+  /** Model to use (shorthand like 'opus'/'sonnet' or full ID) */
+  model?: string;
+  /** Maximum turns (default: 100) */
+  maxTurns?: number;
+  /** Maximum budget in USD (default: $5) */
+  maxBudgetUsd?: number;
+  /** Suppress progress output */
+  quiet?: boolean;
+  /** Preview tasks and estimate cost without executing */
+  dryRun?: boolean;
+}
+
+/**
+ * Result from verifying a single proof file.
+ */
+export interface VerifyResult {
+  /** Path to the proof file that was verified */
+  proofPath: string;
+  /** Name of the proof file (basename) */
+  proofName: string;
+  /** Overall verification status */
+  status: 'pass' | 'fail' | 'skipped';
+  /** Number of automated check items that passed */
+  automatedPassed: number;
+  /** Total number of automated check items */
+  automatedTotal: number;
+  /** Human-only verification steps (from Manual Verification and Visual Checks) */
+  humanSteps: string[];
+  /** Cost in USD (if available) */
+  costUsd?: number;
+  /** Duration in seconds */
+  durationSeconds?: number;
 }
 
 // ── Spec Lifecycle Tracking ──────────────────────────────────

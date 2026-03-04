@@ -5,7 +5,7 @@
  *
  * Exposes forge commands as MCP tools over stdio transport.
  * Fast tools (specs, status, stats) call internal functions directly.
- * SDK tools (define, prove, run, audit) spawn child processes with
+ * SDK tools (define, prove, run, audit, verify) spawn child processes with
  * CLAUDECODE stripped from env to avoid the nested session guard.
  *
  * Async two-tool pattern: forge_start → forge_task (poll).
@@ -306,9 +306,9 @@ server.registerTool('forge_stats', {
 // ── Async tool: forge_start ──────────────────────────────────
 
 server.registerTool('forge_start', {
-  description: `Start a long-running forge command (define, prove, run, audit). Returns a task_id immediately — use forge_task to poll for completion. The command runs in a separate process (not nested in Claude Code). Typical durations: define 3-5min, run 5-15min, audit 3-10min, prove 2-5min. Poll every 30-60s with forge_task.`,
+  description: `Start a long-running forge command (define, prove, run, audit, verify). Returns a task_id immediately — use forge_task to poll for completion. The command runs in a separate process (not nested in Claude Code). Typical durations: define 3-5min, run 5-15min, audit 3-10min, prove 2-5min, verify 5-15min. Poll every 30-60s with forge_task.`,
   inputSchema: {
-    command: z.enum(['define', 'prove', 'run', 'audit']).describe('Forge command to run'),
+    command: z.enum(['define', 'prove', 'run', 'audit', 'verify']).describe('Forge command to run'),
     description: z.string().describe('Task description or prompt for the command'),
     cwd: z.string().describe('Working directory (target repo)'),
     output_dir: z.string().optional().describe('Output directory for generated specs/proofs'),
@@ -326,8 +326,8 @@ server.registerTool('forge_start', {
     // Build CLI arguments
     const args: string[] = [forgeBin(), command];
 
-    // Commands that take a positional spec-path argument
-    if ((command === 'audit' || command === 'prove') && spec_path) {
+    // Commands that take a positional path argument (spec-path or proof-dir)
+    if ((command === 'audit' || command === 'prove' || command === 'verify') && spec_path) {
       args.push(spec_path);
     }
 
@@ -336,8 +336,8 @@ server.registerTool('forge_start', {
       args.push(description);
     }
 
-    // For audit/prove, the description is an optional second positional arg
-    if ((command === 'audit' || command === 'prove') && description) {
+    // For audit/prove/verify, the description is an optional second positional arg
+    if ((command === 'audit' || command === 'prove' || command === 'verify') && description) {
       args.push(description);
     }
 

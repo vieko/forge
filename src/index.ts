@@ -12,6 +12,7 @@ import { runWatch } from './watch.js';
 import { showSpecs } from './specs.js';
 import { runDefine } from './define.js';
 import { runProve } from './prove.js';
+import { runVerify } from './proof-runner.js';
 import { showStats } from './stats.js';
 import { triggerAbort, isInterrupted } from './abort.js';
 
@@ -392,6 +393,38 @@ program
   });
 
 program
+  .command('verify')
+  .description('Execute proof test protocols and create a PR')
+  .argument('<proof-dir>', 'Directory of proof files to verify')
+  .option('-o, --output-dir <path>', 'Output directory for verification results')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)')
+  .option('-q, --quiet', 'Suppress progress output')
+  .option('--dry-run', 'Preview what would be verified and what PR would look like')
+  .action(async (proofDir: string, options: {
+    outputDir?: string;
+    cwd?: string;
+    model?: string;
+    quiet?: boolean;
+    dryRun?: boolean;
+  }) => {
+    guardNestedSession();
+    try {
+      await runVerify({
+        proofDir,
+        outputDir: options.outputDir,
+        cwd: options.cwd,
+        model: options.model,
+        quiet: options.quiet,
+        dryRun: options.dryRun,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+program
   .command('watch')
   .description('Watch live session logs')
   .argument('[session-id]', 'Session ID to watch (default: latest)')
@@ -490,7 +523,7 @@ program
 
 // Quick alias: `forge "do something"` = `forge run "do something"`
 // Also handles `forge --spec-dir ... "prompt"` → `forge run --spec-dir ... "prompt"`
-const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'prove', 'watch', 'specs', 'stats', 'help']);
+const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'prove', 'verify', 'watch', 'specs', 'stats', 'help']);
 const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--dry-run', '--sequential-first', '--branch']);
 const args = process.argv.slice(2);
 if (args.length > 0 && !COMMANDS.has(args[0])) {
