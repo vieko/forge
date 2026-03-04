@@ -180,7 +180,7 @@ function SessionRow({ session, selected }: { session: SessionInfo; selected: boo
   return (
     <box
       style={{
-        backgroundColor: selected ? '#2a2a3a' : undefined,
+        backgroundColor: selected ? '#334155' : undefined,
         paddingLeft: 1,
         paddingRight: 1,
         height: 1,
@@ -496,32 +496,40 @@ function App({ cwd }: { cwd: string }) {
 let _renderer: Awaited<ReturnType<typeof createCliRenderer>> | null = null;
 let _root: ReturnType<typeof createRoot> | null = null;
 
+const TERMINAL_RESET = [
+  '\x1b[?1003l', // disable any-event mouse tracking
+  '\x1b[?1002l', // disable button-event mouse tracking
+  '\x1b[?1000l', // disable normal mouse tracking
+  '\x1b[?1006l', // disable SGR mouse mode
+  '\x1b[?2004l', // disable bracketed paste
+  '\x1b[?1049l', // exit alt screen buffer
+  '\x1b[?25h',   // show cursor
+  '\x1b[0m',     // reset all attributes
+].join('');
+
 export function shutdownTui(): void {
   if (_root) {
     try { _root.unmount(); } catch {}
     _root = null;
   }
   if (_renderer) {
-    // CliRenderer exposes dispose() at runtime but the type is loosely defined
     const r = _renderer as Record<string, unknown>;
     if (typeof r.dispose === 'function') {
       try { (r.dispose as () => void)(); } catch {}
     }
     _renderer = null;
   }
-  // Restore terminal state: disable mouse tracking, alt screen, bracketed paste
-  const reset = [
-    '\x1b[?1003l', // disable any-event mouse tracking
-    '\x1b[?1002l', // disable button-event mouse tracking
-    '\x1b[?1000l', // disable normal mouse tracking
-    '\x1b[?1006l', // disable SGR mouse mode
-    '\x1b[?2004l', // disable bracketed paste
-    '\x1b[?1049l', // exit alt screen buffer
-    '\x1b[?25h',   // show cursor
-    '\x1b[0m',     // reset all attributes
-  ].join('');
-  process.stdout.write(reset);
-  process.exit(0);
+  // Drain any buffered mouse events from stdin before returning to shell
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(false);
+    process.stdin.pause();
+  }
+  // Ensure terminal reset is flushed before exit
+  process.stdout.write(TERMINAL_RESET, () => {
+    process.exit(0);
+  });
+  // Fallback if callback never fires
+  setTimeout(() => process.exit(0), 100);
 }
 
 export async function runTui(options: TuiOptions): Promise<void> {
@@ -540,6 +548,9 @@ export async function runTui(options: TuiOptions): Promise<void> {
     console.error('Run a task first to initialize the forge directory.');
     process.exit(1);
   }
+
+  // Enter alt screen buffer so TUI content doesn't linger after exit
+  process.stdout.write('\x1b[?1049h');
 
   _renderer = await createCliRenderer({ exitOnCtrlC: false });
   _root = createRoot(_renderer);
