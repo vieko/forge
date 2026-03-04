@@ -139,7 +139,7 @@ forge watch -C ~/other-repo     # Different repo
 ## Architecture
 
 ```
-~6650 lines (source) + ~4700 lines (tests)
+~7550 lines (source) + ~5280 lines (tests)
 
 User Prompt
     ↓
@@ -179,6 +179,7 @@ src/
 ├── review.ts      # runReview
 ├── status.ts        # showStatus
 ├── stats.ts         # showStats (aggregate run statistics)
+├── mcp.ts           # MCP server (6 tools, stdio transport, async task spawn)
 ├── types.ts         # TypeScript types (ForgeResult, SpecManifest, SpecEntry, SpecRun, DefineOptions, MonorepoContext)
 ├── query.test.ts    # Tests for core utilities
 ├── deps.test.ts     # Tests for dependency + parseSource
@@ -188,6 +189,7 @@ src/
 ├── define.test.ts   # Tests for spec complexity assessment
 ├── parallel.test.ts # Tests for smartDispatch, runSpecBatch, filterPassedSpecs
 ├── stats.test.ts    # Tests for stats aggregation
+├── mcp.test.ts      # Tests for MCP server (protocol-level via stdio client)
 └── types.test.ts    # Type validation tests
 
 .forge/
