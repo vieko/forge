@@ -214,17 +214,17 @@ ${options.prompt ? `## Additional Context\n\n${options.prompt}\n` : ''}
     outputSpecs = files.filter(f => f.endsWith('.md')).sort();
   } catch {}
 
-  // Rename specs that don't already have the round prefix
+  // Rename specs with the current round prefix (strip any existing r{N}- prefixes first)
   if (specPrefix && outputSpecs.length > 0) {
     const renamed: string[] = [];
     for (const file of outputSpecs) {
-      if (!file.startsWith(specPrefix)) {
-        const newName = `${specPrefix}${file}`;
+      // Strip all existing round prefixes (e.g., r3-r2-r1-foo.md → foo.md)
+      const baseName = file.replace(/^(r\d+-)+/, '');
+      const newName = `${specPrefix}${baseName}`;
+      if (newName !== file) {
         await fs.rename(path.join(outputDir, file), path.join(outputDir, newName));
-        renamed.push(newName);
-      } else {
-        renamed.push(file);
       }
+      renamed.push(newName);
     }
     outputSpecs = renamed.sort();
   }
@@ -360,6 +360,7 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
   let totalCost = 0;
   let totalDuration = 0;
   let round = 0;
+  let prevGapNames: Set<string> | null = null;
   const roundSummaries: Array<{ round: number; gaps: number; fixesRan: boolean; durationSeconds: number; costUsd: number }> = [];
 
   while (round < maxRounds && !isInterrupted()) {
@@ -400,6 +401,24 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
       }
       break;
     }
+
+    // Convergence detection: bail if same gaps found as previous round
+    const currentGapNames = new Set(auditResult.outputSpecs.map(f => f.replace(/^(r\d+-)+/, '')));
+    if (prevGapNames && currentGapNames.size === prevGapNames.size && [...currentGapNames].every(g => prevGapNames!.has(g))) {
+      roundSummaries.push({
+        round,
+        gaps: auditResult.outputSpecs.length,
+        fixesRan: false,
+        durationSeconds: auditResult.durationSeconds,
+        costUsd: auditResult.costUsd,
+      });
+
+      if (!quiet) {
+        console.log(`\n  \x1b[33mRound ${round}: Same ${currentGapNames.size} gap(s) as previous round -- not converging. Stopping.\x1b[0m\n`);
+      }
+      break;
+    }
+    prevGapNames = currentGapNames;
 
     if (!quiet) {
       console.log(`\n  ${BOLD}${auditResult.outputSpecs.length}${RESET} gap(s) found:\n`);
