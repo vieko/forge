@@ -36,6 +36,7 @@ interface Task {
   stdout: string[];
   stderr: string[];
   pid?: number;
+  sessionId?: string;
 }
 
 const MAX_BUFFER_LINES = 50;
@@ -379,6 +380,17 @@ server.registerTool('forge_start', {
       }
     });
 
+    // Capture sessionId: poll latest-session.json shortly after start
+    // The child persists session info on SDK init before any work begins
+    setTimeout(async () => {
+      if (task.sessionId) return; // already captured
+      try {
+        const latestPath = path.join(workingDir, '.forge', 'latest-session.json');
+        const data = JSON.parse(await fs.readFile(latestPath, 'utf-8'));
+        if (data.sessionId) task.sessionId = data.sessionId;
+      } catch { /* ignore */ }
+    }, 3000);
+
     child.stderr?.on('data', (data: Buffer) => {
       for (const line of data.toString().split('\n')) {
         if (line.trim()) pushLine(task.stderr, line);
@@ -449,6 +461,10 @@ server.registerTool('forge_task', {
     recent_output: recentStdout,
   };
 
+  if (task.sessionId) {
+    result.session_id = task.sessionId;
+  }
+
   if (recentStderr.length > 0) {
     result.recent_errors = recentStderr;
   }
@@ -474,34 +490,41 @@ server.registerTool('forge_watch', {
   },
 }, async ({ cwd, lines, task_id }) => {
   try {
-    // If task_id provided, use the task's cwd
+    // If task_id provided, use the task's cwd and sessionId directly
     let workingDir = path.resolve(cwd);
+    let sessionId: string | undefined;
+    let logPath: string | undefined;
+
     if (task_id) {
       const task = tasks.get(task_id);
-      if (task) workingDir = task.cwd;
+      if (task) {
+        workingDir = task.cwd;
+        sessionId = task.sessionId;
+      }
     }
 
-    // Read latest-session.json to find the log path
-    const latestPath = path.join(workingDir, '.forge', 'latest-session.json');
-    let logPath: string;
-    let sessionId: string | undefined;
-
-    try {
-      const data = JSON.parse(await fs.readFile(latestPath, 'utf-8'));
-      sessionId = data.sessionId;
-      if (data.logPath) {
-        logPath = data.logPath;
-      } else if (data.sessionId) {
-        logPath = path.join(workingDir, '.forge', 'sessions', data.sessionId, 'stream.log');
-      } else {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: 'No session found. Start a forge command first.' }) }],
-          isError: true,
-        };
+    // If we have a sessionId (from task), construct path directly — skip latest-session.json
+    if (sessionId) {
+      logPath = path.join(workingDir, '.forge', 'sessions', sessionId, 'stream.log');
+    } else {
+      // Fallback: read latest-session.json
+      const latestPath = path.join(workingDir, '.forge', 'latest-session.json');
+      try {
+        const data = JSON.parse(await fs.readFile(latestPath, 'utf-8'));
+        sessionId = data.sessionId;
+        if (data.logPath) {
+          logPath = data.logPath;
+        } else if (data.sessionId) {
+          logPath = path.join(workingDir, '.forge', 'sessions', data.sessionId, 'stream.log');
+        }
+      } catch {
+        // No latest-session.json
       }
-    } catch {
+    }
+
+    if (!logPath) {
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ error: 'No session found. No .forge/latest-session.json exists.' }) }],
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: 'No session found. Start a forge command first.' }) }],
         isError: true,
       };
     }
