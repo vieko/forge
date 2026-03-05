@@ -360,7 +360,7 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
         </text>
       </box>
 
-      <scrollbox ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} style={{ flexGrow: 1 }}>
+      <scrollbox ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1 }}>
         {sessions.map((session, i) => (
           <box key={session.sessionId} id={`s-${i}`}>
             <SessionRow
@@ -744,7 +744,7 @@ function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
         </text>
       </box>
 
-      <scrollbox ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} style={{ flexGrow: 1 }}>
+      <scrollbox ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1 }}>
         {displayRows.map((row, i) => {
           if (groupHeaderIndices.has(i)) {
             return <box key={`hdr-${row.directory}`} id={`sp-${i}`}><SpecGroupHeader directory={row.directory} /></box>;
