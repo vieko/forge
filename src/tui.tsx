@@ -519,6 +519,7 @@ function SessionDetail({ session, onBack, onQuit, onTabSwitch }: {
 
       <scrollbox
         focused
+        scrollbarOptions={{ visible: false }}
         style={{
           flexGrow: 1,
           height: Math.max(1, height - 6), // +1 for tab bar
