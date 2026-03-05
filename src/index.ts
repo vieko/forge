@@ -526,6 +526,20 @@ program
   .description('Interactive sessions viewer')
   .option('-C, --cwd <path>', 'Working directory (target repo)')
   .action(async (options: { cwd?: string }) => {
+    // OpenTUI requires Bun (imports .scm files that Node can't handle)
+    const isBun = typeof globalThis.Bun !== 'undefined';
+    if (!isBun) {
+      const { execFileSync } = await import('child_process');
+      const args = ['run', join(__dirname, '..', 'src', 'index.ts'), 'tui'];
+      if (options.cwd) args.push('-C', options.cwd);
+      try {
+        execFileSync('bun', args, { stdio: 'inherit' });
+      } catch (e: unknown) {
+        const code = (e as { status?: number }).status;
+        process.exit(code ?? 1);
+      }
+      return;
+    }
     try {
       const { runTui } = await import('./tui.js');
       await runTui({ cwd: options.cwd });

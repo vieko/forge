@@ -1026,17 +1026,21 @@ async function runForgeInner(
     }
   }
 
-  // Auto-register single spec in manifest before running
+  // Auto-register single spec in manifest before running (skip directories)
   if (effectiveOptions.specPath) {
     const absSpec = path.resolve(effectiveOptions.specPath);
-    await withManifestLock(resultDir, async (manifest) => {
-      const key = specKey(absSpec, resultDir);
-      if (!manifest.specs.some(e => e.spec === key)) {
-        let content: string | undefined;
-        try { content = await fs.readFile(absSpec, 'utf-8'); } catch {}
-        findOrCreateEntry(manifest, key, resolveSpecSource(content, absSpec));
-      }
-    });
+    let isFile = false;
+    try { isFile = (await fs.stat(absSpec)).isFile(); } catch {}
+    if (isFile) {
+      await withManifestLock(resultDir, async (manifest) => {
+        const key = specKey(absSpec, resultDir);
+        if (!manifest.specs.some(e => e.spec === key)) {
+          let content: string | undefined;
+          try { content = await fs.readFile(absSpec, 'utf-8'); } catch {}
+          findOrCreateEntry(manifest, key, resolveSpecSource(content, absSpec));
+        }
+      });
+    }
   }
 
   // ── Spec preflight: warn about complex specs ──

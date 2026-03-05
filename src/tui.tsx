@@ -5,7 +5,8 @@ import { createRoot, useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { useState, useEffect } from 'react';
 import { readdir, readFile } from 'fs/promises';
 import { join, basename, dirname } from 'path';
-import type { ForgeResult, SessionEvent } from './types.js';
+import type { ForgeResult, SessionEvent, SpecManifest, SpecEntry, SpecRun } from './types.js';
+import { loadManifest } from './specs.js';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -26,6 +27,8 @@ interface SessionInfo {
   isRunning: boolean;
   type?: string;
 }
+
+type Tab = 'sessions' | 'specs';
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -217,9 +220,44 @@ async function loadEvents(eventsPath: string): Promise<{ events: SessionEvent[];
   return { events: [], legacy: false };
 }
 
+async function loadSessionFromResult(resultPath: string, cwd: string, entry: SpecEntry): Promise<SessionInfo | null> {
+  try {
+    const fullPath = join(cwd, resultPath, 'summary.json');
+    const raw = await readFile(fullPath, 'utf-8');
+    const result: ForgeResult = JSON.parse(raw);
+    return {
+      sessionId: result.sessionId || basename(resultPath),
+      status: result.status,
+      specName: basename(entry.spec, '.md'),
+      specPath: result.specPath,
+      model: result.model || '--',
+      costUsd: result.costUsd,
+      durationSeconds: result.durationSeconds,
+      startedAt: result.startedAt,
+      eventsPath: deriveEventsPath(result.logPath, result.sessionId, cwd),
+      isRunning: false,
+      type: result.type,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ── Components ───────────────────────────────────────────────
 
-function SessionRow({ session, selected }: { session: SessionInfo; selected: boolean }) {
+function TabBar({ activeTab }: { activeTab: Tab }) {
+  return (
+    <box style={{ paddingLeft: 1, height: 1 }}>
+      <text>
+        <span fg={activeTab === 'sessions' ? '#36b5f0' : '#555555'}>[ Sessions ]</span>
+        {'  '}
+        <span fg={activeTab === 'specs' ? '#36b5f0' : '#555555'}>[ Specs ]</span>
+      </text>
+    </box>
+  );
+}
+
+function SessionRow({ session, selected, maxWidth }: { session: SessionInfo; selected: boolean; maxWidth: number }) {
   const icon = statusIcon(session);
   const color = statusColor(session);
   const name = pad(truncate(session.specName, 28), 28);
@@ -227,6 +265,7 @@ function SessionRow({ session, selected }: { session: SessionInfo; selected: boo
   const cost = padStart(formatCost(session.costUsd), 8);
   const dur = padStart(formatDuration(session.durationSeconds), 8);
   const ago = padStart(formatRelativeTime(session.startedAt), 9);
+  const line = truncate(`${icon} ${name}  ${model}${cost}${dur}${ago}`, maxWidth - 2);
 
   return (
     <box
@@ -238,33 +277,30 @@ function SessionRow({ session, selected }: { session: SessionInfo; selected: boo
       }}
     >
       <text>
-        <span fg={color}>{icon}</span>
-        {' '}
-        <span fg={selected ? '#ffffff' : '#bbbbbb'}>{name}</span>
-        {'  '}
-        <span fg="#777777">{model}</span>
-        <span fg="#777777">{cost}</span>
-        <span fg="#777777">{dur}</span>
-        <span fg="#555555">{ago}</span>
+        <span fg={color}>{line[0]}</span>
+        <span fg={selected ? '#ffffff' : '#bbbbbb'}>{line.substring(1)}</span>
       </text>
     </box>
   );
 }
 
-function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit }: {
+function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
   sessions: SessionInfo[];
   cwd: string;
   initialIndex?: number;
   onSelect: (s: SessionInfo, index: number) => void;
   onQuit: () => void;
+  onTabSwitch: () => void;
 }) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
   const [scrollOffset, setScrollOffset] = useState(0);
-  const { height } = useTerminalDimensions();
+  const { height, width } = useTerminalDimensions();
 
-  const headerLines = 3;
-  const footerLines = 2;
-  const maxVisible = Math.max(1, height - headerLines - footerLines);
+  // Empirically: height includes tab bar line rendered by parent.
+  // header (paddingTop:1 + text = 2 lines) + footer (1 line) + tab bar (1) + blank line gap (1) = 5
+  // Add extra 2 for safety to prevent footer overlap in OpenTUI
+  // tab bar (1) + header (2) + blank separator (1) + footer (1) + 2 safety (OpenTUI ghost rows) = 7
+  const maxVisible = Math.max(1, height - 7);
 
   // Clamp selected index when sessions change
   useEffect(() => {
@@ -287,6 +323,10 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit }: {
       onQuit();
       return;
     }
+    if (key.name === 'tab') {
+      onTabSwitch();
+      return;
+    }
     if (key.name === 'up' || key.name === 'k') {
       setSelectedIndex(i => Math.max(0, i - 1));
     } else if (key.name === 'down' || key.name === 'j') {
@@ -307,14 +347,14 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit }: {
         <text> </text>
         <text fg="#555555">Run a spec to create your first session.</text>
         <text> </text>
-        <text fg="#555555">[q] quit</text>
+        <text fg="#555555">[tab] specs  [q] quit</text>
       </box>
     );
   }
 
   return (
-    <box flexDirection="column">
-      <box style={{ paddingLeft: 1, paddingTop: 1, height: 2 }}>
+    <box flexDirection="column" style={{ flexGrow: 1 }}>
+      <box style={{ paddingLeft: 1, paddingTop: 1, flexShrink: 0 }}>
         <text>
           <span fg="#888888">forge tui</span>
           {'  '}
@@ -325,18 +365,19 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit }: {
         </text>
       </box>
 
-      <box flexDirection="column">
+      <scrollbox style={{ flexGrow: 1, maxHeight: maxVisible }}>
         {visibleSessions.map((session, i) => (
           <SessionRow
             key={session.sessionId}
             session={session}
             selected={scrollOffset + i === selectedIndex}
+            maxWidth={width}
           />
         ))}
-      </box>
+      </scrollbox>
 
-      <box style={{ paddingLeft: 1, paddingTop: 1, height: 2 }}>
-        <text fg="#555555">[up/down] navigate  [enter] view  [q] quit</text>
+      <box style={{ paddingLeft: 1, flexShrink: 0 }}>
+        <text fg="#555555">[j/k] navigate  [enter] view  [tab] specs  [q] quit</text>
       </box>
     </box>
   );
@@ -408,10 +449,11 @@ function EventBlock({ event }: { event: SessionEvent }) {
   }
 }
 
-function SessionDetail({ session, onBack, onQuit }: {
+function SessionDetail({ session, onBack, onQuit, onTabSwitch }: {
   session: SessionInfo;
   onBack: () => void;
   onQuit: () => void;
+  onTabSwitch: () => void;
 }) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [isLegacy, setIsLegacy] = useState(false);
@@ -447,6 +489,10 @@ function SessionDetail({ session, onBack, onQuit }: {
       onQuit();
       return;
     }
+    if (key.name === 'tab') {
+      onTabSwitch();
+      return;
+    }
     if (key.name === 'escape' || key.name === 'backspace') {
       onBack();
     }
@@ -479,7 +525,7 @@ function SessionDetail({ session, onBack, onQuit }: {
         focused
         style={{
           flexGrow: 1,
-          height: Math.max(1, height - 5),
+          height: Math.max(1, height - 6), // +1 for tab bar
         }}
       >
         {events.length === 0 ? (
@@ -497,7 +543,390 @@ function SessionDetail({ session, onBack, onQuit }: {
 
       <box style={{ paddingLeft: 1, height: 2 }}>
         <text fg="#555555">
-          [esc] back  [q] quit{session.isRunning ? '  (polling 500ms)' : ''}
+          [esc] back  [tab] specs  [q] quit{session.isRunning ? '  (polling 500ms)' : ''}
+        </text>
+      </box>
+    </box>
+  );
+}
+
+function specStatusIcon(status: string): string {
+  if (status === 'passed') return '+';
+  if (status === 'failed') return 'x';
+  return '-';
+}
+
+function specStatusColor(status: string): string {
+  if (status === 'passed') return '#22c55e';
+  if (status === 'failed') return '#ef4444';
+  return '#bbbbbb';
+}
+
+interface SpecDisplayRow {
+  entry: SpecEntry;
+  filename: string;
+  directory: string;
+  totalCost: number;
+  totalDuration: number;
+}
+
+function SpecRow({ row, selected, maxWidth }: { row: SpecDisplayRow; selected: boolean; maxWidth: number }) {
+  const icon = specStatusIcon(row.entry.status);
+  const color = specStatusColor(row.entry.status);
+  const name = pad(truncate(row.filename, 28), 28);
+  const runs = padStart(String(row.entry.runs.length), 4);
+  const cost = padStart(formatCost(row.totalCost > 0 ? row.totalCost : undefined), 8);
+  const dur = padStart(formatDuration(row.totalDuration > 0 ? row.totalDuration : undefined), 8);
+  const ago = padStart(formatRelativeTime(row.entry.updatedAt), 9);
+  const line = truncate(`${icon} ${name}  ${runs}${cost}${dur}${ago}`, maxWidth - 2);
+
+  return (
+    <box
+      style={{
+        backgroundColor: selected ? '#334155' : undefined,
+        paddingLeft: 1,
+        paddingRight: 1,
+        height: 1,
+      }}
+    >
+      <text>
+        <span fg={color}>{line[0]}</span>
+        <span fg={selected ? '#ffffff' : '#bbbbbb'}>{line.substring(1)}</span>
+      </text>
+    </box>
+  );
+}
+
+function SpecGroupHeader({ directory }: { directory: string }) {
+  return (
+    <box style={{ paddingLeft: 1, height: 1 }}>
+      <text fg="#555555">{directory}</text>
+    </box>
+  );
+}
+
+function SpecsList({ cwd, initialIndex, initialScroll, onSelect, onQuit, onTabSwitch }: {
+  cwd: string;
+  initialIndex?: number;
+  initialScroll?: number;
+  onSelect: (entry: SpecEntry, index: number) => void;
+  onQuit: () => void;
+  onTabSwitch: (index: number, scroll: number) => void;
+}) {
+  const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
+  const [scrollOffset, setScrollOffset] = useState(initialScroll ?? 0);
+  const [manifest, setManifest] = useState<SpecManifest | null>(null);
+  const { height, width } = useTerminalDimensions();
+
+  // tab bar (1) + header (2) + footer (1) + safety (1) = 5; container height = height - 1 (tab bar)
+  const maxVisible = Math.max(1, height - 5);
+
+  // Load manifest and re-poll every 5 seconds
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      const m = await loadManifest(cwd);
+      if (mounted) setManifest(m);
+    };
+    load();
+    const interval = setInterval(load, 5000);
+    return () => { mounted = false; clearInterval(interval); };
+  }, [cwd]);
+
+  // Build display rows: grouped by directory, sorted alphabetically within each group
+  const { displayRows, groupHeaderIndices } = (() => {
+    if (!manifest || manifest.specs.length === 0) {
+      return { displayRows: [] as SpecDisplayRow[], groupHeaderIndices: new Set<number>() };
+    }
+
+    // Compute rows with directory info
+    const rows: SpecDisplayRow[] = manifest.specs.map(entry => {
+      const parts = entry.spec.split('/');
+      const filename = parts[parts.length - 1];
+      const directory = parts.length > 1 ? parts.slice(0, -1).join('/') + '/' : 'specs/';
+      const totalCost = entry.runs.reduce((s, r) => s + (r.costUsd ?? 0), 0);
+      const totalDuration = entry.runs.reduce((s, r) => s + r.durationSeconds, 0);
+      return { entry, filename, directory, totalCost, totalDuration };
+    });
+
+    // Group by directory
+    const groups = new Map<string, SpecDisplayRow[]>();
+    for (const row of rows) {
+      if (!groups.has(row.directory)) groups.set(row.directory, []);
+      groups.get(row.directory)!.push(row);
+    }
+
+    // Sort directories alphabetically, sort specs within each group
+    const sortedDirs = [...groups.keys()].sort();
+    const result: SpecDisplayRow[] = [];
+    const headerIndices = new Set<number>();
+
+    for (const dir of sortedDirs) {
+      const groupRows = groups.get(dir)!;
+      groupRows.sort((a, b) => a.filename.localeCompare(b.filename));
+
+      // Only show group headers when there are multiple groups
+      if (sortedDirs.length > 1) {
+        // Insert a sentinel row for the group header
+        // We track these indices separately so we can skip them during selection
+        headerIndices.add(result.length);
+        // Push a placeholder row (will be rendered as header)
+        result.push({ entry: groupRows[0].entry, filename: '', directory: dir, totalCost: 0, totalDuration: 0 });
+      }
+
+      result.push(...groupRows);
+    }
+
+    return { displayRows: result, groupHeaderIndices: headerIndices };
+  })();
+
+  // Selectable rows are those that are not group headers
+  const selectableIndices = displayRows
+    .map((_, i) => i)
+    .filter(i => !groupHeaderIndices.has(i));
+
+  // Clamp selected index when manifest changes
+  useEffect(() => {
+    if (selectableIndices.length > 0 && selectedIndex >= selectableIndices.length) {
+      setSelectedIndex(selectableIndices.length - 1);
+    }
+  }, [selectableIndices.length, selectedIndex]);
+
+  // Map logical selected index to display row index
+  const displayIndex = selectableIndices[selectedIndex] ?? 0;
+
+  // Keep selected row in view
+  useEffect(() => {
+    if (displayIndex < scrollOffset) {
+      setScrollOffset(displayIndex);
+    } else if (displayIndex >= scrollOffset + maxVisible) {
+      setScrollOffset(displayIndex - maxVisible + 1);
+    }
+  }, [displayIndex, scrollOffset, maxVisible]);
+
+  useKeyboard((key) => {
+    if (key.name === 'q') {
+      onQuit();
+      return;
+    }
+    if (key.name === 'tab') {
+      onTabSwitch(selectedIndex, scrollOffset);
+      return;
+    }
+    if (key.name === 'up' || key.name === 'k') {
+      setSelectedIndex(i => Math.max(0, i - 1));
+    } else if (key.name === 'down' || key.name === 'j') {
+      setSelectedIndex(i => Math.min(selectableIndices.length - 1, i + 1));
+    } else if (key.name === 'return') {
+      const dispIdx = selectableIndices[selectedIndex];
+      if (dispIdx !== undefined && displayRows[dispIdx] && !groupHeaderIndices.has(dispIdx)) {
+        onSelect(displayRows[dispIdx].entry, selectedIndex);
+      }
+    }
+  });
+
+  // Loading state
+  if (manifest === null) {
+    return (
+      <box flexDirection="column" style={{ padding: 1 }}>
+        <text fg="#888888">Loading specs...</text>
+      </box>
+    );
+  }
+
+  // Empty state
+  if (manifest.specs.length === 0) {
+    return (
+      <box flexDirection="column" style={{ padding: 1 }}>
+        <text fg="#888888">No specs found in {cwd}/.forge/specs.json</text>
+        <text> </text>
+        <text fg="#555555">Run a spec to start tracking lifecycle.</text>
+        <text> </text>
+        <text fg="#555555">[tab] sessions  [q] quit</text>
+      </box>
+    );
+  }
+
+  const visibleRows = displayRows.slice(scrollOffset, scrollOffset + maxVisible);
+  const totalSpecs = selectableIndices.length;
+
+  return (
+    <box flexDirection="column" style={{ flexGrow: 1 }}>
+      <box style={{ paddingLeft: 1, paddingTop: 1, flexShrink: 0 }}>
+        <text>
+          <span fg="#888888">forge specs</span>
+          {'  '}
+          <span fg="#555555">{totalSpecs} spec{totalSpecs !== 1 ? 's' : ''}</span>
+          {displayRows.length > maxVisible ? (
+            <span fg="#444444">{'  '}({scrollOffset + 1}-{Math.min(scrollOffset + maxVisible, displayRows.length)} of {displayRows.length})</span>
+          ) : null}
+        </text>
+      </box>
+
+      <scrollbox style={{ flexGrow: 1, maxHeight: maxVisible }}>
+        {visibleRows.map((row, i) => {
+          const actualIndex = scrollOffset + i;
+          if (groupHeaderIndices.has(actualIndex)) {
+            return <SpecGroupHeader key={`hdr-${row.directory}`} directory={row.directory} />;
+          }
+          return (
+            <SpecRow
+              key={row.entry.spec}
+              row={row}
+              selected={actualIndex === displayIndex}
+              maxWidth={width}
+            />
+          );
+        })}
+      </scrollbox>
+
+      <box style={{ paddingLeft: 1, flexShrink: 0 }}>
+        <text fg="#555555">[j/k] navigate  [enter] view  [tab] sessions  [q] quit</text>
+      </box>
+    </box>
+  );
+}
+
+function SpecRunRow({ run, selected, maxWidth }: { run: SpecRun; selected: boolean; maxWidth: number }) {
+  const icon = run.status === 'passed' ? '+' : 'x';
+  const color = run.status === 'passed' ? '#22c55e' : '#ef4444';
+  const ago = padStart(formatRelativeTime(run.timestamp), 9);
+  const cost = padStart(formatCost(run.costUsd), 8);
+  const dur = padStart(formatDuration(run.durationSeconds), 8);
+  const turns = padStart(run.numTurns !== undefined ? `${run.numTurns}t` : '--', 6);
+  const verify = padStart(run.verifyAttempts !== undefined ? `${run.verifyAttempts}v` : '--', 4);
+  const line = truncate(`${icon} ${ago}${cost}${dur}${turns}${verify}`, maxWidth - 2);
+
+  return (
+    <box
+      style={{
+        backgroundColor: selected ? '#334155' : undefined,
+        paddingLeft: 1,
+        paddingRight: 1,
+        height: 1,
+      }}
+    >
+      <text>
+        <span fg={color}>{line[0]}</span>
+        <span fg={selected ? '#ffffff' : '#bbbbbb'}>{line.substring(1)}</span>
+      </text>
+    </box>
+  );
+}
+
+function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitch }: {
+  entry: SpecEntry;
+  cwd: string;
+  onSelectRun: (run: SpecRun) => void;
+  onBack: () => void;
+  onQuit: () => void;
+  onTabSwitch: () => void;
+}) {
+  const [selectedRunIndex, setSelectedRunIndex] = useState(0);
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const { height, width } = useTerminalDimensions();
+
+  // Runs sorted newest-first
+  const runs = [...entry.runs].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+
+  // tab bar (1, parent) + spec header block (7: paddingTop + path + blank + status + dates + blank + run header) + footer (1) + 1 buffer = 10
+  const chromeLines = 10;
+  const maxVisible = Math.max(1, height - chromeLines);
+
+  // Keep selected row in view
+  useEffect(() => {
+    if (selectedRunIndex < scrollOffset) {
+      setScrollOffset(selectedRunIndex);
+    } else if (selectedRunIndex >= scrollOffset + maxVisible) {
+      setScrollOffset(selectedRunIndex - maxVisible + 1);
+    }
+  }, [selectedRunIndex, scrollOffset, maxVisible]);
+
+  useKeyboard((key) => {
+    if (key.name === 'q') {
+      onQuit();
+      return;
+    }
+    if (key.name === 'tab') {
+      onTabSwitch();
+      return;
+    }
+    if (key.name === 'escape' || key.name === 'backspace') {
+      onBack();
+      return;
+    }
+    if (key.name === 'up' || key.name === 'k') {
+      setSelectedRunIndex(i => Math.max(0, i - 1));
+    } else if (key.name === 'down' || key.name === 'j') {
+      setSelectedRunIndex(i => Math.min(runs.length - 1, i + 1));
+    } else if (key.name === 'return') {
+      if (runs.length > 0 && runs[selectedRunIndex]) {
+        onSelectRun(runs[selectedRunIndex]);
+      }
+    }
+  });
+
+  const icon = specStatusIcon(entry.status);
+  const color = specStatusColor(entry.status);
+  const visibleRuns = runs.slice(scrollOffset, scrollOffset + maxVisible);
+
+  return (
+    <box flexDirection="column">
+      <box style={{ paddingLeft: 1, paddingTop: 1 }} flexDirection="column">
+        <text>
+          <span fg="#888888">forge spec</span>
+          {'  '}
+          <span fg="#cccccc">{entry.spec}</span>
+        </text>
+        <text> </text>
+        <text>
+          <span fg="#888888">Status  </span>
+          <span fg={color}>{icon} {entry.status}</span>
+          {'    '}
+          <span fg="#888888">Source  </span>
+          <span fg="#bbbbbb">{entry.source}</span>
+        </text>
+        <text>
+          <span fg="#888888">Created </span>
+          <span fg="#bbbbbb">{formatRelativeTime(entry.createdAt)}</span>
+          {'  '}
+          <span fg="#888888">Updated </span>
+          <span fg="#bbbbbb">{formatRelativeTime(entry.updatedAt)}</span>
+        </text>
+        <text> </text>
+        <text>
+          <span fg="#888888">
+            {'Run History (' + runs.length + ' run' + (runs.length !== 1 ? 's' : '') + ')'}
+          </span>
+          {runs.length > maxVisible ? (
+            <span fg="#444444">{'  '}({scrollOffset + 1}-{Math.min(scrollOffset + maxVisible, runs.length)} of {runs.length})</span>
+          ) : null}
+        </text>
+      </box>
+
+      {runs.length === 0 ? (
+        <box style={{ paddingLeft: 1, paddingTop: 1 }}>
+          <text fg="#555555">No runs yet</text>
+        </box>
+      ) : (
+        <box flexDirection="column">
+          {visibleRuns.map((run, i) => (
+            <SpecRunRow
+              key={`${run.runId}-${run.timestamp}`}
+              run={run}
+              selected={scrollOffset + i === selectedRunIndex}
+              maxWidth={width}
+            />
+          ))}
+        </box>
+      )}
+
+      <box style={{ paddingLeft: 1, paddingTop: 1, height: 2 }}>
+        <text fg="#555555">
+          {runs.length > 0
+            ? '[j/k] navigate  [enter] view session  [esc] back  [q] quit'
+            : '[esc] back  [q] quit'
+          }
         </text>
       </box>
     </box>
@@ -505,10 +934,16 @@ function SessionDetail({ session, onBack, onQuit }: {
 }
 
 function App({ cwd }: { cwd: string }) {
+  const [activeTab, setActiveTab] = useState<Tab>('sessions');
   const [view, setView] = useState<'list' | 'detail'>('list');
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   const [listIndex, setListIndex] = useState(0);
+  const [specsListIndex, setSpecsListIndex] = useState(0);
+  const [specsScrollOffset, setSpecsScrollOffset] = useState(0);
+  const [specsView, setSpecsView] = useState<'list' | 'detail' | 'runDetail'>('list');
+  const [selectedSpecEntry, setSelectedSpecEntry] = useState<SpecEntry | null>(null);
+  const [selectedRunSession, setSelectedRunSession] = useState<SessionInfo | null>(null);
 
   // Load sessions initially and refresh periodically
   useEffect(() => {
@@ -526,28 +961,100 @@ function App({ cwd }: { cwd: string }) {
     shutdownTui();
   };
 
+  const handleTabSwitch = () => {
+    setActiveTab(t => t === 'sessions' ? 'specs' : 'sessions');
+  };
+
+  if (activeTab === 'specs') {
+    if (specsView === 'runDetail' && selectedRunSession) {
+      return (
+        <box flexDirection="column">
+          <TabBar activeTab={activeTab} />
+          <SessionDetail
+            session={selectedRunSession}
+            onBack={() => setSpecsView('detail')}
+            onQuit={handleQuit}
+            onTabSwitch={handleTabSwitch}
+          />
+        </box>
+      );
+    }
+
+    if (specsView === 'detail' && selectedSpecEntry) {
+      return (
+        <box flexDirection="column">
+          <TabBar activeTab={activeTab} />
+          <SpecDetail
+            entry={selectedSpecEntry}
+            cwd={cwd}
+            onSelectRun={async (run) => {
+              const session = await loadSessionFromResult(run.resultPath, cwd, selectedSpecEntry);
+              if (session) {
+                setSelectedRunSession(session);
+                setSpecsView('runDetail');
+              }
+            }}
+            onBack={() => setSpecsView('list')}
+            onQuit={handleQuit}
+            onTabSwitch={handleTabSwitch}
+          />
+        </box>
+      );
+    }
+
+    return (
+      <box flexDirection="column">
+        <TabBar activeTab={activeTab} />
+        <SpecsList
+          cwd={cwd}
+          initialIndex={specsListIndex}
+          initialScroll={specsScrollOffset}
+          onSelect={(entry, index) => {
+            setSpecsListIndex(index);
+            setSelectedSpecEntry(entry);
+            setSpecsView('detail');
+          }}
+          onQuit={handleQuit}
+          onTabSwitch={(index, scroll) => {
+            setSpecsListIndex(index);
+            setSpecsScrollOffset(scroll);
+            setActiveTab('sessions');
+          }}
+        />
+      </box>
+    );
+  }
+
   if (view === 'detail' && selectedSession) {
     return (
-      <SessionDetail
-        session={selectedSession}
-        onBack={() => setView('list')}
-        onQuit={handleQuit}
-      />
+      <box flexDirection="column">
+        <TabBar activeTab={activeTab} />
+        <SessionDetail
+          session={selectedSession}
+          onBack={() => setView('list')}
+          onQuit={handleQuit}
+          onTabSwitch={handleTabSwitch}
+        />
+      </box>
     );
   }
 
   return (
-    <SessionsList
-      sessions={sessions}
-      cwd={cwd}
-      initialIndex={listIndex}
-      onSelect={(s, i) => {
-        setListIndex(i);
-        setSelectedSession(s);
-        setView('detail');
-      }}
-      onQuit={handleQuit}
-    />
+    <box flexDirection="column">
+      <TabBar activeTab={activeTab} />
+      <SessionsList
+        sessions={sessions}
+        cwd={cwd}
+        initialIndex={listIndex}
+        onSelect={(s, i) => {
+          setListIndex(i);
+          setSelectedSession(s);
+          setView('detail');
+        }}
+        onQuit={handleQuit}
+        onTabSwitch={handleTabSwitch}
+      />
+    </box>
   );
 }
 
