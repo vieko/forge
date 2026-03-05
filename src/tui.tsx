@@ -1,8 +1,9 @@
 // ── forge tui — interactive sessions viewer ─────────────────
 
 import { createCliRenderer } from '@opentui/core';
+import type { ScrollBoxRenderable, ScrollBoxChild } from '@opentui/core';
 import { createRoot, useKeyboard, useTerminalDimensions } from '@opentui/react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { readdir, readFile } from 'fs/promises';
 import { join, basename, dirname } from 'path';
 import type { ForgeResult, SessionEvent, SpecManifest, SpecEntry, SpecRun } from './types.js';
@@ -293,14 +294,8 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
   onTabSwitch: () => void;
 }) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
-  const [scrollOffset, setScrollOffset] = useState(0);
-  const { height, width } = useTerminalDimensions();
-
-  // Empirically: height includes tab bar line rendered by parent.
-  // header (paddingTop:1 + text = 2 lines) + footer (1 line) + tab bar (1) + blank line gap (1) = 5
-  // Add extra 2 for safety to prevent footer overlap in OpenTUI
-  // tab bar (1) + header (2) + blank separator (1) + footer (1) + 2 safety (OpenTUI ghost rows) = 7
-  const maxVisible = Math.max(1, height - 7);
+  const { width } = useTerminalDimensions();
+  const scrollRef = useRef<ScrollBoxRenderable | null>(null);
 
   // Clamp selected index when sessions change
   useEffect(() => {
@@ -309,14 +304,19 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
     }
   }, [sessions.length, selectedIndex]);
 
-  // Keep selected row in view
+  // Scroll to keep selected row visible
   useEffect(() => {
-    if (selectedIndex < scrollOffset) {
-      setScrollOffset(selectedIndex);
-    } else if (selectedIndex >= scrollOffset + maxVisible) {
-      setScrollOffset(selectedIndex - maxVisible + 1);
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const target = scroll.getChildren().find((child: ScrollBoxChild) => child.id === `s-${selectedIndex}`);
+    if (!target) return;
+    const y = target.y - scroll.y;
+    if (y >= scroll.height) {
+      scroll.scrollBy(y - scroll.height + 1);
+    } else if (y < 0) {
+      scroll.scrollBy(y);
     }
-  }, [selectedIndex, scrollOffset, maxVisible]);
+  }, [selectedIndex]);
 
   useKeyboard((key) => {
     if (key.name === 'q') {
@@ -338,8 +338,6 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
     }
   });
 
-  const visibleSessions = sessions.slice(scrollOffset, scrollOffset + maxVisible);
-
   if (sessions.length === 0) {
     return (
       <box flexDirection="column" style={{ padding: 1 }}>
@@ -359,20 +357,18 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
           <span fg="#888888">forge tui</span>
           {'  '}
           <span fg="#555555">{sessions.length} session{sessions.length !== 1 ? 's' : ''}</span>
-          {sessions.length > maxVisible ? (
-            <span fg="#444444">{'  '}({scrollOffset + 1}-{Math.min(scrollOffset + maxVisible, sessions.length)} of {sessions.length})</span>
-          ) : null}
         </text>
       </box>
 
-      <scrollbox style={{ flexGrow: 1, maxHeight: maxVisible }}>
-        {visibleSessions.map((session, i) => (
-          <SessionRow
-            key={session.sessionId}
-            session={session}
-            selected={scrollOffset + i === selectedIndex}
-            maxWidth={width}
-          />
+      <scrollbox ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} style={{ flexGrow: 1 }}>
+        {sessions.map((session, i) => (
+          <box key={session.sessionId} id={`s-${i}`}>
+            <SessionRow
+              session={session}
+              selected={i === selectedIndex}
+              maxWidth={width}
+            />
+          </box>
         ))}
       </scrollbox>
 
@@ -605,21 +601,17 @@ function SpecGroupHeader({ directory }: { directory: string }) {
   );
 }
 
-function SpecsList({ cwd, initialIndex, initialScroll, onSelect, onQuit, onTabSwitch }: {
+function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
   cwd: string;
   initialIndex?: number;
-  initialScroll?: number;
   onSelect: (entry: SpecEntry, index: number) => void;
   onQuit: () => void;
-  onTabSwitch: (index: number, scroll: number) => void;
+  onTabSwitch: (index: number) => void;
 }) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
-  const [scrollOffset, setScrollOffset] = useState(initialScroll ?? 0);
   const [manifest, setManifest] = useState<SpecManifest | null>(null);
-  const { height, width } = useTerminalDimensions();
-
-  // tab bar (1) + header (2) + footer (1) + safety (1) = 5; container height = height - 1 (tab bar)
-  const maxVisible = Math.max(1, height - 5);
+  const { width } = useTerminalDimensions();
+  const scrollRef = useRef<ScrollBoxRenderable | null>(null);
 
   // Load manifest and re-poll every 5 seconds
   useEffect(() => {
@@ -639,7 +631,6 @@ function SpecsList({ cwd, initialIndex, initialScroll, onSelect, onQuit, onTabSw
       return { displayRows: [] as SpecDisplayRow[], groupHeaderIndices: new Set<number>() };
     }
 
-    // Compute rows with directory info
     const rows: SpecDisplayRow[] = manifest.specs.map(entry => {
       const parts = entry.spec.split('/');
       const filename = parts[parts.length - 1];
@@ -649,14 +640,12 @@ function SpecsList({ cwd, initialIndex, initialScroll, onSelect, onQuit, onTabSw
       return { entry, filename, directory, totalCost, totalDuration };
     });
 
-    // Group by directory
     const groups = new Map<string, SpecDisplayRow[]>();
     for (const row of rows) {
       if (!groups.has(row.directory)) groups.set(row.directory, []);
       groups.get(row.directory)!.push(row);
     }
 
-    // Sort directories alphabetically, sort specs within each group
     const sortedDirs = [...groups.keys()].sort();
     const result: SpecDisplayRow[] = [];
     const headerIndices = new Set<number>();
@@ -664,23 +653,17 @@ function SpecsList({ cwd, initialIndex, initialScroll, onSelect, onQuit, onTabSw
     for (const dir of sortedDirs) {
       const groupRows = groups.get(dir)!;
       groupRows.sort((a, b) => a.filename.localeCompare(b.filename));
-
-      // Only show group headers when there are multiple groups
       if (sortedDirs.length > 1) {
-        // Insert a sentinel row for the group header
-        // We track these indices separately so we can skip them during selection
         headerIndices.add(result.length);
-        // Push a placeholder row (will be rendered as header)
         result.push({ entry: groupRows[0].entry, filename: '', directory: dir, totalCost: 0, totalDuration: 0 });
       }
-
       result.push(...groupRows);
     }
 
     return { displayRows: result, groupHeaderIndices: headerIndices };
   })();
 
-  // Selectable rows are those that are not group headers
+  // Selectable rows (not group headers)
   const selectableIndices = displayRows
     .map((_, i) => i)
     .filter(i => !groupHeaderIndices.has(i));
@@ -692,17 +675,21 @@ function SpecsList({ cwd, initialIndex, initialScroll, onSelect, onQuit, onTabSw
     }
   }, [selectableIndices.length, selectedIndex]);
 
-  // Map logical selected index to display row index
   const displayIndex = selectableIndices[selectedIndex] ?? 0;
 
-  // Keep selected row in view
+  // Scroll to keep selected row visible
   useEffect(() => {
-    if (displayIndex < scrollOffset) {
-      setScrollOffset(displayIndex);
-    } else if (displayIndex >= scrollOffset + maxVisible) {
-      setScrollOffset(displayIndex - maxVisible + 1);
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const target = scroll.getChildren().find((child: ScrollBoxChild) => child.id === `sp-${displayIndex}`);
+    if (!target) return;
+    const y = target.y - scroll.y;
+    if (y >= scroll.height) {
+      scroll.scrollBy(y - scroll.height + 1);
+    } else if (y < 0) {
+      scroll.scrollBy(y);
     }
-  }, [displayIndex, scrollOffset, maxVisible]);
+  }, [displayIndex]);
 
   useKeyboard((key) => {
     if (key.name === 'q') {
@@ -710,7 +697,7 @@ function SpecsList({ cwd, initialIndex, initialScroll, onSelect, onQuit, onTabSw
       return;
     }
     if (key.name === 'tab') {
-      onTabSwitch(selectedIndex, scrollOffset);
+      onTabSwitch(selectedIndex);
       return;
     }
     if (key.name === 'up' || key.name === 'k') {
@@ -725,7 +712,6 @@ function SpecsList({ cwd, initialIndex, initialScroll, onSelect, onQuit, onTabSw
     }
   });
 
-  // Loading state
   if (manifest === null) {
     return (
       <box flexDirection="column" style={{ padding: 1 }}>
@@ -734,7 +720,6 @@ function SpecsList({ cwd, initialIndex, initialScroll, onSelect, onQuit, onTabSw
     );
   }
 
-  // Empty state
   if (manifest.specs.length === 0) {
     return (
       <box flexDirection="column" style={{ padding: 1 }}>
@@ -747,7 +732,6 @@ function SpecsList({ cwd, initialIndex, initialScroll, onSelect, onQuit, onTabSw
     );
   }
 
-  const visibleRows = displayRows.slice(scrollOffset, scrollOffset + maxVisible);
   const totalSpecs = selectableIndices.length;
 
   return (
@@ -757,25 +741,22 @@ function SpecsList({ cwd, initialIndex, initialScroll, onSelect, onQuit, onTabSw
           <span fg="#888888">forge specs</span>
           {'  '}
           <span fg="#555555">{totalSpecs} spec{totalSpecs !== 1 ? 's' : ''}</span>
-          {displayRows.length > maxVisible ? (
-            <span fg="#444444">{'  '}({scrollOffset + 1}-{Math.min(scrollOffset + maxVisible, displayRows.length)} of {displayRows.length})</span>
-          ) : null}
         </text>
       </box>
 
-      <scrollbox style={{ flexGrow: 1, maxHeight: maxVisible }}>
-        {visibleRows.map((row, i) => {
-          const actualIndex = scrollOffset + i;
-          if (groupHeaderIndices.has(actualIndex)) {
-            return <SpecGroupHeader key={`hdr-${row.directory}`} directory={row.directory} />;
+      <scrollbox ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} style={{ flexGrow: 1 }}>
+        {displayRows.map((row, i) => {
+          if (groupHeaderIndices.has(i)) {
+            return <box key={`hdr-${row.directory}`} id={`sp-${i}`}><SpecGroupHeader directory={row.directory} /></box>;
           }
           return (
-            <SpecRow
-              key={row.entry.spec}
-              row={row}
-              selected={actualIndex === displayIndex}
-              maxWidth={width}
-            />
+            <box key={row.entry.spec} id={`sp-${i}`}>
+              <SpecRow
+                row={row}
+                selected={i === displayIndex}
+                maxWidth={width}
+              />
+            </box>
           );
         })}
       </scrollbox>
@@ -940,7 +921,6 @@ function App({ cwd }: { cwd: string }) {
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   const [listIndex, setListIndex] = useState(0);
   const [specsListIndex, setSpecsListIndex] = useState(0);
-  const [specsScrollOffset, setSpecsScrollOffset] = useState(0);
   const [specsView, setSpecsView] = useState<'list' | 'detail' | 'runDetail'>('list');
   const [selectedSpecEntry, setSelectedSpecEntry] = useState<SpecEntry | null>(null);
   const [selectedRunSession, setSelectedRunSession] = useState<SessionInfo | null>(null);
@@ -1008,16 +988,14 @@ function App({ cwd }: { cwd: string }) {
         <SpecsList
           cwd={cwd}
           initialIndex={specsListIndex}
-          initialScroll={specsScrollOffset}
           onSelect={(entry, index) => {
             setSpecsListIndex(index);
             setSelectedSpecEntry(entry);
             setSpecsView('detail');
           }}
           onQuit={handleQuit}
-          onTabSwitch={(index, scroll) => {
+          onTabSwitch={(index) => {
             setSpecsListIndex(index);
-            setSpecsScrollOffset(scroll);
             setActiveTab('sessions');
           }}
         />

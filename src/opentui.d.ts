@@ -29,6 +29,24 @@ declare module "@opentui/core" {
     repeated?: boolean;
   }
 
+  export interface ScrollBoxChild {
+    id?: string;
+    y: number;
+    height: number;
+    [key: string]: unknown;
+  }
+
+  export interface ScrollBoxRenderable {
+    y: number;
+    height: number;
+    scrollTop: number;
+    scrollHeight: number;
+    scrollBy(delta: number): void;
+    scrollTo(position: number): void;
+    getChildren(): ScrollBoxChild[];
+    [key: string]: unknown;
+  }
+
   export function createCliRenderer(config?: CliRendererConfig): Promise<CliRenderer>;
 }
 
@@ -84,6 +102,7 @@ interface OpenTUIStyleObject {
 
 interface OpenTUIBoxProps {
   key?: Key;
+  id?: string;
   children?: ReactNode;
   title?: string;
   border?: boolean;
@@ -124,6 +143,7 @@ interface OpenTUIScrollBoxProps {
   key?: Key;
   children?: ReactNode;
   focused?: boolean;
+  ref?: (r: any) => void;
   style?: OpenTUIStyleObject;
   [key: string]: unknown;
 }
