@@ -3,8 +3,8 @@
 import { createCliRenderer } from '@opentui/core';
 import type { ScrollBoxRenderable, ScrollBoxChild } from '@opentui/core';
 import { createRoot, useKeyboard, useTerminalDimensions } from '@opentui/react';
-import { useState, useEffect, useRef } from 'react';
-import { readdir, readFile } from 'fs/promises';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { readdir, readFile, stat, open } from 'fs/promises';
 import { join, basename, dirname } from 'path';
 import type { ForgeResult, SessionEvent, SpecManifest, SpecEntry, SpecRun } from './types.js';
 import { loadManifest } from './specs.js';
@@ -102,11 +102,128 @@ function summarizeToolInput(input: Record<string, unknown>): string {
   return '';
 }
 
+// ── Grouped Event Types ──────────────────────────────────────
+
+interface ToolBlock {
+  kind: 'tool';
+  start: import('./types.js').ToolCallStartEvent;
+  result?: import('./types.js').ToolCallResultEvent;
+}
+
+interface TextBlock {
+  kind: 'text';
+  content: string;
+  timestamp: string;
+}
+
+interface SessionStartBlock {
+  kind: 'session_start';
+  event: import('./types.js').SessionStartEvent;
+}
+
+interface SessionEndBlock {
+  kind: 'session_end';
+  event: import('./types.js').SessionEndEvent;
+}
+
+type GroupedBlock = ToolBlock | TextBlock | SessionStartBlock | SessionEndBlock;
+
+function taskLabel(input: Record<string, unknown>): string {
+  if (typeof input.description === 'string' && input.description.length > 0) {
+    return `Task: ${truncate(input.description, 50)}`;
+  }
+  if (typeof input.prompt === 'string' && input.prompt.length > 0) {
+    return `Task: ${truncate(input.prompt, 50)}`;
+  }
+  if (typeof input.task === 'string' && input.task.length > 0) {
+    return `Task: ${truncate(input.task, 50)}`;
+  }
+  return 'Task';
+}
+
+/**
+ * Groups flat session events into visual blocks at render time.
+ * - Pairs tool_call_start + tool_call_result by toolUseId (or FIFO fallback)
+ * - Merges consecutive text_delta events into single text blocks
+ * - Skips thinking_delta (hidden by default)
+ * - Passes through session_start / session_end as dividers
+ */
+function groupEvents(events: SessionEvent[]): GroupedBlock[] {
+  const blocks: GroupedBlock[] = [];
+  let textParts: string[] = [];
+  let textTimestamp = '';
+
+  // Pending tool starts awaiting matching results
+  const pendingById = new Map<string, number>();   // toolUseId -> block index
+  const pendingQueue: number[] = [];               // FIFO for starts without toolUseId
+
+  const flushText = () => {
+    if (textParts.length > 0) {
+      blocks.push({ kind: 'text', content: textParts.join(''), timestamp: textTimestamp });
+      textParts = [];
+      textTimestamp = '';
+    }
+  };
+
+  for (const event of events) {
+    switch (event.type) {
+      case 'session_start':
+        flushText();
+        blocks.push({ kind: 'session_start', event });
+        break;
+
+      case 'session_end':
+        flushText();
+        blocks.push({ kind: 'session_end', event });
+        break;
+
+      case 'text_delta':
+        if (textParts.length === 0) textTimestamp = event.timestamp;
+        textParts.push(event.content);
+        break;
+
+      case 'thinking_delta':
+        // Hidden by default — skip
+        break;
+
+      case 'tool_call_start': {
+        flushText();
+        const idx = blocks.length;
+        blocks.push({ kind: 'tool', start: event });
+        if (event.toolUseId) {
+          pendingById.set(event.toolUseId, idx);
+        } else {
+          pendingQueue.push(idx);
+        }
+        break;
+      }
+
+      case 'tool_call_result': {
+        // Match by toolUseId first, then FIFO fallback
+        if (event.toolUseId && pendingById.has(event.toolUseId)) {
+          const idx = pendingById.get(event.toolUseId)!;
+          (blocks[idx] as ToolBlock).result = event;
+          pendingById.delete(event.toolUseId);
+        } else if (pendingQueue.length > 0) {
+          const idx = pendingQueue.shift()!;
+          (blocks[idx] as ToolBlock).result = event;
+        }
+        // Orphaned results (no matching start) are silently dropped
+        break;
+      }
+    }
+  }
+
+  flushText();
+  return blocks;
+}
+
 // ── Data Loading ─────────────────────────────────────────────
 
 async function loadSessions(cwd: string): Promise<SessionInfo[]> {
   const sessions: SessionInfo[] = [];
   const resultsDir = join(cwd, '.forge', 'results');
+  const sessionsDir = join(cwd, '.forge', 'sessions');
   const completedSessionIds = new Set<string>();
 
   // Load completed sessions from results
@@ -146,17 +263,78 @@ async function loadSessions(cwd: string): Promise<SessionInfo[]> {
     // No results directory
   }
 
-  // Check for running session from latest-session.json
+  // Detect running sessions by scanning .forge/sessions/ directories
+  // A session is "running" if it has events.jsonl but no matching completed result
+  const detectedRunningIds = new Set<string>();
+  try {
+    const sessionDirs = await readdir(sessionsDir);
+    for (const sid of sessionDirs) {
+      if (completedSessionIds.has(sid)) continue;
+
+      // Check if events.jsonl exists and is fresh (modified within last 5 minutes)
+      const eventsPath = join(sessionsDir, sid, 'events.jsonl');
+      try {
+        const st = await stat(eventsPath);
+        const ageMs = Date.now() - st.mtimeMs;
+        if (ageMs > 5 * 60 * 1000) continue; // Stale — not actively running
+      } catch {
+        continue; // No events.jsonl — not a valid session dir
+      }
+
+      detectedRunningIds.add(sid);
+
+      // Read only the first line of events.jsonl for session_start metadata
+      let specName = 'running';
+      let model = '--';
+      let startedAt = new Date().toISOString();
+      let specPath: string | undefined;
+      try {
+        const raw = await readFile(eventsPath, 'utf-8');
+        const firstNewline = raw.indexOf('\n');
+        const firstLine = firstNewline > 0 ? raw.substring(0, firstNewline) : raw.trim();
+        if (firstLine) {
+          const startEvent = JSON.parse(firstLine) as SessionEvent;
+          if (startEvent.type === 'session_start') {
+            specName = startEvent.specPath
+              ? basename(startEvent.specPath, '.md')
+              : (startEvent.type || 'running');
+            model = startEvent.model || '--';
+            startedAt = startEvent.timestamp;
+            specPath = startEvent.specPath;
+          }
+        }
+      } catch {
+        // Could not read metadata — use defaults
+      }
+
+      sessions.push({
+        sessionId: sid,
+        status: 'running',
+        specName,
+        specPath,
+        model,
+        costUsd: undefined,
+        durationSeconds: undefined,
+        startedAt,
+        eventsPath,
+        isRunning: true,
+      });
+    }
+  } catch {
+    // No sessions directory
+  }
+
+  // Fallback: check latest-session.json for running sessions not already detected
   try {
     const latestPath = join(cwd, '.forge', 'latest-session.json');
     const raw = await readFile(latestPath, 'utf-8');
     const latest = JSON.parse(raw);
 
-    if (latest.sessionId && !completedSessionIds.has(latest.sessionId)) {
+    if (latest.sessionId && !completedSessionIds.has(latest.sessionId) && !detectedRunningIds.has(latest.sessionId)) {
       sessions.push({
         sessionId: latest.sessionId,
         status: 'running',
-        specName: latest.prompt ? truncate(latest.prompt, 30) : 'running',
+        specName: latest.prompt ? truncate(latest.prompt, 30) : (latest.type || 'running'),
         model: latest.model || '--',
         costUsd: undefined,
         durationSeconds: undefined,
@@ -169,8 +347,11 @@ async function loadSessions(cwd: string): Promise<SessionInfo[]> {
     // No running session
   }
 
-  // Sort by recency (newest first)
-  sessions.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  // Sort: running sessions first, then by recency (newest first)
+  sessions.sort((a, b) => {
+    if (a.isRunning !== b.isRunning) return a.isRunning ? -1 : 1;
+    return b.startedAt.localeCompare(a.startedAt);
+  });
   return sessions;
 }
 
@@ -219,6 +400,160 @@ async function loadEvents(eventsPath: string): Promise<{ events: SessionEvent[];
   }
 
   return { events: [], legacy: false };
+}
+
+// ── Incremental Event Loading ────────────────────────────────
+
+interface IncrementalReaderState {
+  byteOffset: number;
+  partial: string; // incomplete trailing line from last read
+}
+
+/**
+ * Reads only new bytes appended to events.jsonl since the last read.
+ * Returns null if no new data is available.
+ * Falls back to full re-read on truncation or if events.jsonl is missing (legacy stream.log).
+ */
+async function loadEventsIncremental(
+  eventsPath: string,
+  state: IncrementalReaderState,
+  existingEvents: SessionEvent[],
+): Promise<{ events: SessionEvent[]; legacy: boolean; state: IncrementalReaderState } | null> {
+  // Try structured events.jsonl (incremental)
+  try {
+    const fileInfo = await stat(eventsPath);
+    const fileSize = fileInfo.size;
+
+    // No new data since last read
+    if (fileSize === state.byteOffset && state.partial === '') {
+      return null;
+    }
+
+    // File truncated or replaced (session restart) — full re-read
+    if (fileSize < state.byteOffset) {
+      const full = await loadEvents(eventsPath);
+      return {
+        events: full.events,
+        legacy: full.legacy,
+        state: { byteOffset: fileSize, partial: '' },
+      };
+    }
+
+    // Read only new bytes from the offset
+    const bytesToRead = fileSize - state.byteOffset;
+    if (bytesToRead === 0 && state.partial === '') {
+      return null;
+    }
+
+    let newContent = '';
+    if (bytesToRead > 0) {
+      const fh = await open(eventsPath, 'r');
+      try {
+        const buffer = Buffer.alloc(bytesToRead);
+        const { bytesRead } = await fh.read(buffer, 0, bytesToRead, state.byteOffset);
+        newContent = buffer.toString('utf-8', 0, bytesRead);
+      } finally {
+        await fh.close();
+      }
+    }
+
+    // Prepend any partial line leftover from previous read
+    const combined = state.partial + newContent;
+    const parts = combined.split('\n');
+    const endsWithNewline = combined.endsWith('\n');
+
+    // Complete lines are all parts except possibly the last (if no trailing newline)
+    const completeLines = endsWithNewline
+      ? parts.filter(Boolean)
+      : parts.slice(0, -1).filter(Boolean);
+    const newPartial = endsWithNewline ? '' : (parts[parts.length - 1] || '');
+
+    // Parse complete lines into events
+    const newEvents: SessionEvent[] = [];
+    for (const line of completeLines) {
+      try {
+        newEvents.push(JSON.parse(line) as SessionEvent);
+      } catch {
+        // Skip malformed lines
+      }
+    }
+
+    if (newEvents.length === 0 && newPartial === state.partial) {
+      // Nothing actually changed
+      return null;
+    }
+
+    return {
+      events: existingEvents.length > 0 && newEvents.length > 0
+        ? [...existingEvents, ...newEvents]
+        : newEvents.length > 0 ? newEvents : existingEvents,
+      legacy: false,
+      state: { byteOffset: fileSize, partial: newPartial },
+    };
+  } catch {
+    // events.jsonl doesn't exist or unreadable — try legacy fallback (full re-read)
+    const fallback = await loadEvents(eventsPath);
+    if (fallback.events.length > 0) {
+      return {
+        events: fallback.events,
+        legacy: fallback.legacy,
+        state: { byteOffset: 0, partial: '' },
+      };
+    }
+    return null;
+  }
+}
+
+/**
+ * React hook for incremental event loading.
+ * Tracks byte offset across poll cycles; only reads new bytes for events.jsonl.
+ * Legacy stream.log remains a full re-read (not worth optimizing).
+ */
+function useIncrementalEvents(
+  eventsPath: string,
+  isRunning: boolean,
+): { events: SessionEvent[]; isLegacy: boolean } {
+  const [events, setEvents] = useState<SessionEvent[]>([]);
+  const [isLegacy, setIsLegacy] = useState(false);
+  const readerStateRef = useRef<IncrementalReaderState>({ byteOffset: 0, partial: '' });
+  const eventsRef = useRef<SessionEvent[]>([]);
+
+  useEffect(() => {
+    let mounted = true;
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    // Reset reader state when switching sessions
+    readerStateRef.current = { byteOffset: 0, partial: '' };
+    eventsRef.current = [];
+
+    const poll = async () => {
+      const result = await loadEventsIncremental(
+        eventsPath,
+        readerStateRef.current,
+        eventsRef.current,
+      );
+      if (!mounted) return;
+      if (result) {
+        readerStateRef.current = result.state;
+        eventsRef.current = result.events;
+        setEvents(result.events);
+        setIsLegacy(result.legacy);
+      }
+    };
+
+    poll();
+
+    if (isRunning) {
+      interval = setInterval(poll, 500);
+    }
+
+    return () => {
+      mounted = false;
+      if (interval) clearInterval(interval);
+    };
+  }, [eventsPath, isRunning]);
+
+  return { events, isLegacy };
 }
 
 async function loadSessionFromResult(resultPath: string, cwd: string, entry: SpecEntry): Promise<SessionInfo | null> {
@@ -308,6 +643,10 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
   useEffect(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
+    if (selectedIndex === 0) {
+      scroll.scrollTo(0);
+      return;
+    }
     const target = scroll.getChildren().find((child: ScrollBoxChild) => child.id === `s-${selectedIndex}`);
     if (!target) return;
     const y = target.y - scroll.y;
@@ -379,9 +718,10 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
   );
 }
 
-function EventBlock({ event }: { event: SessionEvent }) {
-  switch (event.type) {
-    case 'session_start':
+function GroupedBlockView({ block }: { block: GroupedBlock }) {
+  switch (block.kind) {
+    case 'session_start': {
+      const { event } = block;
       return (
         <box>
           <text>
@@ -393,36 +733,10 @@ function EventBlock({ event }: { event: SessionEvent }) {
           <text fg="#444444">{'─'.repeat(60)}</text>
         </box>
       );
-
-    case 'text_delta':
-      return (
-        <box style={{ paddingLeft: 2 }}>
-          <text fg="#cccccc">{event.content}</text>
-        </box>
-      );
-
-    case 'tool_call_start': {
-      const inputSummary = summarizeToolInput(event.input);
-      return (
-        <box style={{ paddingTop: 1 }}>
-          <text>
-            <span fg="#36b5f0">[{event.toolName}]</span>
-            {inputSummary ? <span fg="#888888">{' '}{inputSummary}</span> : null}
-          </text>
-        </box>
-      );
     }
 
-    case 'tool_call_result': {
-      const preview = truncate(event.output.replace(/\n/g, ' '), 120);
-      return (
-        <box style={{ paddingLeft: 2 }}>
-          <text fg="#555555">{preview}</text>
-        </box>
-      );
-    }
-
-    case 'session_end':
+    case 'session_end': {
+      const { event } = block;
       return (
         <box style={{ paddingTop: 1 }}>
           <text fg="#444444">{'─'.repeat(60)}</text>
@@ -438,10 +752,40 @@ function EventBlock({ event }: { event: SessionEvent }) {
           </text>
         </box>
       );
+    }
 
-    default:
-      // Skip thinking_delta and unknown event types
-      return null;
+    case 'text': {
+      const trimmed = block.content.trim();
+      if (!trimmed) return null;
+      return (
+        <box style={{ paddingLeft: 2 }}>
+          <text fg="#cccccc">{trimmed}</text>
+        </box>
+      );
+    }
+
+    case 'tool': {
+      const { start, result } = block;
+      const label = start.toolName === 'Task' ? taskLabel(start.input) : start.toolName;
+      const inputSummary = start.toolName === 'Task' ? '' : summarizeToolInput(start.input);
+      const outputPreview = result
+        ? truncate(result.output.replace(/\n/g, ' ').trim(), 120)
+        : null;
+
+      return (
+        <box style={{ paddingTop: 1 }}>
+          <text>
+            <span fg="#36b5f0">[{label}]</span>
+            {inputSummary ? <span fg="#888888">{' '}{inputSummary}</span> : null}
+          </text>
+          {outputPreview ? (
+            <box style={{ paddingLeft: 2 }}>
+              <text fg="#555555">{outputPreview}</text>
+            </box>
+          ) : null}
+        </box>
+      );
+    }
   }
 }
 
@@ -451,46 +795,90 @@ function SessionDetail({ session, onBack, onQuit, onTabSwitch }: {
   onQuit: () => void;
   onTabSwitch: () => void;
 }) {
-  const [events, setEvents] = useState<SessionEvent[]>([]);
-  const [isLegacy, setIsLegacy] = useState(false);
+  const { events, isLegacy } = useIncrementalEvents(session.eventsPath, session.isRunning);
+  const [userScrolled, setUserScrolled] = useState(false);
   const { height } = useTerminalDimensions();
+  const scrollRef = useRef<ScrollBoxRenderable | null>(null);
 
-  // Load events and poll for running sessions
-  useEffect(() => {
-    let mounted = true;
-    let interval: ReturnType<typeof setInterval> | null = null;
+  // Group flat events into visual blocks (tool pairs, merged text, dividers)
+  const groupedBlocks = useMemo(() => groupEvents(events), [events]);
 
-    const load = async () => {
-      const { events: loaded, legacy } = await loadEvents(session.eventsPath);
-      if (mounted) {
-        setEvents(loaded);
-        setIsLegacy(legacy);
-      }
-    };
-
-    load();
-
-    if (session.isRunning) {
-      interval = setInterval(load, 500);
-    }
-
-    return () => {
-      mounted = false;
-      if (interval) clearInterval(interval);
-    };
-  }, [session.eventsPath, session.isRunning]);
+  // Indices of tool blocks for n/N jump navigation
+  const toolBlockIndices = useMemo(() => {
+    const indices: number[] = [];
+    groupedBlocks.forEach((block, i) => {
+      if (block.kind === 'tool') indices.push(i);
+    });
+    return indices;
+  }, [groupedBlocks]);
 
   useKeyboard((key) => {
-    if (key.name === 'q') {
-      onQuit();
+    if (key.name === 'q') { onQuit(); return; }
+    if (key.name === 'tab') { onTabSwitch(); return; }
+    if (key.name === 'escape' || key.name === 'backspace') { onBack(); return; }
+
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+
+    const ch = key.name;
+    const isShift = !!key.shift;
+
+    // j/k or arrow keys: scroll content line by line
+    if (ch === 'down' || ch === 'j') {
+      scroll.scrollBy(1);
+      setUserScrolled(true);
       return;
     }
-    if (key.name === 'tab') {
-      onTabSwitch();
+    if (ch === 'up' || ch === 'k') {
+      scroll.scrollBy(-1);
+      setUserScrolled(true);
       return;
     }
-    if (key.name === 'escape' || key.name === 'backspace') {
-      onBack();
+
+    // G (shift+g): scroll to bottom and re-enable sticky scroll
+    if (ch === 'G' || (ch === 'g' && isShift)) {
+      scroll.scrollBy(999999);
+      setUserScrolled(false);
+      return;
+    }
+    // g: scroll to top
+    if (ch === 'g' && !isShift) {
+      scroll.scrollBy(-999999);
+      setUserScrolled(true);
+      return;
+    }
+
+    // n: jump to next tool call block
+    if (ch === 'n' && !isShift && toolBlockIndices.length > 0) {
+      const children = scroll.getChildren();
+      for (const blockIdx of toolBlockIndices) {
+        const child = children.find((c: ScrollBoxChild) => c.id === `blk-${blockIdx}`);
+        if (!child) continue;
+        const relY = child.y - scroll.y;
+        if (relY > 2) {
+          scroll.scrollBy(relY);
+          setUserScrolled(true);
+          return;
+        }
+      }
+      return;
+    }
+    // N (shift+n): jump to previous tool call block
+    if (ch === 'N' || (ch === 'n' && isShift)) {
+      if (toolBlockIndices.length === 0) return;
+      const children = scroll.getChildren();
+      for (let i = toolBlockIndices.length - 1; i >= 0; i--) {
+        const blockIdx = toolBlockIndices[i];
+        const child = children.find((c: ScrollBoxChild) => c.id === `blk-${blockIdx}`);
+        if (!child) continue;
+        const relY = child.y - scroll.y;
+        if (relY < -1) {
+          scroll.scrollBy(relY);
+          setUserScrolled(true);
+          return;
+        }
+      }
+      return;
     }
   });
 
@@ -518,29 +906,34 @@ function SessionDetail({ session, onBack, onQuit, onTabSwitch }: {
       </box>
 
       <scrollbox
+        ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }}
         focused
+        stickyScroll={!userScrolled}
+        stickyStart="bottom"
         scrollbarOptions={{ visible: false }}
         style={{
           flexGrow: 1,
           height: Math.max(1, height - 6), // +1 for tab bar
         }}
       >
-        {events.length === 0 ? (
+        {groupedBlocks.length === 0 ? (
           <box style={{ padding: 1 }}>
             <text fg="#888888">
               {session.isRunning ? 'Waiting for events...' : 'No events found (events.jsonl not available)'}
             </text>
           </box>
         ) : (
-          events.map((event, i) => (
-            <EventBlock key={`${event.type}-${i}`} event={event} />
+          groupedBlocks.map((block, i) => (
+            <box key={`${block.kind}-${i}`} id={`blk-${i}`}>
+              <GroupedBlockView block={block} />
+            </box>
           ))
         )}
       </scrollbox>
 
       <box style={{ paddingLeft: 1, height: 2 }}>
         <text fg="#555555">
-          [esc] back  [tab] specs  [q] quit{session.isRunning ? '  (polling 500ms)' : ''}
+          [j/k] scroll  [n/N] tool  [g/G] top/end  [esc] back  [q] quit{session.isRunning ? '  (live)' : ''}
         </text>
       </box>
     </box>
@@ -682,6 +1075,10 @@ function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
   useEffect(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
+    if (displayIndex === 0) {
+      scroll.scrollTo(0);
+      return;
+    }
     const target = scroll.getChildren().find((child: ScrollBoxChild) => child.id === `sp-${displayIndex}`);
     if (!target) return;
     const y = target.y - scroll.y;

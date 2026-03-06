@@ -145,7 +145,7 @@ forge watch -C ~/other-repo     # Different repo
 ## Architecture
 
 ```
-~8090 lines (source) + ~5280 lines (tests)
+~10060 lines (source) + ~5440 lines (tests)
 
 User Prompt
     ↓
