@@ -282,6 +282,7 @@ export interface SessionStartEvent extends SessionEventBase {
   type: 'session_start';
   sessionId: string;
   model: string;
+  commandType?: string;
   specPath?: string;
   prompt: string;
 }

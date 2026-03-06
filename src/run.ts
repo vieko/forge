@@ -213,7 +213,7 @@ Do not use emojis in your output.`;
       silent: _silent,
       onActivity: _onActivity,
       auditLogExtra: specPath ? { spec: path.basename(specPath) } : {},
-      sessionExtra: { prompt, ...(isFork && { forkedFrom: options.fork }) },
+      sessionExtra: { type: 'run', prompt, ...(isFork && { forkedFrom: options.fork }) },
       resume: effectiveResume,
       forkSession: isFork,
       specLabel: _specLabel,

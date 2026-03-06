@@ -340,7 +340,7 @@ Failed: <n>/<total>
       verbose: false,
       quiet,
       silent: false,
-      auditLogExtra: { type: 'verify', proof: proof.proofName },
+      auditLogExtra: { type: 'verify', spec: proof.proofName, proof: proof.proofName },
       sessionExtra: { type: 'verify' },
     });
 

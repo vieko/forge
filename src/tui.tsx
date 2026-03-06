@@ -281,13 +281,13 @@ async function loadSessions(cwd: string): Promise<SessionInfo[]> {
         continue; // No events.jsonl — not a valid session dir
       }
 
-      detectedRunningIds.add(sid);
-
-      // Read only the first line of events.jsonl for session_start metadata
+      // Read first and last lines of events.jsonl for metadata + completion status
       let specName = 'running';
       let model = '--';
       let startedAt = new Date().toISOString();
       let specPath: string | undefined;
+      let commandType: string | undefined;
+      let endStatus: string | undefined;
       try {
         const raw = await readFile(eventsPath, 'utf-8');
         const firstNewline = raw.indexOf('\n');
@@ -295,21 +295,36 @@ async function loadSessions(cwd: string): Promise<SessionInfo[]> {
         if (firstLine) {
           const startEvent = JSON.parse(firstLine) as SessionEvent;
           if (startEvent.type === 'session_start') {
+            commandType = startEvent.commandType;
             specName = startEvent.specPath
               ? basename(startEvent.specPath, '.md')
-              : (startEvent.type || 'running');
+              : (commandType || 'running');
             model = startEvent.model || '--';
             startedAt = startEvent.timestamp;
             specPath = startEvent.specPath;
           }
         }
+        // Check last line for session_end (completed but no result in .forge/results/)
+        const lastNewline = raw.trimEnd().lastIndexOf('\n');
+        const lastLine = lastNewline >= 0 ? raw.substring(lastNewline + 1).trim() : raw.trim();
+        if (lastLine && lastLine !== firstLine) {
+          try {
+            const endEvent = JSON.parse(lastLine) as SessionEvent;
+            if (endEvent.type === 'session_end') {
+              endStatus = endEvent.status === 'success' ? 'success' : 'error_execution';
+            }
+          } catch { /* not valid JSON — still running */ }
+        }
       } catch {
         // Could not read metadata — use defaults
       }
 
+      const isRunning = !endStatus;
+      if (isRunning) detectedRunningIds.add(sid);
+
       sessions.push({
         sessionId: sid,
-        status: 'running',
+        status: endStatus || 'running',
         specName,
         specPath,
         model,
@@ -317,7 +332,8 @@ async function loadSessions(cwd: string): Promise<SessionInfo[]> {
         durationSeconds: undefined,
         startedAt,
         eventsPath,
-        isRunning: true,
+        isRunning,
+        type: commandType,
       });
     }
   } catch {
@@ -334,13 +350,14 @@ async function loadSessions(cwd: string): Promise<SessionInfo[]> {
       sessions.push({
         sessionId: latest.sessionId,
         status: 'running',
-        specName: latest.prompt ? truncate(latest.prompt, 30) : (latest.type || 'running'),
+        specName: latest.prompt ? truncate(latest.prompt, 30) : 'running',
         model: latest.model || '--',
         costUsd: undefined,
         durationSeconds: undefined,
         startedAt: latest.startedAt || new Date().toISOString(),
         eventsPath: deriveEventsPath(latest.logPath, latest.sessionId, cwd),
         isRunning: true,
+        type: latest.type,
       });
     }
   } catch {
@@ -597,11 +614,12 @@ function SessionRow({ session, selected, maxWidth }: { session: SessionInfo; sel
   const icon = statusIcon(session);
   const color = statusColor(session);
   const name = pad(truncate(session.specName, 28), 28);
+  const typ = pad(session.type || 'run', 8);
   const model = pad(session.model, 8);
   const cost = padStart(formatCost(session.costUsd), 8);
   const dur = padStart(formatDuration(session.durationSeconds), 8);
   const ago = padStart(formatRelativeTime(session.startedAt), 9);
-  const line = truncate(`${icon} ${name}  ${model}${cost}${dur}${ago}`, maxWidth - 2);
+  const line = truncate(`${icon} ${name}  ${typ}${model}${cost}${dur}${ago}`, maxWidth - 2);
 
   return (
     <box
@@ -699,9 +717,9 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
         </text>
       </box>
 
-      <scrollbox ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1 }}>
+      <scrollbox key={`sl-${sessions.length}-${sessions.filter(s => s.isRunning).length}`} ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1 }}>
         {sessions.map((session, i) => (
-          <box key={session.sessionId} id={`s-${i}`}>
+          <box key={`${session.sessionId}-${session.isRunning ? 'r' : session.status}`} id={`s-${i}`}>
             <SessionRow
               session={session}
               selected={i === selectedIndex}

@@ -133,8 +133,9 @@ async function runAuditRound(
   specPrefix: string,
   options: AuditOptions,
 ): Promise<AuditRoundResult> {
-  const { workingDir, effectiveModel, effectiveMaxTurns, effectiveMaxBudgetUsd, allSpecContents, verbose, quiet } = ctx;
+  const { workingDir, effectiveModel, effectiveMaxTurns, effectiveMaxBudgetUsd, allSpecContents, verbose, quiet, singleFile, specFiles, resolvedSpecDir } = ctx;
   const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
+  const auditTarget = singleFile ? specFiles[0] : path.basename(resolvedSpecDir);
 
   // Ensure output directory exists
   await fs.mkdir(outputDir, { recursive: true });
@@ -182,7 +183,7 @@ ${options.prompt ? `## Additional Context\n\n${options.prompt}\n` : ''}
     verbose,
     quiet,
     silent: false,
-    auditLogExtra: { type: 'audit' },
+    auditLogExtra: { type: 'audit', spec: auditTarget },
     sessionExtra: { type: 'audit', ...(isFork && { forkedFrom: options.fork }) },
     resume: effectiveResume,
     forkSession: isFork,
@@ -198,6 +199,7 @@ ${options.prompt ? `## Additional Context\n\n${options.prompt}\n` : ''}
     status: 'success',
     costUsd: qr.costUsd,
     prompt: '(audit)',
+    specPath: auditTarget,
     model: effectiveModel,
     cwd: workingDir,
     sessionId: qr.sessionId,

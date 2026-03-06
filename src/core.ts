@@ -290,6 +290,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
                   timestamp: new Date().toISOString(),
                   sessionId: sessionId!,
                   model: modelName,
+                  commandType: sessionExtra.type as string | undefined,
                   specPath: auditLogExtra.spec as string | undefined,
                   prompt,
                 });

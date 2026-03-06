@@ -344,8 +344,14 @@ server.registerTool('forge_start', {
 
     // run with --spec or --spec-dir
     if (command === 'run' && spec_path) {
-      // Detect if it's a directory or file
-      args.push('--spec', spec_path);
+      const resolvedSpec = path.resolve(cwd, spec_path);
+      try {
+        const stat = await fs.stat(resolvedSpec);
+        args.push(stat.isDirectory() ? '--spec-dir' : '--spec', spec_path);
+      } catch {
+        // Path doesn't exist yet — fall back to --spec, let forge handle the error
+        args.push('--spec', spec_path);
+      }
     }
 
     if (output_dir) args.push('--output-dir', output_dir);
