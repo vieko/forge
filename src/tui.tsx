@@ -6,8 +6,11 @@ import { createRoot, useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { readdir, readFile, stat, open } from 'fs/promises';
 import { join, basename, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import type { ForgeResult, SessionEvent, SpecManifest, SpecEntry, SpecRun } from './types.js';
+import type { Pipeline, Stage, GateKey, PipelineStatus, StageStatus } from './pipeline-types.js';
 import { loadManifest } from './specs.js';
+import { FileSystemStateProvider } from './pipeline-state.js';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -29,7 +32,7 @@ interface SessionInfo {
   type?: string;
 }
 
-type Tab = 'sessions' | 'specs';
+type Tab = 'sessions' | 'specs' | 'pipeline';
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -81,6 +84,88 @@ function pad(str: string, len: number): string {
 
 function padStart(str: string, len: number): string {
   return str.length >= len ? str : ' '.repeat(len - str.length) + str;
+}
+
+// ── Pipeline Helpers ─────────────────────────────────────────
+
+function pipelineStatusIcon(status: PipelineStatus): string {
+  switch (status) {
+    case 'running': return '>';
+    case 'completed': return '+';
+    case 'failed': return 'x';
+    case 'paused_at_gate': return '~';
+    case 'cancelled': return 'x';
+    case 'pending': return '-';
+    default: return '-';
+  }
+}
+
+function pipelineStatusColor(status: PipelineStatus): string {
+  switch (status) {
+    case 'running': return '#36b5f0';
+    case 'completed': return '#22c55e';
+    case 'failed': return '#ef4444';
+    case 'paused_at_gate': return '#eab308';
+    case 'cancelled': return '#ef4444';
+    case 'pending': return '#bbbbbb';
+    default: return '#bbbbbb';
+  }
+}
+
+function stageStatusIcon(status: StageStatus): string {
+  switch (status) {
+    case 'running': return '>';
+    case 'completed': return '+';
+    case 'failed': return 'x';
+    case 'skipped': return '-';
+    case 'cancelled': return 'x';
+    case 'pending': return '-';
+    default: return '-';
+  }
+}
+
+function stageStatusColor(status: StageStatus): string {
+  switch (status) {
+    case 'running': return '#36b5f0';
+    case 'completed': return '#22c55e';
+    case 'failed': return '#ef4444';
+    case 'skipped': return '#555555';
+    case 'cancelled': return '#ef4444';
+    case 'pending': return '#bbbbbb';
+    default: return '#bbbbbb';
+  }
+}
+
+function currentStageName(pipeline: Pipeline): string {
+  const running = pipeline.stages.find(s => s.status === 'running');
+  if (running) return running.name;
+  const pending = pipeline.stages.find(s => s.status === 'pending');
+  if (pending) return pending.name;
+  const failed = pipeline.stages.find(s => s.status === 'failed');
+  if (failed) return failed.name;
+  return pipeline.stages[pipeline.stages.length - 1].name;
+}
+
+function pipelineElapsed(pipeline: Pipeline): number | undefined {
+  const start = new Date(pipeline.createdAt).getTime();
+  if (pipeline.completedAt) {
+    return (new Date(pipeline.completedAt).getTime() - start) / 1000;
+  }
+  if (pipeline.status === 'running' || pipeline.status === 'paused_at_gate') {
+    return (Date.now() - start) / 1000;
+  }
+  // Sum completed stage durations for non-running pipelines
+  const total = pipeline.stages.reduce((s, st) => s + st.duration, 0);
+  return total > 0 ? total : undefined;
+}
+
+function gateKeyForStage(stage: Stage, pipeline: Pipeline): GateKey | null {
+  const idx = pipeline.stages.indexOf(stage);
+  if (idx <= 0) return null;
+  const prev = pipeline.stages[idx - 1];
+  const key = `${prev.name} -> ${stage.name}` as GateKey;
+  if (pipeline.gates[key]) return key;
+  return null;
 }
 
 function deriveEventsPath(logPath?: string, sessionId?: string, cwd?: string): string {
@@ -605,9 +690,17 @@ function TabBar({ activeTab }: { activeTab: Tab }) {
         <span fg={activeTab === 'sessions' ? '#36b5f0' : '#555555'}>[ Sessions ]</span>
         {'  '}
         <span fg={activeTab === 'specs' ? '#36b5f0' : '#555555'}>[ Specs ]</span>
+        {'  '}
+        <span fg={activeTab === 'pipeline' ? '#36b5f0' : '#555555'}>[ Pipeline ]</span>
       </text>
     </box>
   );
+}
+
+function nextTab(current: Tab): Tab {
+  if (current === 'sessions') return 'specs';
+  if (current === 'specs') return 'pipeline';
+  return 'sessions';
 }
 
 function SessionRow({ session, selected, maxWidth }: { session: SessionInfo; selected: boolean; maxWidth: number }) {
@@ -702,7 +795,7 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
         <text> </text>
         <text fg="#555555">Run a spec to create your first session.</text>
         <text> </text>
-        <text fg="#555555">[tab] specs  [q] quit</text>
+        <text fg="#555555">[tab] next tab  [q] quit</text>
       </box>
     );
   }
@@ -730,7 +823,7 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
       </scrollbox>
 
       <box style={{ paddingLeft: 1, flexShrink: 0 }}>
-        <text fg="#555555">[j/k] navigate  [enter] view  [tab] specs  [q] quit</text>
+        <text fg="#555555">[j/k] navigate  [enter] view  [tab] next tab  [q] quit</text>
       </box>
     </box>
   );
@@ -1143,7 +1236,7 @@ function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
         <text> </text>
         <text fg="#555555">Run a spec to start tracking lifecycle.</text>
         <text> </text>
-        <text fg="#555555">[tab] sessions  [q] quit</text>
+        <text fg="#555555">[tab] next tab  [q] quit</text>
       </box>
     );
   }
@@ -1178,7 +1271,7 @@ function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
       </scrollbox>
 
       <box style={{ paddingLeft: 1, flexShrink: 0 }}>
-        <text fg="#555555">[j/k] navigate  [enter] view  [tab] sessions  [q] quit</text>
+        <text fg="#555555">[j/k] navigate  [enter] view  [tab] next tab  [q] quit</text>
       </box>
     </box>
   );
@@ -1330,6 +1423,666 @@ function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitch }: {
   );
 }
 
+// ── DialogConfirm ────────────────────────────────────────────
+//
+// Promise-based confirmation dialog. Renders as an overlay box
+// capturing Y/N/Escape key events exclusively. The caller awaits
+// the returned Promise which resolves to true (Y) or false (N/Esc).
+//
+// Usage:
+//   const { ask, visible, prompt } = useConfirmDialog();
+//   const confirmed = await ask('Cancel this pipeline?');
+//
+
+interface ConfirmDialogState {
+  visible: boolean;
+  prompt: string;
+  resolve: ((value: boolean) => void) | null;
+}
+
+function useConfirmDialog() {
+  const [state, setState] = useState<ConfirmDialogState>({
+    visible: false,
+    prompt: '',
+    resolve: null,
+  });
+
+  const ask = (prompt: string): Promise<boolean> => {
+    return new Promise<boolean>((resolve) => {
+      setState({ visible: true, prompt, resolve });
+    });
+  };
+
+  const respond = (value: boolean) => {
+    if (state.resolve) {
+      state.resolve(value);
+    }
+    setState({ visible: false, prompt: '', resolve: null });
+  };
+
+  return { ask, respond, visible: state.visible, prompt: state.prompt };
+}
+
+function DialogConfirm({ prompt, visible, onRespond }: {
+  prompt: string;
+  visible: boolean;
+  onRespond: (value: boolean) => void;
+}) {
+  const { width } = useTerminalDimensions();
+
+  useKeyboard((key) => {
+    if (!visible) return;
+    if (key.name === 'y') {
+      onRespond(true);
+    } else if (key.name === 'n' || key.name === 'escape') {
+      onRespond(false);
+    }
+  });
+
+  if (!visible) return null;
+
+  const boxWidth = Math.min(50, width - 4);
+  const border = '-'.repeat(boxWidth);
+
+  return (
+    <box flexDirection="column" style={{ paddingTop: 1, paddingLeft: 2 }}>
+      <text fg="#444444">{border}</text>
+      <box style={{ paddingLeft: 1, paddingRight: 1 }} flexDirection="column">
+        <text fg="#eab308">{prompt}</text>
+        <text> </text>
+        <text fg="#888888">[y] confirm  [n/esc] cancel</text>
+      </box>
+      <text fg="#444444">{border}</text>
+    </box>
+  );
+}
+
+// ── Toast Notifications ──────────────────────────────────────
+//
+// Queue-based toast system. useToast() returns { show, toasts }.
+// <ToastOverlay> renders the front of the queue and auto-dismisses
+// after a configurable duration (default 3s).
+
+interface ToastItem {
+  id: number;
+  message: string;
+  color?: string;
+}
+
+function useToast() {
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const idRef = useRef(0);
+
+  const show = (message: string, color?: string) => {
+    const id = ++idRef.current;
+    setToasts(prev => [...prev, { id, message, color }]);
+  };
+
+  const dismiss = (id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  };
+
+  return { show, dismiss, toasts };
+}
+
+function ToastOverlay({ toasts, onDismiss }: {
+  toasts: ToastItem[];
+  onDismiss: (id: number) => void;
+}) {
+  const current = toasts.length > 0 ? toasts[0] : null;
+
+  useEffect(() => {
+    if (!current) return;
+    const timer = setTimeout(() => {
+      onDismiss(current.id);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [current?.id]);
+
+  if (!current) return null;
+
+  return (
+    <box style={{ paddingLeft: 1, height: 1, flexShrink: 0 }}>
+      <text fg={current.color || '#eab308'}>{current.message}</text>
+    </box>
+  );
+}
+
+// ── Pipeline Components ──────────────────────────────────────
+
+function PipelineRow({ pipeline, selected, maxWidth }: { pipeline: Pipeline; selected: boolean; maxWidth: number }) {
+  const icon = pipelineStatusIcon(pipeline.status);
+  const color = pipelineStatusColor(pipeline.status);
+  const goal = pad(truncate(pipeline.goal, 30), 30);
+  const stage = pad(currentStageName(pipeline), 8);
+  const stagesDone = pipeline.stages.filter(s => s.status === 'completed').length;
+  const progress = pad(`${stagesDone}/5`, 5);
+  const cost = padStart(formatCost(pipeline.totalCost > 0 ? pipeline.totalCost : undefined), 8);
+  const dur = padStart(formatDuration(pipelineElapsed(pipeline)), 8);
+  const ago = padStart(formatRelativeTime(pipeline.createdAt), 9);
+  const line = truncate(`${icon} ${goal}  ${stage}${progress}${cost}${dur}${ago}`, maxWidth - 2);
+
+  return (
+    <box
+      style={{
+        backgroundColor: selected ? '#334155' : undefined,
+        paddingLeft: 1,
+        paddingRight: 1,
+        height: 1,
+      }}
+    >
+      <text>
+        <span fg={color}>{line[0]}</span>
+        <span fg={selected ? '#ffffff' : '#bbbbbb'}>{line.substring(1)}</span>
+      </text>
+    </box>
+  );
+}
+
+function PipelineStageRow({ stage, pipeline, selected, maxWidth }: { stage: Stage; pipeline: Pipeline; selected: boolean; maxWidth: number }) {
+  const icon = stageStatusIcon(stage.status);
+  const color = stageStatusColor(stage.status);
+  const name = pad(stage.name, 10);
+  const gateKey = gateKeyForStage(stage, pipeline);
+  const gateBadge = gateKey ? `[${pipeline.gates[gateKey].type}]` : '';
+  const gatePad = pad(gateBadge, 10);
+  const sessions = padStart(`${stage.sessions.length}s`, 5);
+  const cost = padStart(formatCost(stage.cost > 0 ? stage.cost : undefined), 8);
+  const dur = padStart(formatDuration(stage.duration > 0 ? stage.duration : undefined), 8);
+  const line = truncate(`${icon} ${name}${gatePad}${sessions}${cost}${dur}`, maxWidth - 2);
+
+  return (
+    <box
+      style={{
+        backgroundColor: selected ? '#334155' : undefined,
+        paddingLeft: 1,
+        paddingRight: 1,
+        height: 1,
+      }}
+    >
+      <text>
+        <span fg={color}>{line[0]}</span>
+        <span fg={selected ? '#ffffff' : '#bbbbbb'}>{line.substring(1)}</span>
+      </text>
+    </box>
+  );
+}
+
+function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
+  cwd: string;
+  initialIndex?: number;
+  onSelect: (p: Pipeline, index: number) => void;
+  onQuit: () => void;
+  onTabSwitch: (index: number) => void;
+}) {
+  const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
+  const [pipelines, setPipelines] = useState<Pipeline[]>([]);
+  const { width } = useTerminalDimensions();
+  const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const providerRef = useRef(new FileSystemStateProvider(cwd));
+
+  // Load pipelines and poll every 2 seconds if any are running/paused
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      const loaded = await providerRef.current.listPipelines();
+      if (mounted) setPipelines(loaded);
+    };
+    load();
+    const interval = setInterval(load, 2000);
+    return () => { mounted = false; clearInterval(interval); };
+  }, [cwd]);
+
+  // Clamp selected index when pipelines change
+  useEffect(() => {
+    if (selectedIndex >= pipelines.length && pipelines.length > 0) {
+      setSelectedIndex(pipelines.length - 1);
+    }
+  }, [pipelines.length, selectedIndex]);
+
+  // Scroll to keep selected row visible
+  useEffect(() => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    if (selectedIndex === 0) {
+      scroll.scrollTo(0);
+      return;
+    }
+    const target = scroll.getChildren().find((child: ScrollBoxChild) => child.id === `pl-${selectedIndex}`);
+    if (!target) return;
+    const y = target.y - scroll.y;
+    if (y >= scroll.height) {
+      scroll.scrollBy(y - scroll.height + 1);
+    } else if (y < 0) {
+      scroll.scrollBy(y);
+    }
+  }, [selectedIndex]);
+
+  useKeyboard((key) => {
+    if (key.name === 'q') { onQuit(); return; }
+    if (key.name === 'tab') { onTabSwitch(selectedIndex); return; }
+    if (key.name === 'up' || key.name === 'k') {
+      setSelectedIndex(i => Math.max(0, i - 1));
+    } else if (key.name === 'down' || key.name === 'j') {
+      setSelectedIndex(i => Math.min(pipelines.length - 1, i + 1));
+    } else if (key.name === 'return') {
+      if (pipelines.length > 0 && pipelines[selectedIndex]) {
+        onSelect(pipelines[selectedIndex], selectedIndex);
+      }
+    }
+  });
+
+  const hasActive = pipelines.some(p => p.status === 'running' || p.status === 'paused_at_gate');
+  const runningCount = pipelines.filter(p => p.status === 'running').length;
+
+  if (pipelines.length === 0) {
+    return (
+      <box flexDirection="column" style={{ padding: 1 }}>
+        <text fg="#888888">No pipelines found in {cwd}/.forge/pipelines/</text>
+        <text> </text>
+        <text fg="#555555">Start a pipeline to see it here.</text>
+        <text> </text>
+        <text fg="#555555">[tab] next tab  [q] quit</text>
+      </box>
+    );
+  }
+
+  return (
+    <box flexDirection="column" style={{ flexGrow: 1 }}>
+      <box style={{ paddingLeft: 1, paddingTop: 1, flexShrink: 0 }}>
+        <text>
+          <span fg="#888888">forge pipelines</span>
+          {'  '}
+          <span fg="#555555">{pipelines.length} pipeline{pipelines.length !== 1 ? 's' : ''}</span>
+          {hasActive ? <span fg="#36b5f0">{'  '}(live)</span> : null}
+        </text>
+      </box>
+
+      <scrollbox key={`pl-${pipelines.length}-${runningCount}`} ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1 }}>
+        {pipelines.map((pipeline, i) => (
+          <box key={`${pipeline.id}-${pipeline.status}`} id={`pl-${i}`}>
+            <PipelineRow
+              pipeline={pipeline}
+              selected={i === selectedIndex}
+              maxWidth={width}
+            />
+          </box>
+        ))}
+      </scrollbox>
+
+      <box style={{ paddingLeft: 1, flexShrink: 0 }}>
+        <text fg="#555555">[j/k] navigate  [enter] view  [tab] next tab  [q] quit</text>
+      </box>
+    </box>
+  );
+}
+
+/**
+ * Find the GateKey that the pipeline is currently paused at.
+ * Returns null if not paused or no waiting gate.
+ */
+function findWaitingGateKey(pipeline: Pipeline): GateKey | null {
+  if (pipeline.status !== 'paused_at_gate') return null;
+  const gateKeys: GateKey[] = ['define -> run', 'run -> audit', 'audit -> prove', 'prove -> verify'];
+  for (const key of gateKeys) {
+    if (pipeline.gates[key].status === 'waiting') return key;
+  }
+  return null;
+}
+
+/**
+ * Find the stage that just completed before a waiting gate.
+ * Used to display which stage completed when paused.
+ */
+function completedStageBeforeGate(pipeline: Pipeline, gateKey: GateKey): string {
+  const parts = gateKey.split(' -> ');
+  return parts[0];
+}
+
+/**
+ * Strip CLAUDECODE env vars so child processes bypass the nested session guard.
+ * Same pattern as mcp.ts stripClaudeEnv().
+ */
+function stripClaudeEnvForSpawn(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (k === 'CLAUDECODE') continue;
+    if (k === 'CLAUDE_CODE_ENTRYPOINT') continue;
+    env[k] = v;
+  }
+  return env;
+}
+
+/** Resolve the forge binary path (same pattern as mcp.ts forgeBin). */
+function forgeBinPath(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), 'index.js');
+}
+
+/** Spawn `forge pipeline --resume <id>` as a detached child process. */
+function spawnPipelineResume(pipelineId: string, cwd: string): boolean {
+  try {
+    const { spawn } = require('child_process');
+    const child = spawn('node', [forgeBinPath(), 'pipeline', '--resume', pipelineId, '-C', cwd, '--quiet'], {
+      cwd,
+      env: stripClaudeEnvForSpawn(),
+      stdio: ['ignore', 'ignore', 'ignore'],
+      detached: true,
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions, onBack, onQuit, onTabSwitch }: {
+  pipeline: Pipeline;
+  cwd: string;
+  onSelectStageSessions: (sessionIds: string[]) => void;
+  onBack: () => void;
+  onQuit: () => void;
+  onTabSwitch: () => void;
+}) {
+  const [selectedStageIndex, setSelectedStageIndex] = useState(0);
+  const [pipeline, setPipeline] = useState(initialPipeline);
+  const { width } = useTerminalDimensions();
+  const providerRef = useRef(new FileSystemStateProvider(cwd));
+
+  // Dialog and toast state
+  const dialog = useConfirmDialog();
+  const toast = useToast();
+
+  // Track previous pipeline state for toast triggers
+  const prevStatusRef = useRef(pipeline.status);
+  const prevStagesRef = useRef<string>(
+    pipeline.stages.map(s => `${s.name}:${s.status}`).join(',')
+  );
+
+  // Poll for updates when pipeline is active
+  useEffect(() => {
+    if (pipeline.status !== 'running' && pipeline.status !== 'paused_at_gate') return;
+    let mounted = true;
+    const poll = async () => {
+      const updated = await providerRef.current.loadPipeline(pipeline.id);
+      if (mounted && updated) setPipeline(updated);
+    };
+    const interval = setInterval(poll, 2000);
+    return () => { mounted = false; clearInterval(interval); };
+  }, [pipeline.id, pipeline.status, cwd]);
+
+  // Fire toasts on pipeline state transitions
+  useEffect(() => {
+    const prevStatus = prevStatusRef.current;
+    const prevStages = prevStagesRef.current;
+    const currentStages = pipeline.stages.map(s => `${s.name}:${s.status}`).join(',');
+
+    // Gate pause toast
+    if (pipeline.status === 'paused_at_gate' && prevStatus !== 'paused_at_gate') {
+      const gk = findWaitingGateKey(pipeline);
+      if (gk) {
+        const completed = completedStageBeforeGate(pipeline, gk);
+        toast.show(`Stage '${completed}' completed -- gate requires approval`, '#eab308');
+      }
+    }
+
+    // Stage complete / failed toasts (detect from stage status changes)
+    if (currentStages !== prevStages) {
+      const prevMap = new Map<string, string>();
+      for (const pair of prevStages.split(',')) {
+        const [name, status] = pair.split(':');
+        if (name && status) prevMap.set(name, status);
+      }
+      for (const stage of pipeline.stages) {
+        const prev = prevMap.get(stage.name);
+        if (prev && prev !== stage.status) {
+          if (stage.status === 'completed' && prev !== 'completed') {
+            toast.show(`Stage '${stage.name}' complete`, '#22c55e');
+          } else if (stage.status === 'failed' && prev !== 'failed') {
+            toast.show(`Stage '${stage.name}' failed`, '#ef4444');
+          }
+        }
+      }
+    }
+
+    prevStatusRef.current = pipeline.status;
+    prevStagesRef.current = currentStages;
+  }, [pipeline]);
+
+  const stages = pipeline.stages;
+
+  // ── Pipeline mutation actions ──────────────────────────────
+
+  const handleAdvanceGate = async () => {
+    const gk = findWaitingGateKey(pipeline);
+    if (!gk) {
+      toast.show('No gate waiting for approval', '#888888');
+      return;
+    }
+    const updated = { ...pipeline };
+    updated.gates = { ...pipeline.gates };
+    updated.gates[gk] = { ...pipeline.gates[gk], status: 'approved' as const, approvedAt: new Date().toISOString() };
+    updated.status = 'running';
+    updated.updatedAt = new Date().toISOString();
+    await providerRef.current.savePipeline(updated);
+    setPipeline(updated);
+
+    // Spawn forge pipeline --resume to continue execution
+    if (spawnPipelineResume(pipeline.id, cwd)) {
+      toast.show(`Gate '${gk}' approved — resuming pipeline`, '#22c55e');
+    } else {
+      toast.show(`Gate '${gk}' approved — failed to spawn resume`, '#eab308');
+    }
+  };
+
+  const handleSkipGate = async () => {
+    const gk = findWaitingGateKey(pipeline);
+    if (!gk) {
+      toast.show('No gate waiting to skip', '#888888');
+      return;
+    }
+    const confirmed = await dialog.ask(`Skip gate '${gk}' without running the stage?`);
+    if (!confirmed) return;
+    const updated = { ...pipeline };
+    updated.gates = { ...pipeline.gates };
+    updated.gates[gk] = { ...pipeline.gates[gk], status: 'skipped' as const, approvedAt: new Date().toISOString() };
+    // Also skip the target stage
+    const targetName = gk.split(' -> ')[1] as import('./pipeline-types.js').StageName;
+    updated.stages = pipeline.stages.map(s =>
+      s.name === targetName ? { ...s, status: 'skipped' as const } : s
+    );
+    updated.status = 'running';
+    updated.updatedAt = new Date().toISOString();
+    await providerRef.current.savePipeline(updated);
+    setPipeline(updated);
+
+    // Spawn forge pipeline --resume to continue past the skipped stage
+    if (spawnPipelineResume(pipeline.id, cwd)) {
+      toast.show(`Gate '${gk}' skipped — resuming pipeline`, '#eab308');
+    } else {
+      toast.show(`Gate '${gk}' skipped — failed to spawn resume`, '#ef4444');
+    }
+  };
+
+  const handlePause = async () => {
+    if (pipeline.status !== 'running') {
+      toast.show('Pipeline is not running', '#888888');
+      return;
+    }
+    // Find the current running stage's exit gate
+    const runningStage = pipeline.stages.find(s => s.status === 'running');
+    if (!runningStage) {
+      toast.show('No running stage found', '#888888');
+      return;
+    }
+    const updated = { ...pipeline };
+    updated.status = 'paused_at_gate';
+    updated.updatedAt = new Date().toISOString();
+    await providerRef.current.savePipeline(updated);
+    setPipeline(updated);
+    toast.show('Pipeline paused -- will pause at next gate check', '#eab308');
+  };
+
+  const handleCancel = async () => {
+    if (pipeline.status !== 'running' && pipeline.status !== 'paused_at_gate') {
+      toast.show('Pipeline is not active', '#888888');
+      return;
+    }
+    const confirmed = await dialog.ask('Cancel this pipeline? This cannot be undone.');
+    if (!confirmed) return;
+    const updated = { ...pipeline };
+    updated.status = 'cancelled';
+    updated.updatedAt = new Date().toISOString();
+    updated.completedAt = new Date().toISOString();
+    updated.stages = pipeline.stages.map(s =>
+      s.status === 'running' || s.status === 'pending'
+        ? { ...s, status: 'cancelled' as const }
+        : s
+    );
+    await providerRef.current.savePipeline(updated);
+    setPipeline(updated);
+    toast.show('Pipeline cancelled', '#ef4444');
+  };
+
+  const handleRetry = async () => {
+    const failedStage = pipeline.stages.find(s => s.status === 'failed');
+    if (!failedStage || pipeline.status !== 'failed') {
+      toast.show('No failed stage to retry', '#888888');
+      return;
+    }
+    // Reset failed stage to pending, set pipeline to running
+    const updated = { ...pipeline };
+    updated.status = 'running';
+    updated.updatedAt = new Date().toISOString();
+    updated.completedAt = undefined;
+    updated.stages = pipeline.stages.map(s =>
+      s.status === 'failed'
+        ? { ...s, status: 'pending' as const, error: undefined }
+        : s
+    );
+    await providerRef.current.savePipeline(updated);
+    setPipeline(updated);
+
+    // Spawn forge pipeline --resume as a child process
+    if (spawnPipelineResume(pipeline.id, cwd)) {
+      toast.show(`Retrying from stage '${failedStage.name}'`, '#36b5f0');
+    } else {
+      toast.show('Failed to spawn retry process', '#ef4444');
+    }
+  };
+
+  // ── Keyboard shortcuts ─────────────────────────────────────
+
+  useKeyboard((key) => {
+    // Dialog captures all keys when visible
+    if (dialog.visible) return;
+
+    if (key.name === 'q') { onQuit(); return; }
+    if (key.name === 'tab') { onTabSwitch(); return; }
+    if (key.name === 'escape' || key.name === 'backspace') { onBack(); return; }
+    if (key.name === 'up' || key.name === 'k') {
+      setSelectedStageIndex(i => Math.max(0, i - 1));
+    } else if (key.name === 'down' || key.name === 'j') {
+      setSelectedStageIndex(i => Math.min(stages.length - 1, i + 1));
+    } else if (key.name === 'return') {
+      const stage = stages[selectedStageIndex];
+      if (stage && stage.sessions.length > 0) {
+        onSelectStageSessions(stage.sessions);
+      }
+    } else if (key.name === 'a') {
+      handleAdvanceGate();
+    } else if (key.name === 's') {
+      handleSkipGate();
+    } else if (key.name === 'p') {
+      handlePause();
+    } else if (key.name === 'c') {
+      handleCancel();
+    } else if (key.name === 'r') {
+      handleRetry();
+    }
+  });
+
+  const icon = pipelineStatusIcon(pipeline.status);
+  const color = pipelineStatusColor(pipeline.status);
+  const isActive = pipeline.status === 'running' || pipeline.status === 'paused_at_gate';
+  const isPaused = pipeline.status === 'paused_at_gate';
+  const isFailed = pipeline.status === 'failed';
+
+  // Build contextual shortcut hints
+  const shortcuts: string[] = ['[j/k] navigate', '[enter] sessions'];
+  if (isPaused) {
+    shortcuts.push('[a] advance', '[s] skip');
+  }
+  if (isActive) {
+    if (pipeline.status === 'running') shortcuts.push('[p] pause');
+    shortcuts.push('[c] cancel');
+  }
+  if (isFailed) {
+    shortcuts.push('[r] retry');
+  }
+  shortcuts.push('[esc] back', '[q] quit');
+
+  return (
+    <box flexDirection="column">
+      <box style={{ paddingLeft: 1, paddingTop: 1 }} flexDirection="column">
+        <text>
+          <span fg="#888888">forge pipeline</span>
+          {'  '}
+          <span fg="#cccccc">{truncate(pipeline.goal, 50)}</span>
+          {isActive ? <span fg="#36b5f0">{'  '}(live)</span> : null}
+        </text>
+        <text> </text>
+        <text>
+          <span fg="#888888">Status  </span>
+          <span fg={color}>{icon} {pipeline.status}</span>
+          {'    '}
+          <span fg="#888888">Cost  </span>
+          <span fg="#bbbbbb">{formatCost(pipeline.totalCost > 0 ? pipeline.totalCost : undefined)}</span>
+          {'    '}
+          <span fg="#888888">Duration  </span>
+          <span fg="#bbbbbb">{formatDuration(pipelineElapsed(pipeline))}</span>
+        </text>
+        <text>
+          <span fg="#888888">Created </span>
+          <span fg="#bbbbbb">{formatRelativeTime(pipeline.createdAt)}</span>
+          {'  '}
+          <span fg="#888888">Updated </span>
+          <span fg="#bbbbbb">{formatRelativeTime(pipeline.updatedAt)}</span>
+        </text>
+        <text> </text>
+        <text fg="#888888">Stages</text>
+      </box>
+
+      <box flexDirection="column">
+        {stages.map((stage, i) => (
+          <box key={stage.name} id={`ps-${i}`}>
+            <PipelineStageRow
+              stage={stage}
+              pipeline={pipeline}
+              selected={i === selectedStageIndex}
+              maxWidth={width}
+            />
+          </box>
+        ))}
+      </box>
+
+      <DialogConfirm
+        prompt={dialog.prompt}
+        visible={dialog.visible}
+        onRespond={dialog.respond}
+      />
+
+      <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
+
+      <box style={{ paddingLeft: 1, paddingTop: 1, height: 2 }}>
+        <text fg="#555555">
+          {shortcuts.join('  ')}
+        </text>
+      </box>
+    </box>
+  );
+}
+
 function App({ cwd }: { cwd: string }) {
   const [activeTab, setActiveTab] = useState<Tab>('sessions');
   const [view, setView] = useState<'list' | 'detail'>('list');
@@ -1340,6 +2093,13 @@ function App({ cwd }: { cwd: string }) {
   const [specsView, setSpecsView] = useState<'list' | 'detail' | 'runDetail'>('list');
   const [selectedSpecEntry, setSelectedSpecEntry] = useState<SpecEntry | null>(null);
   const [selectedRunSession, setSelectedRunSession] = useState<SessionInfo | null>(null);
+
+  // Pipeline state
+  const [pipelineListIndex, setPipelineListIndex] = useState(0);
+  const [pipelineView, setPipelineView] = useState<'list' | 'detail' | 'stageSession'>('list');
+  const [selectedPipeline, setSelectedPipeline] = useState<Pipeline | null>(null);
+  const [stageSessionIds, setStageSessionIds] = useState<string[]>([]);
+  const [stageSessionInfo, setStageSessionInfo] = useState<SessionInfo | null>(null);
 
   // Load sessions initially and refresh periodically
   useEffect(() => {
@@ -1358,8 +2118,94 @@ function App({ cwd }: { cwd: string }) {
   };
 
   const handleTabSwitch = () => {
-    setActiveTab(t => t === 'sessions' ? 'specs' : 'sessions');
+    setActiveTab(t => nextTab(t));
   };
+
+  // ── Pipeline tab ──────────────────────────────────────────
+
+  if (activeTab === 'pipeline') {
+    // Stage session detail (drilling into a stage's session)
+    if (pipelineView === 'stageSession' && stageSessionInfo) {
+      return (
+        <box flexDirection="column">
+          <TabBar activeTab={activeTab} />
+          <SessionDetail
+            session={stageSessionInfo}
+            onBack={() => setPipelineView('detail')}
+            onQuit={handleQuit}
+            onTabSwitch={handleTabSwitch}
+          />
+        </box>
+      );
+    }
+
+    // Pipeline detail view (stage rows)
+    if (pipelineView === 'detail' && selectedPipeline) {
+      return (
+        <box flexDirection="column">
+          <TabBar activeTab={activeTab} />
+          <PipelineDetail
+            pipeline={selectedPipeline}
+            cwd={cwd}
+            onSelectStageSessions={async (sessionIds) => {
+              // Find matching sessions from loaded sessions list
+              // Try each session ID - show the first one we can find
+              for (const sid of sessionIds) {
+                const match = sessions.find(s => s.sessionId === sid);
+                if (match) {
+                  setStageSessionIds(sessionIds);
+                  setStageSessionInfo(match);
+                  setPipelineView('stageSession');
+                  return;
+                }
+              }
+              // If no loaded session matches, construct a minimal SessionInfo
+              if (sessionIds.length > 0) {
+                const sid = sessionIds[0];
+                setStageSessionIds(sessionIds);
+                setStageSessionInfo({
+                  sessionId: sid,
+                  status: 'running',
+                  specName: sid.substring(0, 8),
+                  model: '--',
+                  startedAt: new Date().toISOString(),
+                  eventsPath: deriveEventsPath(undefined, sid, cwd),
+                  isRunning: false,
+                });
+                setPipelineView('stageSession');
+              }
+            }}
+            onBack={() => setPipelineView('list')}
+            onQuit={handleQuit}
+            onTabSwitch={handleTabSwitch}
+          />
+        </box>
+      );
+    }
+
+    // Pipeline list view
+    return (
+      <box flexDirection="column">
+        <TabBar activeTab={activeTab} />
+        <PipelinesList
+          cwd={cwd}
+          initialIndex={pipelineListIndex}
+          onSelect={(p, index) => {
+            setPipelineListIndex(index);
+            setSelectedPipeline(p);
+            setPipelineView('detail');
+          }}
+          onQuit={handleQuit}
+          onTabSwitch={(index) => {
+            setPipelineListIndex(index);
+            setActiveTab(nextTab('pipeline'));
+          }}
+        />
+      </box>
+    );
+  }
+
+  // ── Specs tab ─────────────────────────────────────────────
 
   if (activeTab === 'specs') {
     if (specsView === 'runDetail' && selectedRunSession) {
@@ -1412,12 +2258,14 @@ function App({ cwd }: { cwd: string }) {
           onQuit={handleQuit}
           onTabSwitch={(index) => {
             setSpecsListIndex(index);
-            setActiveTab('sessions');
+            setActiveTab(nextTab('specs'));
           }}
         />
       </box>
     );
   }
+
+  // ── Sessions tab ──────────────────────────────────────────
 
   if (view === 'detail' && selectedSession) {
     return (

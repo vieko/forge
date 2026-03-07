@@ -120,10 +120,12 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
 // ── Tool Discovery ───────────────────────────────────────────
 
 describe('tool discovery', () => {
-  test('server exposes all 6 tools', async () => {
+  test('server exposes all 8 tools', async () => {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name).sort();
     expect(names).toEqual([
+      'forge_pipeline',
+      'forge_pipeline_start',
       'forge_specs',
       'forge_start',
       'forge_stats',
@@ -736,6 +738,175 @@ describe('forge_watch', () => {
     expect(json.activity).toBeDefined();
     expect(json.activity.length).toBe(2);
     expect(json.events).toBeUndefined();
+  });
+});
+
+// ── forge_pipeline ───────────────────────────────────────────
+
+describe('forge_pipeline', () => {
+  test('returns "No active pipeline" when pipeline.json does not exist', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+
+    const { json } = await callTool('forge_pipeline', { cwd: dir });
+    expect(json.message).toBe('No active pipeline');
+  });
+
+  test('returns pipeline state when active pipeline exists', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+
+    // Write a pipeline.json directly
+    const pipeline = {
+      id: 'test-pipe',
+      goal: 'build auth system',
+      status: 'running',
+      stages: [
+        { name: 'define', status: 'completed', cost: 1.50, duration: 120, sessions: ['s1'], artifacts: { specDir: 'specs/' } },
+        { name: 'run', status: 'running', cost: 0.80, duration: 60, sessions: ['s2'], artifacts: {} },
+        { name: 'audit', status: 'pending', cost: 0, duration: 0, sessions: [], artifacts: {} },
+        { name: 'prove', status: 'pending', cost: 0, duration: 0, sessions: [], artifacts: {} },
+        { name: 'verify', status: 'pending', cost: 0, duration: 0, sessions: [], artifacts: {} },
+      ],
+      gates: {
+        'define -> run': { type: 'auto', status: 'approved' },
+        'run -> audit': { type: 'auto', status: 'waiting' },
+        'audit -> prove': { type: 'confirm', status: 'waiting' },
+        'prove -> verify': { type: 'auto', status: 'waiting' },
+      },
+      totalCost: 2.30,
+      createdAt: '2026-03-06T00:00:00Z',
+      updatedAt: '2026-03-06T00:01:00Z',
+    };
+    await fs.writeFile(
+      path.join(dir, '.forge', 'pipeline.json'),
+      JSON.stringify(pipeline),
+    );
+
+    const { json } = await callTool('forge_pipeline', { cwd: dir });
+    expect(json.id).toBe('test-pipe');
+    expect(json.goal).toBe('build auth system');
+    expect(json.status).toBe('running');
+    expect(json.currentStage).toBe('run');
+    expect(json.totalCost).toBeCloseTo(2.30, 2);
+    expect(json.stages.length).toBe(5);
+    expect(json.stages[0].name).toBe('define');
+    expect(json.stages[0].status).toBe('completed');
+    expect(json.stages[0].sessions).toBe(1);
+    expect(json.stages[1].status).toBe('running');
+    expect(json.gates['define -> run'].status).toBe('approved');
+    expect(json.gates['run -> audit'].status).toBe('waiting');
+    expect(json.next_action).toContain('running');
+  });
+
+  test('returns next_action hint for paused_at_gate status', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+
+    const pipeline = {
+      id: 'paused-pipe',
+      goal: 'test gates',
+      status: 'paused_at_gate',
+      stages: [
+        { name: 'define', status: 'completed', cost: 1.00, duration: 60, sessions: ['s1'], artifacts: {} },
+        { name: 'run', status: 'completed', cost: 2.00, duration: 120, sessions: ['s2'], artifacts: {} },
+        { name: 'audit', status: 'pending', cost: 0, duration: 0, sessions: [], artifacts: {} },
+        { name: 'prove', status: 'pending', cost: 0, duration: 0, sessions: [], artifacts: {} },
+        { name: 'verify', status: 'pending', cost: 0, duration: 0, sessions: [], artifacts: {} },
+      ],
+      gates: {
+        'define -> run': { type: 'auto', status: 'approved' },
+        'run -> audit': { type: 'confirm', status: 'waiting' },
+        'audit -> prove': { type: 'auto', status: 'waiting' },
+        'prove -> verify': { type: 'auto', status: 'waiting' },
+      },
+      totalCost: 3.00,
+      createdAt: '2026-03-06T00:00:00Z',
+      updatedAt: '2026-03-06T00:02:00Z',
+    };
+    await fs.writeFile(
+      path.join(dir, '.forge', 'pipeline.json'),
+      JSON.stringify(pipeline),
+    );
+
+    const { json } = await callTool('forge_pipeline', { cwd: dir });
+    expect(json.status).toBe('paused_at_gate');
+    expect(json.next_action).toContain('run -> audit');
+    expect(json.next_action).toContain('paused');
+  });
+
+  test('returns next_action hint for completed pipeline', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+
+    const pipeline = {
+      id: 'done-pipe',
+      goal: 'done',
+      status: 'completed',
+      stages: [
+        { name: 'define', status: 'completed', cost: 1.00, duration: 60, sessions: [], artifacts: {} },
+        { name: 'run', status: 'completed', cost: 2.00, duration: 120, sessions: [], artifacts: {} },
+        { name: 'audit', status: 'completed', cost: 1.50, duration: 90, sessions: [], artifacts: {} },
+        { name: 'prove', status: 'completed', cost: 0.50, duration: 30, sessions: [], artifacts: {} },
+        { name: 'verify', status: 'completed', cost: 1.00, duration: 60, sessions: [], artifacts: {} },
+      ],
+      gates: {
+        'define -> run': { type: 'auto', status: 'approved' },
+        'run -> audit': { type: 'auto', status: 'approved' },
+        'audit -> prove': { type: 'auto', status: 'approved' },
+        'prove -> verify': { type: 'auto', status: 'approved' },
+      },
+      totalCost: 6.00,
+      createdAt: '2026-03-06T00:00:00Z',
+      updatedAt: '2026-03-06T00:05:00Z',
+    };
+    await fs.writeFile(
+      path.join(dir, '.forge', 'pipeline.json'),
+      JSON.stringify(pipeline),
+    );
+
+    const { json } = await callTool('forge_pipeline', { cwd: dir });
+    expect(json.status).toBe('completed');
+    expect(json.next_action).toBe('Pipeline complete.');
+  });
+
+  test('uses process.cwd() when cwd is omitted', async () => {
+    // Call without cwd — should not error (uses server's process.cwd)
+    const { json, isError } = await callTool('forge_pipeline', {});
+    // May return "No active pipeline" or pipeline data — either is valid
+    expect(isError).toBeFalsy();
+  });
+});
+
+// ── forge_pipeline_start ─────────────────────────────────────
+
+describe('forge_pipeline_start', () => {
+  test('returns task_id and hint', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+
+    // Start a pipeline command that will fail quickly (no API key / no CLI command yet)
+    // but the important thing is that forge_pipeline_start returns immediately
+    const { json } = await callTool('forge_pipeline_start', {
+      goal: 'test pipeline for mcp tests',
+      cwd: dir,
+    });
+
+    expect(json.task_id).toBeTruthy();
+    expect(typeof json.task_id).toBe('string');
+    expect(json.task_id.length).toBe(16); // 8 random bytes = 16 hex chars
+    expect(json.message).toContain('Started forge pipeline');
+    expect(json.pid).toBeTruthy();
+    expect(json.hint).toContain('forge_task');
+    expect(json.hint).toContain('forge_pipeline');
+
+    // Verify the task is trackable via forge_task
+    const { json: taskJson } = await callTool('forge_task', { task_id: json.task_id });
+    expect(taskJson.task_id).toBe(json.task_id);
+    expect(taskJson.command).toBe('forge pipeline');
+    // Status could be running or already failed (no CLI command), both are valid
+    expect(['running', 'failed', 'complete']).toContain(taskJson.status);
+    expect(taskJson.elapsed).toBeTruthy();
   });
 });
 

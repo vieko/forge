@@ -19,10 +19,11 @@ export const execAsync = promisify(exec);
 
 // ── .forge/ directory bootstrap ──────────────────────────────
 
-const FORGE_GITIGNORE = `# Ignore everything except the manifest
+const FORGE_GITIGNORE = `# Ignore everything except the manifest and pipeline state
 *
 !.gitignore
 !specs.json
+!pipeline.json
 `;
 
 /**

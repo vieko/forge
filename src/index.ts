@@ -2,7 +2,7 @@
 
 import { program } from 'commander';
 import { readFileSync, existsSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { runForge } from './parallel.js';
 import { showStatus } from './status.js';
@@ -14,7 +14,13 @@ import { runDefine } from './define.js';
 import { runProve } from './prove.js';
 import { runVerify } from './proof-runner.js';
 import { showStats } from './stats.js';
+import { runPipeline } from './pipeline.js';
+import { FileSystemStateProvider } from './pipeline-state.js';
+import { showPipelineStatus } from './pipeline-status.js';
+import { STAGE_ORDER } from './pipeline-types.js';
+import type { StageName, GateKey, GateType } from './pipeline-types.js';
 import { triggerAbort, isInterrupted } from './abort.js';
+import { showBanner } from './display.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -549,9 +555,175 @@ program
     }
   });
 
+// ── Pipeline Command ─────────────────────────────────────────
+
+const pipelineCmd = program
+  .command('pipeline')
+  .description('Run a full pipeline: define -> run -> audit -> prove -> verify')
+  .argument('[goal]', 'High-level goal describing what to build')
+  .option('--from <stage>', 'Start from a specific stage (define, run, audit, prove, verify)')
+  .option('-S, --spec-dir <path>', 'Skip define and seed with the given spec directory')
+  .option('--gate-all <type>', 'Set all gates to this type (auto, confirm, review)')
+  .option('--gates <spec>', 'Per-stage gate overrides (e.g. define:auto,run:auto,audit:confirm,prove:confirm)')
+  .option('--resume <id>', 'Resume a paused or incomplete pipeline')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'opus')
+  .option('-t, --max-turns <n>', 'Maximum turns per stage (default: 250)', '250')
+  .option('-b, --max-budget <usd>', 'Maximum budget in USD')
+  .option('-v, --verbose', 'Show detailed output')
+  .option('-q, --quiet', 'Suppress progress output')
+  .option('-w, --watch', 'Open a tmux pane with live session logs')
+  .action(async (goal: string | undefined, options: {
+    from?: string;
+    specDir?: string;
+    gateAll?: string;
+    gates?: string;
+    resume?: string;
+    cwd?: string;
+    model?: string;
+    maxTurns?: string;
+    maxBudget?: string;
+    verbose?: boolean;
+    quiet?: boolean;
+    watch?: boolean;
+  }) => {
+    guardNestedSession();
+    validateBudget(options.maxBudget);
+    if (!options.quiet) showBanner();
+
+    // Must provide either a goal or --resume
+    if (!goal && !options.resume) {
+      console.error('Error: Provide a goal or use --resume <id> to continue an existing pipeline.');
+      process.exit(1);
+    }
+
+    // Validate --from
+    const validStages: StageName[] = [...STAGE_ORDER];
+    let fromStage: StageName | undefined;
+    if (options.from) {
+      if (!validStages.includes(options.from as StageName)) {
+        program.error(
+          `Invalid stage "${options.from}". Must be one of: ${validStages.join(', ')}`,
+        );
+      }
+      fromStage = options.from as StageName;
+    }
+
+    // Validate --gate-all
+    const validGateTypes = ['auto', 'confirm', 'review'];
+    if (options.gateAll && !validGateTypes.includes(options.gateAll)) {
+      program.error(
+        `Invalid gate type "${options.gateAll}". Must be one of: ${validGateTypes.join(', ')}`,
+      );
+    }
+
+    // Build gates from --gate-all and --gates
+    let gates: Partial<Record<GateKey, GateType>> | undefined;
+    if (options.gateAll) {
+      const type = options.gateAll as GateType;
+      gates = {
+        'define -> run': type,
+        'run -> audit': type,
+        'audit -> prove': type,
+        'prove -> verify': type,
+      };
+    }
+
+    // Parse --gates (comma-separated stage:type pairs)
+    if (options.gates) {
+      if (!gates) gates = {};
+      const validGateStages = ['define', 'run', 'audit', 'prove'];
+      const gateKeyMap: Record<string, GateKey> = {
+        'define': 'define -> run',
+        'run': 'run -> audit',
+        'audit': 'audit -> prove',
+        'prove': 'prove -> verify',
+      };
+
+      const tokens = options.gates.split(',');
+      for (const token of tokens) {
+        const parts = token.trim().split(':');
+        if (parts.length !== 2) {
+          program.error(
+            `Invalid --gates token "${token}". Expected format: stage:type (e.g. audit:confirm)`,
+          );
+        }
+        const [stage, type] = parts;
+        if (!validGateStages.includes(stage)) {
+          program.error(
+            `Invalid gate stage "${stage}". Must be one of: ${validGateStages.join(', ')}`,
+          );
+        }
+        if (!validGateTypes.includes(type)) {
+          program.error(
+            `Invalid gate type "${type}". Must be one of: ${validGateTypes.join(', ')}`,
+          );
+        }
+        gates[gateKeyMap[stage]] = type as GateType;
+      }
+    }
+
+    // --watch: open a tmux pane with live session logs
+    if (options.watch) {
+      if (process.env.TMUX) {
+        const watchCwd = options.cwd ? ` -C ${options.cwd}` : '';
+        const { exec: execCb } = await import('child_process');
+        const child = execCb(`tmux split-window -h "forge watch${watchCwd}"`, (err) => {
+          if (err && !options.quiet) {
+            console.error('\x1b[2m[forge]\x1b[0m Could not open tmux watch pane:', err.message);
+          }
+        });
+        child.unref();
+      } else if (!options.quiet) {
+        console.log("\x1b[2m[forge]\x1b[0m Tip: Run '\x1b[36mforge watch\x1b[0m' in another terminal for live logs");
+        console.log("\x1b[2m[forge]\x1b[0m (or use --watch inside tmux for auto-split)\n");
+      }
+    }
+
+    try {
+      const workingDir = options.cwd ? resolve(options.cwd) : process.cwd();
+      const stateProvider = new FileSystemStateProvider(workingDir);
+
+      await runPipeline(
+        {
+          goal: goal || '',
+          gates,
+          fromStage,
+          specDir: options.specDir,
+          cwd: options.cwd,
+          model: options.model,
+          resume: options.resume,
+          verbose: options.verbose,
+          quiet: options.quiet,
+        },
+        stateProvider,
+      );
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+pipelineCmd
+  .command('status')
+  .description('Show pipeline state')
+  .argument('[id]', 'Pipeline ID (default: active pipeline)')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .action(async (id: string | undefined, options: { cwd?: string }) => {
+    try {
+      await showPipelineStatus({
+        cwd: options.cwd,
+        id,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
 // Quick alias: `forge "do something"` = `forge run "do something"`
 // Also handles `forge --spec-dir ... "prompt"` → `forge run --spec-dir ... "prompt"`
-const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'prove', 'verify', 'watch', 'specs', 'stats', 'tui', 'help']);
+const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'prove', 'verify', 'watch', 'specs', 'stats', 'tui', 'pipeline', 'help']);
 const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--dry-run', '--sequential-first', '--branch']);
 const args = process.argv.slice(2);
 if (args.length > 0 && !COMMANDS.has(args[0])) {

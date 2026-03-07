@@ -22,6 +22,8 @@ import path from 'path';
 import { promises as fs } from 'fs';
 import { loadManifest, findUntrackedSpecs } from './specs.js';
 import { loadSummaries, aggregateRuns, computeSpecStats, computeModelStats, filterSince } from './stats.js';
+import { FileSystemStateProvider } from './pipeline-state.js';
+import type { Pipeline, GateKey } from './pipeline-types.js';
 
 // ── Task manager ─────────────────────────────────────────────
 
@@ -623,6 +625,212 @@ server.registerTool('forge_watch', {
           showing: cleanLines.length,
           activity: cleanLines,
         }, null, 2),
+      }],
+    };
+  } catch (err) {
+    return {
+      content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+      isError: true,
+    };
+  }
+});
+
+// ── Fast tool: forge_pipeline ─────────────────────────────────
+
+server.registerTool('forge_pipeline', {
+  description: 'Read current pipeline state. Returns pipeline ID, status, current stage, gate status, total cost, stage list with statuses, and a next_action hint. Fast — no SDK call.',
+  inputSchema: {
+    cwd: z.string().optional().describe('Working directory (target repo). Defaults to server cwd.'),
+  },
+}, async ({ cwd }) => {
+  try {
+    const workingDir = cwd ? path.resolve(cwd) : process.cwd();
+    const provider = new FileSystemStateProvider(workingDir);
+    const pipeline = await provider.loadActivePipeline();
+
+    if (!pipeline) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ message: 'No active pipeline' }) }],
+      };
+    }
+
+    // Determine current stage (first non-completed, non-skipped stage)
+    const currentStage = pipeline.stages.find(
+      s => s.status === 'running' || s.status === 'pending'
+    );
+
+    // Build gate status map
+    const gateStatus: Record<string, { type: string; status: string }> = {};
+    for (const [key, gate] of Object.entries(pipeline.gates) as [GateKey, Pipeline['gates'][GateKey]][]) {
+      gateStatus[key] = { type: gate.type, status: gate.status };
+    }
+
+    // Find paused gate (if any)
+    const pausedGate = (Object.entries(pipeline.gates) as [GateKey, Pipeline['gates'][GateKey]][])
+      .find(([, g]) => g.status === 'waiting' && pipeline.status === 'paused_at_gate');
+
+    // Build next_action hint
+    let nextAction: string;
+    switch (pipeline.status) {
+      case 'completed':
+        nextAction = 'Pipeline complete.';
+        break;
+      case 'failed': {
+        const failedStage = pipeline.stages.find(s => s.status === 'failed');
+        nextAction = failedStage
+          ? `Stage '${failedStage.name}' failed: ${failedStage.error || 'unknown error'}. Fix and resume with forge_pipeline_start.`
+          : 'Pipeline failed. Fix and resume with forge_pipeline_start.';
+        break;
+      }
+      case 'cancelled':
+        nextAction = 'Pipeline cancelled. Start a new pipeline with forge_pipeline_start.';
+        break;
+      case 'paused_at_gate':
+        if (pausedGate) {
+          nextAction = `Gate '${pausedGate[0]}' is paused. Advance with forge_pipeline_start or via TUI (a key).`;
+        } else {
+          nextAction = 'Pipeline paused at gate. Advance with forge_pipeline_start.';
+        }
+        break;
+      case 'running':
+        nextAction = currentStage
+          ? `Stage '${currentStage.name}' is running. Monitor with forge_watch.`
+          : 'Pipeline is running.';
+        break;
+      case 'pending':
+        nextAction = 'Pipeline is pending. Start with forge_pipeline_start.';
+        break;
+      default:
+        nextAction = 'Check pipeline status.';
+    }
+
+    const result = {
+      id: pipeline.id,
+      goal: pipeline.goal,
+      status: pipeline.status,
+      currentStage: currentStage?.name ?? null,
+      gates: gateStatus,
+      totalCost: pipeline.totalCost,
+      stages: pipeline.stages.map(s => ({
+        name: s.name,
+        status: s.status,
+        cost: s.cost,
+        duration: s.duration,
+        sessions: s.sessions.length,
+        artifacts: s.artifacts,
+      })),
+      createdAt: pipeline.createdAt,
+      updatedAt: pipeline.updatedAt,
+      next_action: nextAction,
+    };
+
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+    };
+  } catch (err) {
+    return {
+      content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+      isError: true,
+    };
+  }
+});
+
+// ── Async tool: forge_pipeline_start ─────────────────────────
+
+server.registerTool('forge_pipeline_start', {
+  description: 'Start a pipeline process. Spawns forge pipeline as a child process and returns a task_id for polling via forge_task. Typical duration: 15-60min depending on pipeline scope. Poll every 30-60s with forge_task.',
+  inputSchema: {
+    goal: z.string().describe('High-level goal describing what to build'),
+    cwd: z.string().describe('Working directory (target repo)'),
+    spec_path: z.string().optional().describe('Spec directory path (maps to --spec-dir)'),
+    from_stage: z.string().optional().describe('Start from a specific stage: define, run, audit, prove, verify (maps to --from)'),
+    gate_all: z.string().optional().describe('Set all gates to this type: auto, confirm, review (maps to --gate-all)'),
+    model: z.string().optional().describe('Model to use (opus, sonnet, or full model ID)'),
+    extra_args: z.array(z.string()).optional().describe('Additional CLI arguments'),
+  },
+}, async ({ goal, cwd, spec_path, from_stage, gate_all, model, extra_args }) => {
+  try {
+    cleanupStaleTasks();
+
+    const taskId = crypto.randomBytes(8).toString('hex');
+    const workingDir = path.resolve(cwd);
+
+    // Build CLI arguments: forge pipeline "<goal>"
+    const args: string[] = [forgeBin(), 'pipeline', goal];
+
+    if (spec_path) args.push('--spec-dir', spec_path);
+    if (from_stage) args.push('--from', from_stage);
+    if (gate_all) args.push('--gate-all', gate_all);
+    if (model) args.push('--model', model);
+
+    // Always pass --quiet to reduce noise in captured output
+    args.push('--quiet');
+
+    if (extra_args) args.push(...extra_args);
+
+    const child = spawn('node', args, {
+      cwd: workingDir,
+      env: stripClaudeEnv(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+    });
+
+    const task: Task = {
+      id: taskId,
+      command: 'forge pipeline',
+      cwd: workingDir,
+      status: 'running',
+      startedAt: Date.now(),
+      stdout: [],
+      stderr: [],
+      pid: child.pid,
+    };
+
+    child.stdout?.on('data', (data: Buffer) => {
+      for (const line of data.toString().split('\n')) {
+        if (line.trim()) pushLine(task.stdout, line);
+      }
+    });
+
+    // Capture sessionId from latest-session.json after child starts
+    setTimeout(async () => {
+      if (task.sessionId) return;
+      try {
+        const latestPath = path.join(workingDir, '.forge', 'latest-session.json');
+        const data = JSON.parse(await fs.readFile(latestPath, 'utf-8'));
+        if (data.sessionId) task.sessionId = data.sessionId;
+      } catch { /* ignore */ }
+    }, 3000);
+
+    child.stderr?.on('data', (data: Buffer) => {
+      for (const line of data.toString().split('\n')) {
+        if (line.trim()) pushLine(task.stderr, line);
+      }
+    });
+
+    child.on('close', (code) => {
+      task.status = code === 0 ? 'complete' : 'failed';
+      task.completedAt = Date.now();
+      task.exitCode = code;
+    });
+
+    child.on('error', (err) => {
+      task.status = 'failed';
+      task.completedAt = Date.now();
+      pushLine(task.stderr, `Process error: ${err.message}`);
+    });
+
+    tasks.set(taskId, task);
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify({
+          task_id: taskId,
+          message: 'Started forge pipeline',
+          pid: child.pid,
+          hint: 'Use forge_task to poll for completion, forge_watch for detailed activity, or forge_pipeline to check pipeline state. Check every 30-60s.',
+        }),
       }],
     };
   } catch (err) {
