@@ -136,6 +136,18 @@ forge review                    # Review main...HEAD
 forge review HEAD~5...HEAD      # Specific range
 forge review -C ~/other-repo    # Different repo
 
+# Pipeline orchestrator (chains define -> run -> audit -> prove -> verify)
+forge pipeline "build auth system"                  # Full pipeline
+forge pipeline --from run --spec-dir specs/ "go"    # Start at run stage with existing specs
+forge pipeline --gate-all confirm "careful build"   # Pause at every gate for approval
+forge pipeline --resume <pipeline-id>               # Resume paused/failed pipeline
+forge pipeline status                               # Show current pipeline state
+forge pipeline status <pipeline-id>                 # Show specific pipeline
+
+# Interactive TUI
+forge tui                       # Session browser + spec lifecycle + pipeline control
+forge tui -C ~/other-repo       # TUI for different repo
+
 # Watch live session logs
 forge watch                     # Watch latest session (auto-follows batch)
 forge watch <session-id>        # Watch specific session
@@ -145,7 +157,7 @@ forge watch -C ~/other-repo     # Different repo
 ## Architecture
 
 ```
-~10060 lines (source) + ~5440 lines (tests)
+~12750 lines (source) + ~6165 lines (tests)
 
 User Prompt
     ↓
@@ -186,7 +198,12 @@ src/
 ├── status.ts        # showStatus
 ├── stats.ts         # showStats (aggregate run statistics)
 ├── proof-runner.ts   # forge verify (proof parser, check runner, PR creation)
-├── mcp.ts           # MCP server (6 tools, stdio transport, async task spawn)
+├── pipeline.ts      # Pipeline orchestrator (stage loop, gate polling, single-writer model)
+├── pipeline-state.ts # FileSystemStateProvider (CRUD for pipeline.json, file locking)
+├── pipeline-types.ts # Pipeline, Stage, Gate, PipelineEvent types, provider interfaces
+├── pipeline-status.ts # CLI display for pipeline status
+├── mcp.ts           # MCP server (8 tools, stdio transport, async task spawn)
+├── tui.tsx          # OpenTUI React TUI (sessions, specs, pipeline tabs)
 ├── types.ts         # TypeScript types (ForgeResult, SpecManifest, SpecEntry, SpecRun, DefineOptions, MonorepoContext)
 ├── query.test.ts    # Tests for core utilities
 ├── deps.test.ts     # Tests for dependency + parseSource
@@ -196,14 +213,18 @@ src/
 ├── define.test.ts   # Tests for spec complexity assessment
 ├── parallel.test.ts # Tests for smartDispatch, runSpecBatch, filterPassedSpecs
 ├── stats.test.ts    # Tests for stats aggregation
+├── pipeline.test.ts # Tests for pipeline orchestrator (state, gates, resume, artifacts)
 ├── mcp.test.ts      # Tests for MCP server (protocol-level via stdio client)
 └── types.test.ts    # Type validation tests
 
 .forge/
-├── .gitignore    # Auto-created: tracks only specs.json
+├── .gitignore    # Auto-created: tracks specs.json + pipeline.json
 ├── specs.json    # Spec lifecycle manifest (committed to git)
+├── pipeline.json # Active pipeline state (committed to git)
+├── pipelines/    # Historical pipeline states (gitignored)
 ├── audit.jsonl   # Tool call audit log (gitignored)
 ├── latest-session.json  # Session persistence for resume (gitignored)
+├── sessions/     # Structured event logs per session (gitignored)
 ├── proofs/       # Generated test protocols (gitignored)
 └── results/      # Run results (gitignored)
     └── <timestamp>/
@@ -238,7 +259,11 @@ src/
 23. **Graceful Ctrl-C** — two-phase shutdown: first Ctrl-C aborts running SDK queries via `AbortController` and skips pending specs; second Ctrl-C force-exits. Batch summary shows cancelled specs with `--pending` hint
 25. **Prove** — `forge prove` reads specs and the codebase, then generates a structured test protocol (proof) with automated tests, manual checks, visual checks, and edge cases. Output goes to `.forge/proofs/` by default
 26. **Verify** — `forge verify` reads proofs, runs all automated checks via single agent query per proof, collects human-only steps, and creates a single GitHub PR with a results summary table and human verification task list. Completes the pipeline: define -> run -> audit -> prove -> verify
-27. **Nested session guard** — SDK-invoking commands (`run`, `audit`, `define`, `review`, `prove`, `verify`, `specs --check`) are blocked when running inside Claude Code (`CLAUDECODE=1`). Prints the command to copy. Bypass with `FORGE_ALLOW_NESTED=1` (for debugging only — the nested SDK limitation is real)
+27. **Nested session guard** — SDK-invoking commands (`run`, `audit`, `define`, `review`, `prove`, `verify`, `specs --check`, `pipeline`) are blocked when running inside Claude Code (`CLAUDECODE=1`). Prints the command to copy. Bypass with `FORGE_ALLOW_NESTED=1` (for debugging only — the nested SDK limitation is real)
+28. **Pipeline orchestrator** — `forge pipeline` chains define → run → audit → prove → verify into a single automated flow. Gates between stages control advancement: `auto` (proceed immediately), `confirm` (pause for approval), `review` (pause and show artifacts). Default gates: auto through audit, confirm before prove and verify
+29. **Single-writer pipeline** — The pipeline process owns execution and polls for gate changes. TUI and MCP only mutate state (approve/skip gates) — they never spawn child processes. This prevents orphaned processes and race conditions. Pipeline stays alive through gates, polling every 2s for resolution
+30. **Pipeline TUI** — Third tab in `forge tui` shows pipeline stages, gates, costs, durations. Interactive controls: `a` advance gate, `s` skip gate, `p` pause, `c` cancel, `r` retry. All actions write state only — the running pipeline process picks up changes
+31. **Pipeline MCP** — `forge_pipeline` reads current state, `forge_pipeline_start` spawns a new pipeline process (guarded against duplicate spawns per directory)
 
 ## Spec Naming
 

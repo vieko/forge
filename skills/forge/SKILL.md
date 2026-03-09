@@ -12,7 +12,7 @@ description: >-
   or straightforward work in the current repo that doesn't need autonomous agent execution.
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.15.0
+  version: 3.16.0
   author: vieko
 ---
 
@@ -126,6 +126,20 @@ forge prove specs/ -o ./custom-proofs/          # Custom output dir
 forge prove specs/ -C ~/other-repo              # Different repo
 forge prove specs/auth.md "focus on security"   # With additional context
 ```
+
+### forge pipeline
+
+Chains define → run → audit → prove → verify into a single automated flow with observable gates. The pipeline process stays alive and polls for gate changes — TUI/MCP approve gates by writing state, not by spawning processes.
+
+```bash
+forge pipeline "build auth system"                  # Full pipeline
+forge pipeline --from run --spec-dir specs/ "go"    # Start at run with existing specs
+forge pipeline --gate-all confirm "careful build"   # Pause at every gate
+forge pipeline --resume <pipeline-id>               # Resume paused/failed pipeline
+forge pipeline status                               # Show current pipeline state
+```
+
+Gates default to: auto (define→run, run→audit), confirm (audit→prove, prove→verify). TUI controls: `a` advance, `s` skip, `p` pause, `c` cancel.
 
 ### forge watch
 

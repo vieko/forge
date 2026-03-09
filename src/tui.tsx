@@ -6,7 +6,6 @@ import { createRoot, useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { readdir, readFile, stat, open } from 'fs/promises';
 import { join, basename, dirname } from 'path';
-import { fileURLToPath } from 'url';
 import type { ForgeResult, SessionEvent, SpecManifest, SpecEntry, SpecRun } from './types.js';
 import type { Pipeline, Stage, GateKey, PipelineStatus, StageStatus } from './pipeline-types.js';
 import { loadManifest } from './specs.js';
@@ -1739,42 +1738,6 @@ function completedStageBeforeGate(pipeline: Pipeline, gateKey: GateKey): string 
   return parts[0];
 }
 
-/**
- * Strip CLAUDECODE env vars so child processes bypass the nested session guard.
- * Same pattern as mcp.ts stripClaudeEnv().
- */
-function stripClaudeEnvForSpawn(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v === undefined) continue;
-    if (k === 'CLAUDECODE') continue;
-    if (k === 'CLAUDE_CODE_ENTRYPOINT') continue;
-    env[k] = v;
-  }
-  return env;
-}
-
-/** Resolve the forge binary path (same pattern as mcp.ts forgeBin). */
-function forgeBinPath(): string {
-  return join(dirname(fileURLToPath(import.meta.url)), 'index.js');
-}
-
-/** Spawn `forge pipeline --resume <id>` as a detached child process. */
-function spawnPipelineResume(pipelineId: string, cwd: string): boolean {
-  try {
-    const { spawn } = require('child_process');
-    const child = spawn('node', [forgeBinPath(), 'pipeline', '--resume', pipelineId, '-C', cwd, '--quiet'], {
-      cwd,
-      env: stripClaudeEnvForSpawn(),
-      stdio: ['ignore', 'ignore', 'ignore'],
-      detached: true,
-    });
-    child.unref();
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions, onBack, onQuit, onTabSwitch }: {
   pipeline: Pipeline;
@@ -1866,13 +1829,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
     updated.updatedAt = new Date().toISOString();
     await providerRef.current.savePipeline(updated);
     setPipeline(updated);
-
-    // Spawn forge pipeline --resume to continue execution
-    if (spawnPipelineResume(pipeline.id, cwd)) {
-      toast.show(`Gate '${gk}' approved — resuming pipeline`, '#22c55e');
-    } else {
-      toast.show(`Gate '${gk}' approved — failed to spawn resume`, '#eab308');
-    }
+    toast.show(`Gate '${gk}' approved — pipeline will resume`, '#22c55e');
   };
 
   const handleSkipGate = async () => {
@@ -1886,22 +1843,11 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
     const updated = { ...pipeline };
     updated.gates = { ...pipeline.gates };
     updated.gates[gk] = { ...pipeline.gates[gk], status: 'skipped' as const, approvedAt: new Date().toISOString() };
-    // Also skip the target stage
-    const targetName = gk.split(' -> ')[1] as import('./pipeline-types.js').StageName;
-    updated.stages = pipeline.stages.map(s =>
-      s.name === targetName ? { ...s, status: 'skipped' as const } : s
-    );
     updated.status = 'running';
     updated.updatedAt = new Date().toISOString();
     await providerRef.current.savePipeline(updated);
     setPipeline(updated);
-
-    // Spawn forge pipeline --resume to continue past the skipped stage
-    if (spawnPipelineResume(pipeline.id, cwd)) {
-      toast.show(`Gate '${gk}' skipped — resuming pipeline`, '#eab308');
-    } else {
-      toast.show(`Gate '${gk}' skipped — failed to spawn resume`, '#ef4444');
-    }
+    toast.show(`Gate '${gk}' skipped — pipeline will resume`, '#eab308');
   };
 
   const handlePause = async () => {
@@ -1950,25 +1896,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
       toast.show('No failed stage to retry', '#888888');
       return;
     }
-    // Reset failed stage to pending, set pipeline to running
-    const updated = { ...pipeline };
-    updated.status = 'running';
-    updated.updatedAt = new Date().toISOString();
-    updated.completedAt = undefined;
-    updated.stages = pipeline.stages.map(s =>
-      s.status === 'failed'
-        ? { ...s, status: 'pending' as const, error: undefined }
-        : s
-    );
-    await providerRef.current.savePipeline(updated);
-    setPipeline(updated);
-
-    // Spawn forge pipeline --resume as a child process
-    if (spawnPipelineResume(pipeline.id, cwd)) {
-      toast.show(`Retrying from stage '${failedStage.name}'`, '#36b5f0');
-    } else {
-      toast.show('Failed to spawn retry process', '#ef4444');
-    }
+    toast.show(`Retry stage '${failedStage.name}' with: forge pipeline --resume ${pipeline.id}`, '#36b5f0');
   };
 
   // ── Keyboard shortcuts ─────────────────────────────────────

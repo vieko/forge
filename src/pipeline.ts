@@ -24,7 +24,7 @@ import { runForge as realRunForge } from './parallel.js';
 import { runAudit as realRunAudit } from './audit.js';
 import { runProve as realRunProve } from './prove.js';
 import { runVerify as realRunVerify } from './proof-runner.js';
-import { resolveWorkingDir, ForgeError } from './utils.js';
+import { resolveWorkingDir, ForgeError, sleep } from './utils.js';
 import { isInterrupted } from './abort.js';
 import { promises as fs } from 'fs';
 import path from 'path';
@@ -353,6 +353,39 @@ async function executeStage(
   }
 }
 
+// ── Gate Polling ────────────────────────────────────────────
+
+/** How often (ms) to check for gate resolution while paused. */
+const GATE_POLL_INTERVAL_MS = 2_000;
+
+/**
+ * Poll the state file until a gate is resolved (approved or skipped)
+ * or the pipeline is interrupted/cancelled. Returns true if the gate
+ * was resolved, false if interrupted.
+ */
+async function pollForGateResolution(
+  pipelineId: string,
+  gateKey: GateKey,
+  stateProvider: StateProvider,
+): Promise<boolean> {
+  while (true) {
+    if (isInterrupted()) return false;
+    await sleep(GATE_POLL_INTERVAL_MS);
+    if (isInterrupted()) return false;
+
+    const current = await stateProvider.loadPipeline(pipelineId);
+    if (!current) return false;
+
+    const gate = current.gates[gateKey];
+    if (gate.status === 'approved' || gate.status === 'skipped') {
+      return true;
+    }
+
+    // Pipeline was cancelled externally (e.g. TUI cancel action)
+    if (current.status === 'cancelled') return false;
+  }
+}
+
 // ── Core Orchestration Loop ──────────────────────────────────
 
 /**
@@ -470,8 +503,8 @@ export async function runPipeline(
       const gate = pipeline.gates[key];
 
       if (gate && (gate.type === 'confirm' || gate.type === 'review')) {
-        if (gate.status !== 'approved') {
-          // Non-auto gate not yet approved -- pause the pipeline
+        if (gate.status !== 'approved' && gate.status !== 'skipped') {
+          // Non-auto gate not yet resolved -- pause and poll
           gate.status = 'waiting';
           pipeline.status = 'paused_at_gate';
           pipeline.updatedAt = new Date().toISOString();
@@ -485,7 +518,48 @@ export async function runPipeline(
             gateType: gate.type,
           });
 
-          return pipeline;
+          // ── Poll for gate resolution (single-writer model) ──
+          // The pipeline process stays alive and polls the state
+          // file for gate changes made by TUI or MCP. This avoids
+          // needing external processes to spawn --resume.
+          const resolved = await pollForGateResolution(
+            pipeline.id, key, stateProvider,
+          );
+
+          if (!resolved) {
+            // Interrupted while waiting — cancel
+            cancelPipeline(pipeline, stageName);
+            await stateProvider.savePipeline(pipeline);
+            await events.publish({
+              type: 'pipeline_cancelled',
+              pipelineId: pipeline.id,
+              timestamp: new Date().toISOString(),
+              stage: stageName,
+            });
+            return pipeline;
+          }
+
+          // Reload full pipeline state (TUI/MCP may have mutated other fields)
+          const reloaded = await stateProvider.loadPipeline(pipeline.id);
+          if (!reloaded) {
+            throw new ForgeError(`Pipeline ${pipeline.id} disappeared during gate wait`);
+          }
+          pipeline = reloaded;
+
+          // If gate was skipped, also skip the target stage
+          const resolvedGate = pipeline.gates[key];
+          if (resolvedGate.status === 'skipped') {
+            const stage = findStage(pipeline, stageName);
+            stage.status = 'skipped';
+            pipeline.updatedAt = new Date().toISOString();
+            await stateProvider.savePipeline(pipeline);
+            continue; // Move to next stage
+          }
+
+          // Gate approved — mark pipeline running and continue
+          pipeline.status = 'running';
+          pipeline.updatedAt = new Date().toISOString();
+          await stateProvider.savePipeline(pipeline);
         }
       }
       // auto gate: advance immediately (no action needed)

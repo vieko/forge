@@ -755,6 +755,23 @@ server.registerTool('forge_pipeline_start', {
     const taskId = crypto.randomBytes(8).toString('hex');
     const workingDir = path.resolve(cwd);
 
+    // Guard: check if a pipeline process is already running for this repo
+    for (const [, task] of tasks) {
+      if (task.command === 'forge pipeline' && task.cwd === workingDir && task.status === 'running') {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              error: 'A pipeline is already running for this directory',
+              task_id: task.id,
+              hint: 'Use forge_pipeline to check state or forge_task to poll the existing run.',
+            }),
+          }],
+          isError: true,
+        };
+      }
+    }
+
     // Build CLI arguments: forge pipeline "<goal>"
     const args: string[] = [forgeBin(), 'pipeline', goal];
 

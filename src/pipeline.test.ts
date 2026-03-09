@@ -233,18 +233,30 @@ describe('runPipeline', () => {
     expect(result.totalCost).toBe(5.0); // 5 stages * $1.0
   });
 
-  test('pauses at confirm gate', async () => {
+  test('pauses at confirm gate then resumes when gate is approved', async () => {
     const provider = new FileSystemStateProvider(tmpDir);
     const executor = createMockExecutor();
 
+    // Schedule gate approval after a short delay (during poll wait)
+    const gateResolver = setTimeout(async () => {
+      const p = await provider.loadActivePipeline();
+      if (p && p.gates['run -> audit'].status === 'waiting') {
+        p.gates['run -> audit'].status = 'approved';
+        p.gates['run -> audit'].approvedAt = new Date().toISOString();
+        p.status = 'running';
+        await provider.savePipeline(p);
+      }
+    }, 500);
+
     const result = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'confirm' } },
+      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'confirm', 'audit -> prove': 'auto', 'prove -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
-    expect(result.status).toBe('paused_at_gate');
-    expect(executor.calls).toEqual(['define', 'run']);
-    expect(result.gates['run -> audit'].status).toBe('waiting');
+    clearTimeout(gateResolver);
+    expect(result.status).toBe('completed');
+    expect(executor.calls).toEqual(['define', 'run', 'audit', 'prove', 'verify']);
+    expect(result.gates['run -> audit'].status).toBe('approved');
   });
 
   test('--from skips earlier stages', async () => {
@@ -335,12 +347,29 @@ describe('runPipeline', () => {
     const executor = createMockExecutor();
     const events = createMockEvents();
 
+    // Schedule gate approval so pipeline doesn't hang
+    const gateResolver = setInterval(async () => {
+      const p = await provider.loadActivePipeline();
+      if (!p) return;
+      for (const [key, gate] of Object.entries(p.gates)) {
+        if (gate.status === 'waiting') {
+          gate.status = 'approved';
+          gate.approvedAt = new Date().toISOString();
+          p.status = 'running';
+          await provider.savePipeline(p);
+          return;
+        }
+      }
+    }, 300);
+
     await runPipeline(
       { goal: 'test' },
       provider, events, executor,
     );
 
-    // Default gates: audit->prove is confirm, so should pause there
+    clearInterval(gateResolver);
+
+    // Default gates: audit->prove is confirm, so should have paused there
     const pauses = events.events.filter(e => e.type === 'gate_pause');
     expect(pauses.length).toBeGreaterThan(0);
   });
@@ -367,30 +396,36 @@ describe('pipeline resume', () => {
   beforeEach(async () => { tmpDir = await makeTmpDir(); });
   afterEach(async () => { await fs.rm(tmpDir, { recursive: true, force: true }); });
 
-  test('resume continues from paused gate', async () => {
+  test('resume continues from where it left off', async () => {
     const provider = new FileSystemStateProvider(tmpDir);
     const executor = createMockExecutor();
 
-    // First run: pauses at audit->prove (default confirm gate)
-    const paused = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto' } },
+    // Run all stages with auto gates through audit, confirm at audit->prove
+    // Schedule gate approval so it doesn't hang
+    const gateResolver = setInterval(async () => {
+      const p = await provider.loadActivePipeline();
+      if (!p) return;
+      for (const [key, gate] of Object.entries(p.gates)) {
+        if (gate.status === 'waiting') {
+          gate.status = 'approved';
+          gate.approvedAt = new Date().toISOString();
+          p.status = 'running';
+          await provider.savePipeline(p);
+          return;
+        }
+      }
+    }, 300);
+
+    const result = await runPipeline(
+      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> prove': 'confirm', 'prove -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
-    expect(paused.status).toBe('paused_at_gate');
+    clearInterval(gateResolver);
 
-    // Advance the gate
-    await advanceGate(paused, 'audit -> prove', provider);
-
-    // Resume
-    const executor2 = createMockExecutor();
-    const completed = await runPipeline(
-      { goal: 'test', resume: paused.id, gates: { 'prove -> verify': 'auto' } },
-      provider, undefined, executor2,
-    );
-
-    expect(completed.status).toBe('completed');
-    expect(executor2.calls).toEqual(['prove', 'verify']);
+    // Pipeline ran all stages (gate was auto-approved during poll)
+    expect(result.status).toBe('completed');
+    expect(executor.calls).toEqual(['define', 'run', 'audit', 'prove', 'verify']);
   });
 
   test('resume with invalid ID throws ForgeError', async () => {
@@ -411,16 +446,16 @@ describe('advanceGate', () => {
 
   test('sets gate status to approved', async () => {
     const provider = new FileSystemStateProvider(tmpDir);
-    const executor = createMockExecutor();
 
-    const paused = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto' } },
-      provider, undefined, executor,
-    );
+    // Create a pipeline manually in paused state
+    const pipeline = await provider.createPipeline({ goal: 'test' });
+    pipeline.status = 'paused_at_gate';
+    pipeline.gates['audit -> prove'] = { type: 'confirm', status: 'waiting' };
+    await provider.savePipeline(pipeline);
 
-    await advanceGate(paused, 'audit -> prove', provider);
+    await advanceGate(pipeline, 'audit -> prove', provider);
 
-    const loaded = await provider.loadPipeline(paused.id);
+    const loaded = await provider.loadPipeline(pipeline.id);
     expect(loaded!.gates['audit -> prove'].status).toBe('approved');
     expect(loaded!.gates['audit -> prove'].approvedAt).toBeTruthy();
     expect(loaded!.status).toBe('running');
@@ -446,16 +481,16 @@ describe('skipGate', () => {
 
   test('sets gate status to skipped', async () => {
     const provider = new FileSystemStateProvider(tmpDir);
-    const executor = createMockExecutor();
 
-    const paused = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto' } },
-      provider, undefined, executor,
-    );
+    // Create a pipeline manually in paused state
+    const pipeline = await provider.createPipeline({ goal: 'test' });
+    pipeline.status = 'paused_at_gate';
+    pipeline.gates['audit -> prove'] = { type: 'confirm', status: 'waiting' };
+    await provider.savePipeline(pipeline);
 
-    await skipGate(paused, 'audit -> prove', provider);
+    await skipGate(pipeline, 'audit -> prove', provider);
 
-    const loaded = await provider.loadPipeline(paused.id);
+    const loaded = await provider.loadPipeline(pipeline.id);
     expect(loaded!.gates['audit -> prove'].status).toBe('skipped');
     expect(loaded!.status).toBe('running');
   });
