@@ -225,7 +225,7 @@ src/
 ├── audit.jsonl   # Tool call audit log (gitignored)
 ├── latest-session.json  # Session persistence for resume (gitignored)
 ├── sessions/     # Structured event logs per session (gitignored)
-├── proofs/       # Generated test protocols (gitignored)
+├── proofs/       # Generated test protocols (gitignored, pipeline-scoped: proofs/{pipeline-id}/)
 └── results/      # Run results (gitignored)
     └── <timestamp>/
         ├── summary.json  # Structured metadata (includes runId)
@@ -263,7 +263,10 @@ src/
 28. **Pipeline orchestrator** — `forge pipeline` chains define → run → audit → prove → verify into a single automated flow. Gates between stages control advancement: `auto` (proceed immediately), `confirm` (pause for approval), `review` (pause and show artifacts). Default gates: auto through audit, confirm before prove and verify
 29. **Single-writer pipeline** — The pipeline process owns execution and polls for gate changes. TUI and MCP only mutate state (approve/skip gates) — they never spawn child processes. This prevents orphaned processes and race conditions. Pipeline stays alive through gates, polling every 2s for resolution
 30. **Pipeline TUI** — Third tab in `forge tui` shows pipeline stages, gates, costs, durations. Interactive controls: `a` advance gate, `s` skip gate, `p` pause, `c` cancel, `r` retry. All actions write state only — the running pipeline process picks up changes
-31. **Pipeline MCP** — `forge_pipeline` reads current state, `forge_pipeline_start` spawns a new pipeline process (guarded against duplicate spawns per directory)
+31. **Pipeline MCP** — `forge_pipeline` reads current state, `forge_pipeline_start` spawns a new pipeline process (PID liveness check prevents stale tasks from blocking new spawns)
+32. **TUI spec run** — Press `r` on a pending/failed spec in the Specs tab to spawn a detached `forge run --spec <path>`. Guards on status, strips Claude env vars, toast feedback
+33. **TUI pipeline start** — Press `n` in the Pipeline tab to start a new pipeline. Guards against active pipeline (running/paused_at_gate), spawns detached process, toast feedback
+34. **Scoped pipeline proofs** — Pipeline prove writes to `.forge/proofs/{pipeline-id}/` so verify only processes proofs from the current pipeline, not stale proofs from previous runs
 
 ## Spec Naming
 

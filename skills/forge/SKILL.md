@@ -12,7 +12,7 @@ description: >-
   or straightforward work in the current repo that doesn't need autonomous agent execution.
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.16.0
+  version: 3.17.0
   author: vieko
 ---
 
