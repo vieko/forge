@@ -276,7 +276,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
         throw new Error('prove stage requires specDir artifact');
       }
       const resolvedSpecDir = path.resolve(cwd, specDir);
-      const proofDir = path.join(cwd, '.forge', 'proofs');
+      const proofDir = path.join(cwd, '.forge', 'proofs', pipeline.id);
 
       const before = Date.now();
 

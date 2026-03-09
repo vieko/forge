@@ -758,6 +758,16 @@ server.registerTool('forge_pipeline_start', {
     // Guard: check if a pipeline process is already running for this repo
     for (const [, task] of tasks) {
       if (task.command === 'forge pipeline' && task.cwd === workingDir && task.status === 'running') {
+        // Verify the process is actually alive (may have been killed externally)
+        let alive = false;
+        if (task.pid) {
+          try { process.kill(task.pid, 0); alive = true; } catch { /* process dead */ }
+        }
+        if (!alive) {
+          task.status = 'failed';
+          task.completedAt = Date.now();
+          continue;
+        }
         return {
           content: [{
             type: 'text' as const,
