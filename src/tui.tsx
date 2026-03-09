@@ -7,7 +7,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { readdir, readFile, stat, open } from 'fs/promises';
 import { join, basename, dirname } from 'path';
 import type { ForgeResult, SessionEvent, SpecManifest, SpecEntry, SpecRun } from './types.js';
-import type { Pipeline, Stage, GateKey, PipelineStatus, StageStatus } from './pipeline-types.js';
+import type { Pipeline, Stage, GateKey, PipelineStatus, StageStatus, StageName } from './pipeline-types.js';
 import { loadManifest } from './specs.js';
 import { FileSystemStateProvider } from './pipeline-state.js';
 
@@ -1116,6 +1116,7 @@ function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
   const [manifest, setManifest] = useState<SpecManifest | null>(null);
   const { width } = useTerminalDimensions();
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const toast = useToast();
 
   // Load manifest and re-poll every 5 seconds
   useEffect(() => {
@@ -1217,6 +1218,33 @@ function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
       if (dispIdx !== undefined && displayRows[dispIdx] && !groupHeaderIndices.has(dispIdx)) {
         onSelect(displayRows[dispIdx].entry, selectedIndex);
       }
+    } else if (key.name === 'r') {
+      const dispIdx = selectableIndices[selectedIndex];
+      if (dispIdx === undefined || !displayRows[dispIdx] || groupHeaderIndices.has(dispIdx)) return;
+      const entry = displayRows[dispIdx].entry;
+      if (entry.status !== 'pending' && entry.status !== 'failed') {
+        toast.show('Spec is not pending or failed', '#888888');
+        return;
+      }
+      try {
+        const { spawn } = require('child_process');
+        const forgeBin = join(dirname(require.resolve('./index.js')), 'index.js');
+        const env: Record<string, string> = {};
+        for (const [k, v] of Object.entries(process.env)) {
+          if (v !== undefined && k !== 'CLAUDECODE' && k !== 'CLAUDE_CODE_ENTRYPOINT') env[k] = v;
+        }
+        const child = spawn('node', [forgeBin, 'run', '--spec', entry.spec, '-C', cwd, '--quiet'], {
+          cwd,
+          env,
+          stdio: ['ignore', 'ignore', 'ignore'],
+          detached: true,
+        });
+        child.unref();
+        const filename = entry.spec.split('/').pop() ?? entry.spec;
+        toast.show(`Running spec: ${filename}`, '#36b5f0');
+      } catch {
+        toast.show(`Spawn failed -- run: forge run --spec ${entry.spec}`, '#ef4444');
+      }
     }
   });
 
@@ -1270,8 +1298,10 @@ function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
       </scrollbox>
 
       <box style={{ paddingLeft: 1, flexShrink: 0 }}>
-        <text fg="#555555">[j/k] navigate  [enter] view  [tab] next tab  [q] quit</text>
+        <text fg="#555555">[j/k] navigate  [enter] view  [r] run  [tab] next tab  [q] quit</text>
       </box>
+
+      <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
     </box>
   );
 }
@@ -1619,6 +1649,7 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
   const { width } = useTerminalDimensions();
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   const providerRef = useRef(new FileSystemStateProvider(cwd));
+  const toast = useToast();
 
   // Load pipelines and poll every 2 seconds if any are running/paused
   useEffect(() => {
@@ -1657,6 +1688,35 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
     }
   }, [selectedIndex]);
 
+  const handleNewPipeline = async () => {
+    // Guard: check for already-active pipeline
+    const all = await providerRef.current.listPipelines();
+    const active = all.some(p => p.status === 'running' || p.status === 'paused_at_gate');
+    if (active) {
+      toast.show('Pipeline already active', '#888888');
+      return;
+    }
+
+    try {
+      const { spawn } = require('child_process');
+      const forgeBin = join(dirname(require.resolve('./index.js')), 'index.js');
+      const env: Record<string, string> = {};
+      for (const [k, v] of Object.entries(process.env)) {
+        if (v !== undefined && k !== 'CLAUDECODE' && k !== 'CLAUDE_CODE_ENTRYPOINT') env[k] = v;
+      }
+      const child = spawn('node', [forgeBin, 'pipeline', 'implement pending specs', '-C', cwd, '--quiet'], {
+        cwd,
+        env,
+        stdio: ['ignore', 'ignore', 'ignore'],
+        detached: true,
+      });
+      child.unref();
+      toast.show('Pipeline started', '#36b5f0');
+    } catch {
+      toast.show('Spawn failed -- run: forge pipeline', '#ef4444');
+    }
+  };
+
   useKeyboard((key) => {
     if (key.name === 'q') { onQuit(); return; }
     if (key.name === 'tab') { onTabSwitch(selectedIndex); return; }
@@ -1668,6 +1728,8 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
       if (pipelines.length > 0 && pipelines[selectedIndex]) {
         onSelect(pipelines[selectedIndex], selectedIndex);
       }
+    } else if (key.name === 'n') {
+      handleNewPipeline();
     }
   });
 
@@ -1679,9 +1741,10 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
       <box flexDirection="column" style={{ padding: 1 }}>
         <text fg="#888888">No pipelines found in {cwd}/.forge/pipelines/</text>
         <text> </text>
-        <text fg="#555555">Start a pipeline to see it here.</text>
+        <text fg="#555555">Press [n] to start a new pipeline.</text>
         <text> </text>
-        <text fg="#555555">[tab] next tab  [q] quit</text>
+        <text fg="#555555">[n] new  [tab] next tab  [q] quit</text>
+        <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
       </box>
     );
   }
@@ -1710,21 +1773,28 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
       </scrollbox>
 
       <box style={{ paddingLeft: 1, flexShrink: 0 }}>
-        <text fg="#555555">[j/k] navigate  [enter] view  [tab] next tab  [q] quit</text>
+        <text fg="#555555">[j/k] navigate  [enter] view  [n] new  [tab] next tab  [q] quit</text>
       </box>
+      <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
     </box>
   );
 }
 
 /**
  * Find the GateKey that the pipeline is currently paused at.
+ * Finds the gate before the first actionable stage (pending/running/failed),
+ * not just the first waiting gate in declaration order.
  * Returns null if not paused or no waiting gate.
  */
 function findWaitingGateKey(pipeline: Pipeline): GateKey | null {
   if (pipeline.status !== 'paused_at_gate') return null;
-  const gateKeys: GateKey[] = ['define -> run', 'run -> audit', 'audit -> prove', 'prove -> verify'];
-  for (const key of gateKeys) {
-    if (pipeline.gates[key].status === 'waiting') return key;
+  const stageOrder: StageName[] = ['define', 'run', 'audit', 'prove', 'verify'];
+  for (let i = 1; i < stageOrder.length; i++) {
+    const stage = pipeline.stages.find(s => s.name === stageOrder[i]);
+    if (stage && stage.status !== 'completed' && stage.status !== 'skipped') {
+      const key = `${stageOrder[i - 1]} -> ${stageOrder[i]}` as GateKey;
+      if (pipeline.gates[key]?.status === 'waiting') return key;
+    }
   }
   return null;
 }
