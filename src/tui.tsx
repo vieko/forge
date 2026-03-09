@@ -1896,7 +1896,41 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
       toast.show('No failed stage to retry', '#888888');
       return;
     }
-    toast.show(`Retry stage '${failedStage.name}' with: forge pipeline --resume ${pipeline.id}`, '#36b5f0');
+    const confirmed = await dialog.ask(`Retry pipeline from stage '${failedStage.name}'?`);
+    if (!confirmed) return;
+
+    // Reset failed stage to pending
+    const updated = { ...pipeline };
+    updated.status = 'running';
+    updated.updatedAt = new Date().toISOString();
+    updated.completedAt = undefined;
+    updated.stages = pipeline.stages.map(s =>
+      s.status === 'failed'
+        ? { ...s, status: 'pending' as const, error: undefined }
+        : s
+    );
+    await providerRef.current.savePipeline(updated);
+    setPipeline(updated);
+
+    // Safe to spawn: pipeline was failed, no process is running
+    try {
+      const { spawn } = require('child_process');
+      const forgeBin = join(dirname(require.resolve('./index.js')), 'index.js');
+      const env: Record<string, string> = {};
+      for (const [k, v] of Object.entries(process.env)) {
+        if (v !== undefined && k !== 'CLAUDECODE' && k !== 'CLAUDE_CODE_ENTRYPOINT') env[k] = v;
+      }
+      const child = spawn('node', [forgeBin, 'pipeline', '--resume', pipeline.id, '-C', cwd, '--quiet'], {
+        cwd,
+        env,
+        stdio: ['ignore', 'ignore', 'ignore'],
+        detached: true,
+      });
+      child.unref();
+      toast.show(`Retrying from stage '${failedStage.name}'`, '#36b5f0');
+    } catch {
+      toast.show(`Retry failed to spawn — run: forge pipeline --resume ${pipeline.id}`, '#ef4444');
+    }
   };
 
   // ── Keyboard shortcuts ─────────────────────────────────────
