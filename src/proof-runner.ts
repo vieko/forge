@@ -2,9 +2,9 @@ import type { VerifyOptions, VerifyResult, ForgeResult, ProofManifest } from './
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
-import { resolveWorkingDir, saveResult, execAsync } from './utils.js';
+import { resolveWorkingDir, resolveConfig, saveResult, execAsync } from './utils.js';
 import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js';
-import { isInterrupted } from './abort.js';
+import { runQuery } from './core.js';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -206,8 +206,8 @@ export async function createVerifyPR(
 
 /**
  * Run test files discovered from the proof manifest against the codebase.
- * Each test file is executed directly via the project's test runner
- * (bun test, vitest, jest, or npm test). No agent SDK call is used.
+ * Uses an Agent SDK query for full observability — sessions, events,
+ * TUI drill-down, and live streaming all work.
  */
 export async function runVerify(options: VerifyOptions): Promise<void> {
   const { proofDir, quiet = false } = options;
@@ -235,9 +235,31 @@ export async function runVerify(options: VerifyOptions): Promise<void> {
   // Detect test runner
   const testRunner = await detectTestRunner(workingDir);
 
+  // Resolve config
+  const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd } =
+    await resolveConfig(workingDir, {
+      model: options.model,
+      maxTurns: options.maxTurns,
+      maxBudgetUsd: options.maxBudgetUsd,
+      defaultModel: 'sonnet',
+      defaultMaxTurns: 100,
+      defaultMaxBudgetUsd: 5.00,
+    });
+
+  // Build test file list for the prompt
+  const testFileList = manifest.entries.map(entry => {
+    const testPath = path.isAbsolute(entry.testFile) ? entry.testFile : path.join(resolvedProofDir, entry.testFile);
+    return `- ${testPath} (spec: ${entry.specFile})`;
+  }).join('\n');
+
+  const humanStepsSection = humanSteps.length > 0
+    ? `\n## Manual verification steps (from manual.md)\n\n${humanSteps.map(s => `- ${s}`).join('\n')}\n`
+    : '';
+
   if (!quiet) {
     console.log(`${DIM}Tests:${RESET}       ${manifest.entries.length} file(s) from ${DIM}${resolvedProofDir}/manifest.json${RESET}`);
     console.log(`${DIM}Runner:${RESET}      ${testRunner}`);
+    console.log(`${DIM}Model:${RESET}       ${effectiveModel}`);
     console.log(`${DIM}Working dir:${RESET} ${workingDir}`);
     if (humanSteps.length > 0) {
       console.log(`${DIM}Manual:${RESET}      ${humanSteps.length} step(s) from manual.md`);
@@ -271,150 +293,83 @@ export async function runVerify(options: VerifyOptions): Promise<void> {
     return;
   }
 
-  // Execute each test file
-  const results: VerifyResult[] = [];
-  let totalDuration = 0;
+  // Construct the verify prompt for the agent
+  const verifyPrompt = `## Outcome
 
-  for (let i = 0; i < manifest.entries.length; i++) {
-    // Check for Ctrl-C between tests
-    if (isInterrupted()) {
-      if (!quiet) {
-        console.log(`\n${DIM}[forge]${RESET} Interrupted -- skipping remaining tests\n`);
-      }
-      break;
-    }
+Run every test file listed below, fix any failures, then create a GitHub PR with the results.
 
-    const entry = manifest.entries[i];
-    const testPath = path.isAbsolute(entry.testFile) ? entry.testFile : path.join(resolvedProofDir, entry.testFile);
+## Test files
 
-    if (!quiet && manifest.entries.length > 1) {
-      console.log(`${DIM}[forge]${RESET} Running ${BOLD}${i + 1}/${manifest.entries.length}${RESET}: ${entry.testFile}\n`);
-    }
+Test runner: ${testRunner}
 
-    // Check if test file exists
-    try {
-      await fs.access(testPath);
-    } catch {
-      if (!quiet) {
-        console.log(`${DIM}[forge]${RESET} Test file not found: ${entry.testFile} -- skipping\n`);
-      }
-      results.push({
-        testFile: entry.testFile,
-        status: 'skipped',
-        exitCode: -1,
-        stderr: `Test file not found: ${testPath}`,
-      });
-      continue;
-    }
+${testFileList}
+${humanStepsSection}
+## Instructions
 
-    const cmd = `${testRunner} ${testPath}`;
-    const startTime = Date.now();
+1. **Run each test file** using \`${testRunner} <path>\`. Run them one at a time.
+2. **If a test fails**, read the test file and the source it tests, diagnose the failure, and fix it. Then re-run the test to confirm the fix. You may fix test files or source files — use your judgment. Do not delete or skip tests.
+3. **After all tests pass**, create a GitHub PR:
+   - Use \`gh pr create\`
+   - Title: "Verify: ${path.basename(resolvedProofDir)}"
+   - Body: include a results table (file, status, duration) and any manual verification steps as a checklist
+4. **Final output**: after the PR is created, end with exactly this format:
 
-    try {
-      await execAsync(cmd, { cwd: workingDir });
+\`\`\`
+--- VERIFY SUMMARY ---
+PR: <url>
+Title: <pr title>
+Description: <one sentence — what does this PR bring to the table?>
+---
+\`\`\`
 
-      const durationSeconds = (Date.now() - startTime) / 1000;
-      totalDuration += durationSeconds;
+## Constraints
 
-      results.push({
-        testFile: entry.testFile,
-        status: 'pass',
-        exitCode: 0,
-        stderr: '',
-        durationSeconds,
-      });
+- Do not use emojis in your output
+- Run tests from the working directory: ${workingDir}
+- If \`gh\` is not available or PR creation fails, still report test results
+- Do not skip or delete test files — fix failures instead
+- Do not modify test files to make them trivially pass (e.g. deleting assertions)`;
 
-      if (!quiet) {
-        console.log(`    \x1b[32m+\x1b[0m ${entry.testFile}  ${DIM}(${durationSeconds.toFixed(1)}s)${RESET}\n`);
-      }
-    } catch (err: unknown) {
-      const durationSeconds = (Date.now() - startTime) / 1000;
-      totalDuration += durationSeconds;
+  const startTime = new Date();
 
-      // Extract exit code and stderr from exec error
-      const execErr = err as { code?: number; stderr?: string; message?: string };
-      const exitCode = execErr.code ?? 1;
-      const stderr = execErr.stderr ?? execErr.message ?? String(err);
+  const qr = await runQuery({
+    prompt: verifyPrompt,
+    workingDir,
+    model: effectiveModel,
+    maxTurns: effectiveMaxTurns,
+    maxBudgetUsd: effectiveMaxBudgetUsd,
+    verbose: false,
+    quiet,
+    silent: false,
+    auditLogExtra: { type: 'verify', spec: path.basename(resolvedProofDir) },
+  });
 
-      results.push({
-        testFile: entry.testFile,
-        status: 'fail',
-        exitCode,
-        stderr,
-        durationSeconds,
-      });
+  const completedAt = new Date();
+  const durationSeconds = (completedAt.getTime() - startTime.getTime()) / 1000;
 
-      if (!quiet) {
-        console.log(`    \x1b[31mx\x1b[0m ${entry.testFile}  ${DIM}(${durationSeconds.toFixed(1)}s)${RESET}`);
-        // Show first few lines of stderr
-        const stderrLines = stderr.split('\n').filter((l: string) => l.trim()).slice(0, 5);
-        if (stderrLines.length > 0) {
-          for (const line of stderrLines) {
-            console.log(`      ${DIM}${line}${RESET}`);
-          }
-        }
-        console.log('');
-      }
-    }
-  }
-
-  // Save ForgeResult to .forge/results/
-  const startedAt = new Date(Date.now() - totalDuration * 1000).toISOString();
-  const completedAt = new Date().toISOString();
-  const passed = results.filter(r => r.status === 'pass').length;
-  const failed = results.filter(r => r.status === 'fail').length;
-
+  // Save ForgeResult
   const forgeResult: ForgeResult = {
-    startedAt,
-    completedAt,
-    durationSeconds: totalDuration,
-    status: failed > 0 ? 'error_execution' : 'success',
+    startedAt: startTime.toISOString(),
+    completedAt: completedAt.toISOString(),
+    durationSeconds,
+    status: 'success',
     specPath: resolvedProofDir,
     prompt: '(verify)',
-    model: 'local',
+    model: effectiveModel,
     cwd: workingDir,
     type: 'verify',
+    costUsd: qr.costUsd,
+    numTurns: qr.numTurns,
+    logPath: qr.logPath,
   };
 
-  const resultText = results
-    .map(r => `${r.status === 'pass' ? '[PASS]' : r.status === 'fail' ? '[FAIL]' : '[SKIP]'} ${r.testFile}${r.stderr ? ': ' + r.stderr.split('\n')[0] : ''}`)
-    .join('\n');
-
-  await saveResult(workingDir, forgeResult, resultText);
+  await saveResult(workingDir, forgeResult, qr.resultText);
 
   // Print summary
   if (!quiet) {
-    printRunSummary({ durationSeconds: totalDuration });
-
-    const skipped = results.filter(r => r.status === 'skipped').length;
-
-    console.log(`\n  ${BOLD}Results:${RESET} ${passed} passed, ${failed} failed${skipped > 0 ? `, ${skipped} skipped` : ''}\n`);
-
-    // Per-file breakdown
-    for (const r of results) {
-      const icon = r.status === 'pass' ? '+' : r.status === 'fail' ? 'x' : '-';
-      const color = r.status === 'pass' ? '\x1b[32m' : r.status === 'fail' ? '\x1b[31m' : '\x1b[33m';
-      const duration = r.durationSeconds !== undefined ? `${r.durationSeconds.toFixed(1)}s` : '';
-      console.log(`    ${color}${icon}${RESET} ${r.testFile}  ${DIM}${duration}${RESET}`);
-    }
-
-    // Human steps summary
-    if (humanSteps.length > 0) {
-      console.log(`\n  ${DIM}${humanSteps.length} manual verification step(s) require human review (see manual.md)${RESET}`);
-    }
-
-    // Next-step hint
-    if (failed > 0) {
-      console.log(`\n  ${DIM}Next step: fix failures and re-run${RESET} ${DIM}${CMD}forge verify ${proofDir}${RESET}`);
-    } else {
-      console.log(`\n  ${DIM}Next step: review manual checks in manual.md, or create PR${RESET}`);
-    }
-    console.log('');
+    printRunSummary({
+      durationSeconds,
+      costUsd: qr.costUsd,
+    });
   }
-
-  // Create GitHub PR with combined results
-  await createVerifyPR(resolvedProofDir, results, humanSteps, workingDir, {
-    dryRun: options.dryRun,
-    quiet,
-  });
 }

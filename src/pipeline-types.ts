@@ -223,7 +223,7 @@ export const DEFAULT_GATES: Record<GateKey, GateType> = {
   'define -> run': 'auto',
   'run -> audit': 'auto',
   'audit -> proof': 'confirm',
-  'proof -> verify': 'confirm',
+  'proof -> verify': 'auto',
 };
 
 // ── Provider Interfaces ──────────────────────────────────────

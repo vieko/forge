@@ -158,7 +158,7 @@ forge watch -C ~/other-repo     # Different repo
 ## Architecture
 
 ```
-~12750 lines (source) + ~6165 lines (tests)
+~14200 lines (source) + ~11750 lines (tests)
 
 User Prompt
     ↓
@@ -198,13 +198,14 @@ src/
 ├── review.ts      # runReview
 ├── status.ts        # showStatus
 ├── stats.ts         # showStats (aggregate run statistics)
-├── proof-runner.ts   # forge verify (proof parser, check runner, PR creation)
+├── proof-runner.ts   # forge verify (SDK agent: runs tests, fixes failures, creates PR)
 ├── pipeline.ts      # Pipeline orchestrator (stage loop, gate polling, single-writer model)
 ├── pipeline-state.ts # FileSystemStateProvider (CRUD for pipeline.json, file locking)
 ├── pipeline-types.ts # Pipeline, Stage, Gate, PipelineEvent types, provider interfaces
 ├── pipeline-status.ts # CLI display for pipeline status
-├── mcp.ts           # MCP server (8 tools, stdio transport, async task spawn)
-├── tui.tsx          # OpenTUI React TUI (sessions, specs, pipeline tabs)
+├── mcp.ts           # MCP server (8 tools, stdio transport, async task spawn, pipeline-aware forge_task)
+├── tui.tsx          # OpenTUI React TUI (sessions, specs, pipeline tabs, fs.watch live updates)
+├── file-watcher.ts  # Core createFileWatcher(): debounced fs.watch, fallback polling, error recovery, dispose API
 ├── types.ts         # TypeScript types (ForgeResult, SpecManifest, SpecEntry, SpecRun, DefineOptions, MonorepoContext)
 ├── query.test.ts    # Tests for core utilities
 ├── deps.test.ts     # Tests for dependency + parseSource
@@ -216,7 +217,7 @@ src/
 ├── stats.test.ts    # Tests for stats aggregation
 ├── pipeline.test.ts # Tests for pipeline orchestrator (state, gates, resume, artifacts)
 ├── mcp.test.ts      # Tests for MCP server (protocol-level via stdio client)
-└── types.test.ts    # Type validation tests
+└── + 11 proof-generated test files (775 tests total)
 
 .forge/
 ├── .gitignore    # Auto-created: tracks specs.json + pipeline.json
@@ -259,15 +260,18 @@ src/
 22. **Stats** — `forge stats` aggregates across all runs: total cost, success rate, avg duration. `--by-spec` and `--by-model` breakdowns, `--since` date filter
 23. **Graceful Ctrl-C** — two-phase shutdown: first Ctrl-C aborts running SDK queries via `AbortController` and skips pending specs; second Ctrl-C force-exits. Batch summary shows cancelled specs with `--pending` hint
 25. **Proof** — `forge proof` reads specs and the codebase, then generates real `.test.ts` files colocated with source (or in the project's test directory), a `manual.md` human checklist, and a `manifest.json` mapping specs to tests. Auto-detects test convention (colocated vs separate) and test framework (bun/vitest/jest). Supports multiple spec paths: `forge proof a.md b.md c.md`. `forge prove` is a backward-compatible alias.
-26. **Verify** — `forge verify` reads proofs, runs all automated checks via single agent query per proof, collects human-only steps, and creates a single GitHub PR with a results summary table and human verification task list. Completes the pipeline: define -> run -> audit -> proof -> verify
+26. **Verify** — `forge verify` uses an Agent SDK query to run test files from the proof manifest, fix any failures, and create a GitHub PR. Full observability: sessions, events.jsonl, TUI drill-down, `forge watch` streaming. Agent ends with a summary: PR URL, title, and one-sentence description. Completes the pipeline: define -> run -> audit -> proof -> verify
 27. **Nested session guard** — SDK-invoking commands (`run`, `audit`, `define`, `review`, `proof`, `verify`, `specs --check`, `pipeline`) are blocked when running inside Claude Code (`CLAUDECODE=1`). Prints the command to copy. Bypass with `FORGE_ALLOW_NESTED=1` (for debugging only — the nested SDK limitation is real)
-28. **Pipeline orchestrator** — `forge pipeline` chains define → run → audit → proof → verify into a single automated flow. Gates between stages control advancement: `auto` (proceed immediately), `confirm` (pause for approval), `review` (pause and show artifacts). Default gates: auto through audit, confirm before proof and verify
+28. **Pipeline orchestrator** — `forge pipeline` chains define → run → audit → proof → verify into a single automated flow. Gates between stages control advancement: `auto` (proceed immediately), `confirm` (pause for approval), `review` (pause and show artifacts). Default gates: all auto except audit→proof (confirm)
 29. **Single-writer pipeline** — The pipeline process owns execution and polls for gate changes. TUI and MCP only mutate state (approve/skip gates) — they never spawn child processes. This prevents orphaned processes and race conditions. Pipeline stays alive through gates, polling every 2s for resolution
 30. **Pipeline TUI** — Third tab in `forge tui` shows pipeline stages, gates, costs, durations. Interactive controls: `a` advance gate, `s` skip gate, `p` pause, `c` cancel, `r` retry. All actions write state only — the running pipeline process picks up changes
 31. **Pipeline MCP** — `forge_pipeline` reads current state, `forge_pipeline_start` spawns a new pipeline process (PID liveness check prevents stale tasks from blocking new spawns)
 32. **TUI spec run** — Press `r` on a pending/failed spec in the Specs tab to spawn a detached `forge run --spec <path>`. Guards on status, strips Claude env vars, toast feedback
 33. **TUI pipeline start** — Press `n` in the Pipeline tab to start a new pipeline. Guards against active pipeline (running/paused_at_gate), spawns detached process, toast feedback
 34. **Scoped pipeline proofs** — Pipeline proof writes to `.forge/proofs/{pipeline-id}/` so verify only processes proofs from the current pipeline, not stale proofs from previous runs
+35. **TUI fs.watch** — All polling replaced with `createFileWatcher()`: debounced `fs.watch` (100ms), configurable fallback polling (15s safety net), platform-aware error recovery (EPERM/EACCES/ENOENT/EMFILE → polling-only), dispose API
+36. **Pipeline-aware MCP** — `forge_task` enriches pipeline tasks with stage progress (`current_stage`, `completed_stages`, `pending_stages`) and behavioral hints telling agents to wait for completion
+37. **Define CLAUDE.md compliance** — `forge define` prompt includes constraint to respect target repo's CLAUDE.md conventions over observed codebase patterns
 
 ## Spec Naming
 

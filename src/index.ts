@@ -410,20 +410,26 @@ program
   .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)')
   .option('-q, --quiet', 'Suppress progress output')
   .option('--dry-run', 'Preview what would be verified and what PR would look like')
+  .option('-t, --max-turns <n>', 'Maximum turns (default: 100)', '100')
+  .option('-b, --max-budget <usd>', 'Maximum budget in USD')
   .action(async (proofDir: string, options: {
     outputDir?: string;
     cwd?: string;
     model?: string;
+    maxTurns?: string;
+    maxBudget?: string;
     quiet?: boolean;
     dryRun?: boolean;
   }) => {
-    // No guardNestedSession() — verify runs test files directly, no SDK call
+    guardNestedSession();
     try {
       await runVerify({
         proofDir,
         outputDir: options.outputDir,
         cwd: options.cwd,
         model: options.model,
+        maxTurns: options.maxTurns ? parseInt(options.maxTurns, 10) : undefined,
+        maxBudgetUsd: options.maxBudget ? parseFloat(options.maxBudget) : undefined,
         quiet: options.quiet,
         dryRun: options.dryRun,
       });

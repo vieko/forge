@@ -12,7 +12,7 @@ description: >-
   or straightforward work in the current repo that doesn't need autonomous agent execution.
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.19.0
+  version: 3.20.0
   author: vieko
 ---
 
@@ -31,7 +31,7 @@ Delegate complex, multi-step development work to an autonomous agent that builds
 
 Forge uses the Agent SDK internally. SDK-invoking commands **cannot run inside Claude Code** (nested SDK restriction). The CLI will block with a clear error if you try.
 
-**SDK commands** (`run`, `audit`, `define`, `review`, `proof`, `specs --check`): Build the command and present it to the user. Do NOT execute via Bash.
+**SDK commands** (`run`, `audit`, `define`, `review`, `proof`, `verify`, `specs --check`): Build the command and present it to the user. Do NOT execute via Bash.
 
 ```
 The forge command to run:
@@ -139,7 +139,7 @@ forge pipeline --resume <pipeline-id>               # Resume paused/failed pipel
 forge pipeline status                               # Show current pipeline state
 ```
 
-Gates default to: auto (define→run, run→audit), confirm (audit→proof, proof→verify). TUI controls: `a` advance, `s` skip, `p` pause, `c` cancel.
+Gates default to: auto (define→run, run→audit, proof→verify), confirm (audit→proof). TUI controls: `a` advance, `s` skip, `p` pause, `c` cancel.
 
 ### forge watch
 
@@ -206,6 +206,12 @@ forge specs --summary                           # Directory-level roll-up (compa
 **`--spec` takes exactly one file.** The prompt is always the last positional argument (a quoted string). Bare file paths without a flag are interpreted as the prompt, not as spec files. To run multiple specs, use `--spec-dir`.
 
 **Shorthand resolution**: spec paths resolve automatically. `forge run --spec login.md` finds the spec via manifest lookup. `forge run --spec-dir gtmeng-580` finds `.bonfire/specs/gtmeng-580/`. Full paths always work too.
+
+**Pipeline is autonomous end-to-end.** `forge pipeline` (or `forge_pipeline_start` via MCP) runs define → run → audit → proof → verify automatically. When you start a pipeline:
+- **Wait for it to complete** by polling with `forge_task`. Do NOT commit, push, or create PRs while the pipeline is still running — it owns the repo during execution.
+- **Do NOT run individual stages** (e.g. `forge audit`, `forge proof`) after a pipeline — it already ran them.
+- **Do NOT commit, push, or create PRs** while a pipeline is running — the verify stage creates a PR automatically when the pipeline completes.
+- Only use individual commands when you are NOT using pipeline.
 
 ## Common Mistakes
 

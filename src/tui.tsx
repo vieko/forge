@@ -10,6 +10,7 @@ import type { ForgeResult, SessionEvent, SpecManifest, SpecEntry, SpecRun } from
 import type { Pipeline, Stage, GateKey, PipelineStatus, StageStatus, StageName } from './pipeline-types.js';
 import { loadManifest } from './specs.js';
 import { FileSystemStateProvider } from './pipeline-state.js';
+import { createFileWatcher, type FileWatcherHandle } from './file-watcher.js';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -613,6 +614,8 @@ async function loadEventsIncremental(
 /**
  * React hook for incremental event loading.
  * Tracks byte offset across poll cycles; only reads new bytes for events.jsonl.
+ * Uses fs.watch (via createFileWatcher) for near-instant event detection (~100ms),
+ * with adaptive fallback polling: 3s while running, 20s when idle/completed.
  * Legacy stream.log remains a full re-read (not worth optimizing).
  */
 function useIncrementalEvents(
@@ -626,7 +629,7 @@ function useIncrementalEvents(
 
   useEffect(() => {
     let mounted = true;
-    let interval: ReturnType<typeof setInterval> | null = null;
+    let watcherHandle: FileWatcherHandle | null = null;
 
     // Reset reader state when switching sessions
     readerStateRef.current = { byteOffset: 0, partial: '' };
@@ -647,15 +650,26 @@ function useIncrementalEvents(
       }
     };
 
+    // Initial load
     poll();
 
-    if (isRunning) {
-      interval = setInterval(poll, 500);
-    }
+    // Adaptive fallback interval: short while running (3s), longer when idle (20s)
+    const fallbackMs = isRunning ? 3000 : 20000;
+
+    // Use fs.watch on the events.jsonl file for near-instant change detection.
+    // The fallback polling interval serves as a safety net for dropped events.
+    watcherHandle = createFileWatcher(eventsPath, () => { poll(); }, {
+      debounceMs: 50,
+      fallbackIntervalMs: fallbackMs,
+      type: 'file',
+    });
 
     return () => {
       mounted = false;
-      if (interval) clearInterval(interval);
+      if (watcherHandle) {
+        watcherHandle.dispose();
+        watcherHandle = null;
+      }
     };
   }, [eventsPath, isRunning]);
 
@@ -1190,16 +1204,22 @@ function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   const toast = useToast();
 
-  // Load manifest and re-poll every 5 seconds
+  // Load manifest reactively via fs.watch with fallback polling
   useEffect(() => {
     let mounted = true;
     const load = async () => {
       const m = await loadManifest(cwd);
       if (mounted) setManifest(m);
     };
+    // Initial load immediately on mount
     load();
-    const interval = setInterval(load, 5000);
-    return () => { mounted = false; clearInterval(interval); };
+    // Watch .forge/specs.json for changes (debounced, with fallback polling)
+    const handle = createFileWatcher(
+      join(cwd, '.forge', 'specs.json'),
+      () => { load(); },
+      { debounceMs: 100, fallbackIntervalMs: 15000 },
+    );
+    return () => { mounted = false; handle.dispose(); };
   }, [cwd]);
 
   // Build display rows: grouped by directory, sorted alphabetically within each group
@@ -1723,7 +1743,7 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
   const providerRef = useRef(new FileSystemStateProvider(cwd));
   const toast = useToast();
 
-  // Load pipelines and poll every 2 seconds if any are running/paused
+  // Load pipelines reactively via fs.watch on .forge/pipelines/ directory
   useEffect(() => {
     let mounted = true;
     const load = async () => {
@@ -1731,8 +1751,24 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
       if (mounted) setPipelines(loaded);
     };
     load();
-    const interval = setInterval(load, 2000);
-    return () => { mounted = false; clearInterval(interval); };
+
+    // Watch the pipelines directory for new/updated pipeline files
+    const pipelinesDir = join(cwd, '.forge', 'pipelines');
+    const dirHandle = createFileWatcher(pipelinesDir, () => { load(); }, {
+      debounceMs: 100,
+      fallbackIntervalMs: 15000,
+      type: 'directory',
+    });
+
+    // Also watch pipeline.json (active pipeline — written on every state change)
+    const activePath = join(cwd, '.forge', 'pipeline.json');
+    const fileHandle = createFileWatcher(activePath, () => { load(); }, {
+      debounceMs: 100,
+      fallbackIntervalMs: 15000,
+      type: 'file',
+    });
+
+    return () => { mounted = false; dirHandle.dispose(); fileHandle.dispose(); };
   }, [cwd]);
 
   // Clamp selected index when pipelines change
@@ -1904,16 +1940,24 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
     pipeline.stages.map(s => `${s.name}:${s.status}`).join(',')
   );
 
-  // Poll for updates when pipeline is active
+  // Watch for updates when pipeline is active via fs.watch
   useEffect(() => {
     if (pipeline.status !== 'running' && pipeline.status !== 'paused_at_gate') return;
     let mounted = true;
-    const poll = async () => {
+    const reload = async () => {
       const updated = await providerRef.current.loadPipeline(pipeline.id);
       if (mounted && updated) setPipeline(updated);
     };
-    const interval = setInterval(poll, 2000);
-    return () => { mounted = false; clearInterval(interval); };
+
+    // Watch the specific pipeline file for changes
+    const pipelineFile = join(cwd, '.forge', 'pipelines', `${pipeline.id}.json`);
+    const handle = createFileWatcher(pipelineFile, () => { reload(); }, {
+      debounceMs: 100,
+      fallbackIntervalMs: 15000,
+      type: 'file',
+    });
+
+    return () => { mounted = false; handle.dispose(); };
   }, [pipeline.id, pipeline.status, cwd]);
 
   // Fire toasts on pipeline state transitions
@@ -2092,6 +2136,15 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
       const stage = stages[selectedStageIndex];
       if (stage && stage.sessions.length > 0) {
         onSelectStageSessions(stage.sessions);
+      } else if (stage && stage.status === 'running') {
+        // Running stage may not have sessions yet (captured after completion).
+        // Fall back to latest-session.json for the active session.
+        readFile(join(cwd, '.forge', 'latest-session.json'), 'utf-8')
+          .then(raw => {
+            const latest = JSON.parse(raw);
+            if (latest.sessionId) onSelectStageSessions([latest.sessionId]);
+          })
+          .catch(() => {});
       }
     } else if (key.name === 'a') {
       handleAdvanceGate();
@@ -2205,16 +2258,47 @@ function App({ cwd }: { cwd: string }) {
   const [stageSessionIds, setStageSessionIds] = useState<string[]>([]);
   const [stageSessionInfo, setStageSessionInfo] = useState<SessionInfo | null>(null);
 
-  // Load sessions initially and refresh periodically
+  // Load sessions reactively via fs.watch on .forge directories
   useEffect(() => {
     let mounted = true;
+    const watchers: FileWatcherHandle[] = [];
+
     const load = async () => {
       const loaded = await loadSessions(cwd);
       if (mounted) setSessions(loaded);
     };
+
+    // Initial load
     load();
-    const interval = setInterval(load, 2000);
-    return () => { mounted = false; clearInterval(interval); };
+
+    // Watch .forge/sessions/ for new session directories
+    const sessionsDir = join(cwd, '.forge', 'sessions');
+    watchers.push(createFileWatcher(sessionsDir, () => { load(); }, {
+      debounceMs: 100,
+      fallbackIntervalMs: 15_000,
+      type: 'directory',
+    }));
+
+    // Watch .forge/results/ for completed session results
+    const resultsDir = join(cwd, '.forge', 'results');
+    watchers.push(createFileWatcher(resultsDir, () => { load(); }, {
+      debounceMs: 100,
+      fallbackIntervalMs: 15_000,
+      type: 'directory',
+    }));
+
+    // Watch .forge/latest-session.json for session start/resume events
+    const latestPath = join(cwd, '.forge', 'latest-session.json');
+    watchers.push(createFileWatcher(latestPath, () => { load(); }, {
+      debounceMs: 100,
+      fallbackIntervalMs: 15_000,
+      type: 'file',
+    }));
+
+    return () => {
+      mounted = false;
+      for (const w of watchers) w.dispose();
+    };
   }, [cwd]);
 
   const handleQuit = () => {

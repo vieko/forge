@@ -169,8 +169,8 @@ describe('DEFAULT_GATES', () => {
     expect(DEFAULT_GATES['audit -> proof']).toBe('confirm');
   });
 
-  test('proof -> verify defaults to confirm', () => {
-    expect(DEFAULT_GATES['proof -> verify']).toBe('confirm');
+  test('proof -> verify defaults to auto', () => {
+    expect(DEFAULT_GATES['proof -> verify']).toBe('auto');
   });
 });
 
@@ -187,7 +187,7 @@ describe('gate configuration', () => {
     expect(pipeline.gates['define -> run'].type).toBe('auto');
     expect(pipeline.gates['run -> audit'].type).toBe('auto');
     expect(pipeline.gates['audit -> proof'].type).toBe('confirm');
-    expect(pipeline.gates['proof -> verify'].type).toBe('confirm');
+    expect(pipeline.gates['proof -> verify'].type).toBe('auto');
   });
 
   test('gate overrides apply correctly', async () => {
@@ -200,7 +200,7 @@ describe('gate configuration', () => {
     expect(pipeline.gates['define -> run'].type).toBe('confirm');
     expect(pipeline.gates['run -> audit'].type).toBe('auto');
     expect(pipeline.gates['audit -> proof'].type).toBe('auto');
-    expect(pipeline.gates['proof -> verify'].type).toBe('confirm');
+    expect(pipeline.gates['proof -> verify'].type).toBe('auto');
   });
 
   test('all gates start with waiting status', async () => {

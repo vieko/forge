@@ -487,6 +487,36 @@ server.registerTool('forge_task', {
     result.duration_seconds = Math.round(elapsed / 1000);
   }
 
+  // Enrich pipeline tasks with stage-level progress
+  if (task.command === 'forge pipeline') {
+    try {
+      const provider = new FileSystemStateProvider(task.cwd);
+      const active = await provider.loadActivePipeline();
+      if (active) {
+        const currentStage = active.stages.find(s => s.status === 'running');
+        const completedStages = active.stages.filter(s => s.status === 'completed').map(s => s.name);
+        const pendingStages = active.stages.filter(s => s.status === 'pending').map(s => s.name);
+        result.pipeline = {
+          id: active.id,
+          status: active.status,
+          current_stage: currentStage?.name || null,
+          completed_stages: completedStages,
+          pending_stages: pendingStages,
+          total_cost: active.totalCost,
+        };
+        if (task.status !== 'running') {
+          result.hint = active.status === 'completed'
+            ? 'Pipeline finished. All stages ran — do not run individual stages or create PRs (verify handles that).'
+            : 'Pipeline failed. Check pipeline status for details.';
+        } else {
+          result.hint = `Pipeline running: ${currentStage?.name || 'waiting'}. Wait for completion — do not commit, push, or create PRs while the pipeline is running.`;
+        }
+      }
+    } catch {
+      // Pipeline state unavailable — continue with basic task info
+    }
+  }
+
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
   };

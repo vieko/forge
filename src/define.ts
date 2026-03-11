@@ -101,6 +101,7 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
 - **Reference actual files.** Explore the codebase and list specific file paths in the Context section.
 - **Use \`depends:\` sparingly.** Only when one spec genuinely requires another to complete first.
 - **Always include a build/type-check criterion** (e.g. "TypeScript compiles without errors").
+- **Respect CLAUDE.md conventions.** The target repo's CLAUDE.md documents project rules. Specs must not contradict those rules, even if existing code does. When the codebase diverges from CLAUDE.md, follow CLAUDE.md.
 - **Do NOT implement any code.** Only produce spec files.
 
 ## Acceptance Criteria
