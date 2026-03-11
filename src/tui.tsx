@@ -186,6 +186,11 @@ function summarizeToolInput(input: Record<string, unknown>): string {
   return '';
 }
 
+function formatInputValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
+
 // ── Grouped Event Types ──────────────────────────────────────
 
 interface ToolBlock {
@@ -828,7 +833,7 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
   );
 }
 
-function GroupedBlockView({ block }: { block: GroupedBlock }) {
+function GroupedBlockView({ block, isFocused, isExpanded }: { block: GroupedBlock; isFocused?: boolean; isExpanded?: boolean }) {
   switch (block.kind) {
     case 'session_start': {
       const { event } = block;
@@ -878,6 +883,38 @@ function GroupedBlockView({ block }: { block: GroupedBlock }) {
       const { start, result } = block;
       const label = start.toolName === 'Task' ? taskLabel(start.input) : start.toolName;
       const inputSummary = start.toolName === 'Task' ? '' : summarizeToolInput(start.input);
+      const expanded = !!isExpanded;
+      const indicator = expanded ? '-' : '+';
+      const prefix = isFocused ? `> ${indicator} ` : `  ${indicator} `;
+      const labelColor = isFocused ? '#f0c836' : '#36b5f0';
+
+      if (expanded) {
+        const inputKeys = Object.keys(start.input);
+        const fullOutput = result ? result.output.trim() : '';
+        return (
+          <box style={{ paddingTop: 1 }}>
+            <text>
+              <span fg={labelColor}>{prefix}[{label}]</span>
+              {inputSummary ? <span fg="#888888">{' '}{inputSummary}</span> : null}
+            </text>
+            {inputKeys.length > 0 ? (
+              <box style={{ paddingLeft: 4 }}>
+                <text fg="#666666">Input:</text>
+                {inputKeys.map((key) => (
+                  <text key={key} fg="#888888">  {key}: {formatInputValue(start.input[key])}</text>
+                ))}
+              </box>
+            ) : null}
+            {fullOutput ? (
+              <box style={{ paddingLeft: 4, paddingTop: inputKeys.length > 0 ? 1 : 0 }}>
+                <text fg="#666666">Output:</text>
+                <text fg="#aaaaaa">{fullOutput}</text>
+              </box>
+            ) : null}
+          </box>
+        );
+      }
+
       const outputPreview = result
         ? truncate(result.output.replace(/\n/g, ' ').trim(), 120)
         : null;
@@ -885,11 +922,11 @@ function GroupedBlockView({ block }: { block: GroupedBlock }) {
       return (
         <box style={{ paddingTop: 1 }}>
           <text>
-            <span fg="#36b5f0">[{label}]</span>
+            <span fg={labelColor}>{prefix}[{label}]</span>
             {inputSummary ? <span fg="#888888">{' '}{inputSummary}</span> : null}
           </text>
           {outputPreview ? (
-            <box style={{ paddingLeft: 2 }}>
+            <box style={{ paddingLeft: 4 }}>
               <text fg="#555555">{outputPreview}</text>
             </box>
           ) : null}
@@ -921,6 +958,19 @@ function SessionDetail({ session, onBack, onQuit, onTabSwitch }: {
     });
     return indices;
   }, [groupedBlocks]);
+
+  // Track which tool block is currently focused (index into toolBlockIndices)
+  const [focusedToolIndex, setFocusedToolIndex] = useState<number>(-1);
+
+  // Track which tool blocks are expanded (keyed by toolUseId for stability, fallback to block index)
+  const [expandedBlocks, setExpandedBlocks] = useState<Set<string>>(() => new Set());
+
+  // Clamp focusedToolIndex when toolBlockIndices changes (e.g. new events arrive)
+  useEffect(() => {
+    if (focusedToolIndex >= toolBlockIndices.length) {
+      setFocusedToolIndex(toolBlockIndices.length > 0 ? toolBlockIndices.length - 1 : -1);
+    }
+  }, [toolBlockIndices.length]);
 
   useKeyboard((key) => {
     if (key.name === 'q') { onQuit(); return; }
@@ -960,33 +1010,49 @@ function SessionDetail({ session, onBack, onQuit, onTabSwitch }: {
 
     // n: jump to next tool call block
     if (ch === 'n' && !isShift && toolBlockIndices.length > 0) {
+      const nextIdx = focusedToolIndex < toolBlockIndices.length - 1 ? focusedToolIndex + 1 : focusedToolIndex;
+      const blockIdx = toolBlockIndices[nextIdx];
       const children = scroll.getChildren();
-      for (const blockIdx of toolBlockIndices) {
-        const child = children.find((c: ScrollBoxChild) => c.id === `blk-${blockIdx}`);
-        if (!child) continue;
+      const child = children.find((c: ScrollBoxChild) => c.id === `blk-${blockIdx}`);
+      if (child) {
         const relY = child.y - scroll.y;
-        if (relY > 2) {
-          scroll.scrollBy(relY);
-          setUserScrolled(true);
-          return;
-        }
+        if (relY !== 0) scroll.scrollBy(relY);
+        setFocusedToolIndex(nextIdx);
+        setUserScrolled(true);
       }
       return;
     }
     // N (shift+n): jump to previous tool call block
     if (ch === 'N' || (ch === 'n' && isShift)) {
       if (toolBlockIndices.length === 0) return;
+      const prevIdx = focusedToolIndex > 0 ? focusedToolIndex - 1 : 0;
+      const blockIdx = toolBlockIndices[prevIdx];
       const children = scroll.getChildren();
-      for (let i = toolBlockIndices.length - 1; i >= 0; i--) {
-        const blockIdx = toolBlockIndices[i];
-        const child = children.find((c: ScrollBoxChild) => c.id === `blk-${blockIdx}`);
-        if (!child) continue;
+      const child = children.find((c: ScrollBoxChild) => c.id === `blk-${blockIdx}`);
+      if (child) {
         const relY = child.y - scroll.y;
-        if (relY < -1) {
-          scroll.scrollBy(relY);
-          setUserScrolled(true);
-          return;
-        }
+        if (relY !== 0) scroll.scrollBy(relY);
+        setFocusedToolIndex(prevIdx);
+        setUserScrolled(true);
+      }
+      return;
+    }
+
+    // Enter: toggle expand/collapse on focused tool block
+    if (ch === 'return' && focusedToolIndex >= 0 && focusedToolIndex < toolBlockIndices.length) {
+      const blockIdx = toolBlockIndices[focusedToolIndex];
+      const block = groupedBlocks[blockIdx];
+      if (block && block.kind === 'tool') {
+        const blockKey = block.start.toolUseId || `idx-${blockIdx}`;
+        setExpandedBlocks(prev => {
+          const next = new Set(prev);
+          if (next.has(blockKey)) {
+            next.delete(blockKey);
+          } else {
+            next.add(blockKey);
+          }
+          return next;
+        });
       }
       return;
     }
@@ -1033,17 +1099,23 @@ function SessionDetail({ session, onBack, onQuit, onTabSwitch }: {
             </text>
           </box>
         ) : (
-          groupedBlocks.map((block, i) => (
-            <box key={`${block.kind}-${i}`} id={`blk-${i}`}>
-              <GroupedBlockView block={block} />
-            </box>
-          ))
+          groupedBlocks.map((block, i) => {
+            const isFocused = block.kind === 'tool' && focusedToolIndex >= 0
+              && toolBlockIndices[focusedToolIndex] === i;
+            const isExpanded = block.kind === 'tool'
+              && expandedBlocks.has(block.start.toolUseId || `idx-${i}`);
+            return (
+              <box key={`${block.kind}-${i}`} id={`blk-${i}`}>
+                <GroupedBlockView block={block} isFocused={isFocused} isExpanded={isExpanded} />
+              </box>
+            );
+          })
         )}
       </scrollbox>
 
       <box style={{ paddingLeft: 1, height: 2 }}>
         <text fg="#555555">
-          [j/k] scroll  [n/N] tool  [g/G] top/end  [esc] back  [q] quit{session.isRunning ? '  (live)' : ''}
+          [j/k] scroll  [n/N] tool  [enter] expand  [g/G] top/end  [esc] back  [q] quit{session.isRunning ? '  (live)' : ''}
         </text>
       </box>
     </box>

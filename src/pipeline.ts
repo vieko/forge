@@ -42,6 +42,17 @@ const noopEventProvider: EventProvider = {
 
 // ── Internal Helpers ─────────────────────────────────────────
 
+/** Snapshot session IDs in .forge/sessions/ directory. */
+async function snapshotSessionIds(cwd: string): Promise<Set<string>> {
+  try {
+    const sessionsDir = path.join(cwd, '.forge', 'sessions');
+    const entries = await fs.readdir(sessionsDir);
+    return new Set(entries);
+  } catch {
+    return new Set();
+  }
+}
+
 /** Build a gate key string from two consecutive stage names. */
 function makeGateKey(from: StageName, to: StageName): GateKey {
   return `${from} -> ${to}` as GateKey;
@@ -483,7 +494,7 @@ export async function runPipeline(
   // ── Execute stages ─────────────────────────────────────────
   for (let i = fromIndex; i < STAGE_ORDER.length; i++) {
     const stageName = STAGE_ORDER[i];
-    const stage = findStage(pipeline, stageName);
+    let stage = findStage(pipeline, stageName);
 
     // Skip completed/skipped stages (resume scenario)
     if (stage.status === 'completed' || stage.status === 'skipped') {
@@ -565,7 +576,9 @@ export async function runPipeline(
             continue; // Move to next stage
           }
 
-          // Gate approved — mark pipeline running and continue
+          // Gate approved — mark pipeline running and re-derive stage
+          // (pipeline was reloaded from disk, old stage ref is stale)
+          stage = findStage(pipeline, stageName);
           pipeline.status = 'running';
           pipeline.updatedAt = new Date().toISOString();
           await stateProvider.savePipeline(pipeline);
@@ -591,8 +604,17 @@ export async function runPipeline(
     });
 
     // ── Execute the stage ──────────────────────────────────
+    const cwd = await resolveWorkingDir(options.cwd);
+    const sessionsBefore = await snapshotSessionIds(cwd);
+
     try {
       const result = await executeStage(executor, stageName, pipeline, options);
+
+      // Capture new session IDs created during this stage
+      const sessionsAfter = await snapshotSessionIds(cwd);
+      for (const sid of sessionsAfter) {
+        if (!sessionsBefore.has(sid)) stage.sessions.push(sid);
+      }
 
       // Update stage with results
       stage.status = 'completed';
