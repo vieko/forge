@@ -5,7 +5,7 @@
  *
  * Exposes forge commands as MCP tools over stdio transport.
  * Fast tools (specs, status, stats) call internal functions directly.
- * SDK tools (define, prove, run, audit, verify) spawn child processes with
+ * SDK tools (define, proof, run, audit, verify) spawn child processes with
  * CLAUDECODE stripped from env to avoid the nested session guard.
  *
  * Async two-tool pattern: forge_start → forge_task (poll).
@@ -309,14 +309,14 @@ server.registerTool('forge_stats', {
 // ── Async tool: forge_start ──────────────────────────────────
 
 server.registerTool('forge_start', {
-  description: `Start a long-running forge command (define, prove, run, audit, verify). Returns a task_id immediately — use forge_task to poll for completion. The command runs in a separate process (not nested in Claude Code). Typical durations: define 3-5min, run 5-15min, audit 3-10min, prove 2-5min, verify 5-15min. Poll every 30-60s with forge_task.`,
+  description: `Start a long-running forge command (define, proof, run, audit, verify). Returns a task_id immediately — use forge_task to poll for completion. The command runs in a separate process (not nested in Claude Code). Typical durations: define 3-5min, run 5-15min, audit 3-10min, proof 2-5min, verify 5-15min. Poll every 30-60s with forge_task.`,
   inputSchema: {
-    command: z.enum(['define', 'prove', 'run', 'audit', 'verify']).describe('Forge command to run'),
+    command: z.enum(['define', 'proof', 'prove', 'run', 'audit', 'verify']).describe('Forge command to run'),
     description: z.string().describe('Task description or prompt for the command'),
     cwd: z.string().describe('Working directory (target repo)'),
     output_dir: z.string().optional().describe('Output directory for generated specs/proofs'),
     model: z.string().optional().describe('Model to use (opus, sonnet, or full model ID)'),
-    spec_path: z.string().optional().describe('Spec file or directory path (required for run, audit, prove)'),
+    spec_path: z.string().optional().describe('Spec file or directory path (required for run, audit, proof)'),
     extra_args: z.array(z.string()).optional().describe('Additional CLI arguments (e.g. ["--fix", "--sequential"])'),
   },
 }, async ({ command, description, cwd, output_dir, model, spec_path, extra_args }) => {
@@ -329,9 +329,14 @@ server.registerTool('forge_start', {
     // Build CLI arguments
     const args: string[] = [forgeBin(), command];
 
-    // Commands that take a positional path argument (spec-path or proof-dir)
-    if ((command === 'audit' || command === 'prove' || command === 'verify') && spec_path) {
+    // Commands that take positional path argument(s)
+    if ((command === 'audit' || command === 'verify') && spec_path) {
       args.push(spec_path);
+    }
+    // proof/prove supports multiple spec paths (variadic positional args)
+    if ((command === 'proof' || command === 'prove') && spec_path) {
+      const paths = spec_path.split(/\s+/).filter(Boolean);
+      args.push(...paths);
     }
 
     // Commands that take a positional prompt/description argument
@@ -339,8 +344,8 @@ server.registerTool('forge_start', {
       args.push(description);
     }
 
-    // For audit/prove/verify, the description is an optional second positional arg
-    if ((command === 'audit' || command === 'prove' || command === 'verify') && description) {
+    // For audit/proof/verify, the description is an optional second positional arg
+    if ((command === 'audit' || command === 'proof' || command === 'prove' || command === 'verify') && description) {
       args.push(description);
     }
 
@@ -743,7 +748,7 @@ server.registerTool('forge_pipeline_start', {
     goal: z.string().describe('High-level goal describing what to build'),
     cwd: z.string().describe('Working directory (target repo)'),
     spec_path: z.string().optional().describe('Spec directory path (maps to --spec-dir)'),
-    from_stage: z.string().optional().describe('Start from a specific stage: define, run, audit, prove, verify (maps to --from)'),
+    from_stage: z.string().optional().describe('Start from a specific stage: define, run, audit, proof, verify (maps to --from)'),
     gate_all: z.string().optional().describe('Set all gates to this type: auto, confirm, review (maps to --gate-all)'),
     model: z.string().optional().describe('Model to use (opus, sonnet, or full model ID)'),
     extra_args: z.array(z.string()).optional().describe('Additional CLI arguments'),

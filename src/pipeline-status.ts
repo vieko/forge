@@ -53,8 +53,8 @@ function gateLabel(type: string, status: string): string {
 const GATE_KEYS: { from: StageName; to: StageName; key: GateKey }[] = [
   { from: 'define', to: 'run',    key: 'define -> run' },
   { from: 'run',    to: 'audit',  key: 'run -> audit' },
-  { from: 'audit',  to: 'prove',  key: 'audit -> prove' },
-  { from: 'prove',  to: 'verify', key: 'prove -> verify' },
+  { from: 'audit',  to: 'proof',  key: 'audit -> proof' },
+  { from: 'proof',  to: 'verify', key: 'proof -> verify' },
 ];
 
 // ── Render a single pipeline ─────────────────────────────────

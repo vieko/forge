@@ -118,7 +118,7 @@ function generatePipelineId(): string {
 
 /** Build the default gate configuration. */
 function buildGates(overrides?: Partial<Record<GateKey, import('./pipeline-types.js').GateType>>): Record<GateKey, Gate> {
-  const keys: GateKey[] = ['define -> run', 'run -> audit', 'audit -> prove', 'prove -> verify'];
+  const keys: GateKey[] = ['define -> run', 'run -> audit', 'audit -> proof', 'proof -> verify'];
   const gates = {} as Record<GateKey, Gate>;
   for (const key of keys) {
     gates[key] = {

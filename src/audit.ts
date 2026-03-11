@@ -329,7 +329,7 @@ export async function runAudit(options: AuditOptions): Promise<void> {
     if (result.outputSpecs.length === 0) {
       console.log(`\n  \x1b[32mAll specs fully implemented — no remaining work.\x1b[0m`);
       const relSpecDir = path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir;
-      console.log(`\n  ${DIM}Next step:${RESET}\n    ${CMD}forge prove ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir}${RESET}`);
+      console.log(`\n  ${DIM}Next step:${RESET}\n    ${CMD}forge proof ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir}${RESET}`);
     } else {
       const relOutputDir = path.relative(workingDir, outputDir) || outputDir;
       console.log(`\n  ${BOLD}${result.outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
@@ -501,7 +501,7 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
     if (converged) {
       console.log(`\n  \x1b[32mAll specs fully implemented after ${roundSummaries.length} round(s).\x1b[0m`);
       const relSpecDir = path.relative(workingDir, ctx.resolvedSpecDir) || ctx.resolvedSpecDir;
-      console.log(`\n  ${DIM}Next step:${RESET}\n    ${CMD}forge prove ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir}${RESET}`);
+      console.log(`\n  ${DIM}Next step:${RESET}\n    ${CMD}forge proof ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir}${RESET}`);
     } else {
       console.log(`\n  \x1b[33mMax rounds (${maxRounds}) reached. Some gaps may remain.\x1b[0m`);
       const relRemDir = path.relative(workingDir, remediationDir) || remediationDir;

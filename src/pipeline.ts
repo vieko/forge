@@ -1,7 +1,7 @@
 // ── Pipeline Orchestration Core Loop ─────────────────────────
 //
 // Drives a pipeline through its stages sequentially: define -> run ->
-// audit -> prove -> verify. Checks gates between stages, delegates
+// audit -> proof -> verify. Checks gates between stages, delegates
 // execution to existing forge functions via ExecutionProvider, passes
 // artifacts between stages, accumulates costs, and persists state
 // after every transition.
@@ -22,13 +22,13 @@ import { STAGE_ORDER, DEFAULT_GATES } from './pipeline-types.js';
 import { runDefine as realRunDefine } from './define.js';
 import { runForge as realRunForge } from './parallel.js';
 import { runAudit as realRunAudit } from './audit.js';
-import { runProve as realRunProve } from './prove.js';
+import { runProof as realRunProof } from './proof.js';
 import { runVerify as realRunVerify } from './proof-runner.js';
 import { resolveWorkingDir, ForgeError, sleep } from './utils.js';
 import { isInterrupted } from './abort.js';
 import { promises as fs } from 'fs';
 import path from 'path';
-import type { ForgeResult } from './types.js';
+import type { ForgeResult, ProofManifest } from './types.js';
 
 // ── Constants ────────────────────────────────────────────────
 
@@ -163,7 +163,7 @@ async function scanMdFiles(dir: string): Promise<string[]> {
 
 /**
  * Creates an ExecutionProvider that wraps the existing forge
- * functions (runDefine, runForge, runAudit, runProve, runVerify)
+ * functions (runDefine, runForge, runAudit, runProof, runVerify)
  * without modifying them. Extracts cost from .forge/results/ and
  * artifacts from the filesystem after each call.
  */
@@ -268,20 +268,20 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
       };
     },
 
-    async runProve(pipeline, options): Promise<StageResult> {
+    async runProof(pipeline, options): Promise<StageResult> {
       const cwd = await resolveWorkingDir(options.cwd);
-      const stage = findStage(pipeline, 'prove');
+      const stage = findStage(pipeline, 'proof');
       const specDir = stage.artifacts.specDir || options.specDir;
       if (!specDir) {
-        throw new Error('prove stage requires specDir artifact');
+        throw new Error('proof stage requires specDir artifact');
       }
       const resolvedSpecDir = path.resolve(cwd, specDir);
       const proofDir = path.join(cwd, '.forge', 'proofs', pipeline.id);
 
       const before = Date.now();
 
-      await realRunProve({
-        specPath: resolvedSpecDir,
+      await realRunProof({
+        specPaths: [resolvedSpecDir],
         outputDir: proofDir,
         cwd,
         model: options.model,
@@ -290,13 +290,22 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
       });
 
       const cost = await extractCostFromResults(cwd, before);
-      const proofs = await scanMdFiles(proofDir);
+
+      // Read manifest to get accurate proof count
+      let proofCount = 0;
+      try {
+        const manifestRaw = await fs.readFile(path.join(proofDir, 'manifest.json'), 'utf-8');
+        const manifest: ProofManifest = JSON.parse(manifestRaw);
+        proofCount = manifest.entries.length;
+      } catch {
+        // No manifest — agent may have failed to write it
+      }
 
       return {
         cost,
         artifacts: {
           proofDir,
-          proofCount: String(proofs.length),
+          proofCount: String(proofCount),
         },
       };
     },
@@ -307,7 +316,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
       const proofDir = stage.artifacts.proofDir;
       if (!proofDir) {
         throw new Error(
-          'verify stage requires proofDir artifact (from prove stage)',
+          'verify stage requires proofDir artifact (from proof stage)',
         );
       }
 
@@ -346,8 +355,8 @@ async function executeStage(
       return executor.runForge(pipeline, options);
     case 'audit':
       return executor.runAudit(pipeline, options);
-    case 'prove':
-      return executor.runProve(pipeline, options);
+    case 'proof':
+      return executor.runProof(pipeline, options);
     case 'verify':
       return executor.runVerify(pipeline, options);
   }
@@ -611,13 +620,13 @@ export async function runPipeline(
       });
 
       // Dynamic gate: audit with unresolved remediation forces confirm
-      // gate before prove, even if user overrode to auto. This prevents
-      // running prove on a codebase with known remaining gaps.
+      // gate before proof, even if user overrode to auto. This prevents
+      // running proof on a codebase with known remaining gaps.
       if (
         stageName === 'audit' &&
         result.artifacts.hasRemediation === 'true'
       ) {
-        const auditProveKey = makeGateKey('audit', 'prove');
+        const auditProveKey = makeGateKey('audit', 'proof');
         pipeline.gates[auditProveKey].type = 'confirm';
         pipeline.updatedAt = new Date().toISOString();
         await stateProvider.savePipeline(pipeline);

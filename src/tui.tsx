@@ -1788,7 +1788,7 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
  */
 function findWaitingGateKey(pipeline: Pipeline): GateKey | null {
   if (pipeline.status !== 'paused_at_gate') return null;
-  const stageOrder: StageName[] = ['define', 'run', 'audit', 'prove', 'verify'];
+  const stageOrder: StageName[] = ['define', 'run', 'audit', 'proof', 'verify'];
   for (let i = 1; i < stageOrder.length; i++) {
     const stage = pipeline.stages.find(s => s.name === stageOrder[i]);
     if (stage && stage.status !== 'completed' && stage.status !== 'skipped') {

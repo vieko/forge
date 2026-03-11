@@ -7,10 +7,10 @@
 // ── Stage Names ──────────────────────────────────────────────
 
 /** The five pipeline stages, in execution order. */
-export type StageName = 'define' | 'run' | 'audit' | 'prove' | 'verify';
+export type StageName = 'define' | 'run' | 'audit' | 'proof' | 'verify';
 
 /** All stage names in canonical execution order. */
-export const STAGE_ORDER: readonly StageName[] = ['define', 'run', 'audit', 'prove', 'verify'] as const;
+export const STAGE_ORDER: readonly StageName[] = ['define', 'run', 'audit', 'proof', 'verify'] as const;
 
 // ── Status Enums ─────────────────────────────────────────────
 
@@ -56,7 +56,7 @@ export interface Gate {
 
 /**
  * A single stage in the pipeline execution.
- * Each stage maps to a forge command (define, run, audit, prove, verify).
+ * Each stage maps to a forge command (define, run, audit, proof, verify).
  */
 export interface Stage {
   /** Which pipeline stage this represents */
@@ -86,8 +86,8 @@ export interface Stage {
 export type GateKey =
   | 'define -> run'
   | 'run -> audit'
-  | 'audit -> prove'
-  | 'prove -> verify';
+  | 'audit -> proof'
+  | 'proof -> verify';
 
 /**
  * A full pipeline tracks the end-to-end execution of the forge workflow.
@@ -222,8 +222,8 @@ export interface PipelineOptions {
 export const DEFAULT_GATES: Record<GateKey, GateType> = {
   'define -> run': 'auto',
   'run -> audit': 'auto',
-  'audit -> prove': 'confirm',
-  'prove -> verify': 'confirm',
+  'audit -> proof': 'confirm',
+  'proof -> verify': 'confirm',
 };
 
 // ── Provider Interfaces ──────────────────────────────────────
@@ -270,7 +270,7 @@ export interface StageResult {
 
 /**
  * Execution layer that runs each pipeline stage.
- * Wraps the existing forge commands (define, run, audit, prove, verify).
+ * Wraps the existing forge commands (define, run, audit, proof, verify).
  */
 export interface ExecutionProvider {
   /** Run `forge define` -- generate specs from the goal. */
@@ -279,8 +279,8 @@ export interface ExecutionProvider {
   runForge(pipeline: Pipeline, options: PipelineOptions): Promise<StageResult>;
   /** Run `forge audit` -- audit codebase against specs. */
   runAudit(pipeline: Pipeline, options: PipelineOptions): Promise<StageResult>;
-  /** Run `forge prove` -- generate test protocols from specs. */
-  runProve(pipeline: Pipeline, options: PipelineOptions): Promise<StageResult>;
+  /** Run `forge proof` -- generate test protocols from specs. */
+  runProof(pipeline: Pipeline, options: PipelineOptions): Promise<StageResult>;
   /** Run `forge verify` -- execute proofs and create PR. */
   runVerify(pipeline: Pipeline, options: PipelineOptions): Promise<StageResult>;
 }

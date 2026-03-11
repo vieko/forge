@@ -120,10 +120,11 @@ forge specs --summary           # Directory-level roll-up (compact view)
 forge specs -C ~/other-repo     # Different working directory
 
 # Generate test protocol (proof) from implemented specs
-forge prove specs/feature.md                    # Single spec proof
-forge prove specs/                              # One proof per spec in directory
-forge prove specs/ -o ./custom-proofs/          # Custom output directory
-forge prove specs/ -C ~/other-repo              # Different repo
+forge proof specs/feature.md                    # Single spec proof
+forge proof specs/                              # All specs in directory
+forge proof specs/a.md specs/b.md specs/c.md    # Multiple specific specs
+forge proof specs/ -o ./custom-proofs/          # Custom manifest output directory
+forge proof specs/ -C ~/other-repo              # Different repo
 
 # Execute proof test protocols and create PR
 forge verify .forge/proofs/                     # Verify all proofs
@@ -136,7 +137,7 @@ forge review                    # Review main...HEAD
 forge review HEAD~5...HEAD      # Specific range
 forge review -C ~/other-repo    # Different repo
 
-# Pipeline orchestrator (chains define -> run -> audit -> prove -> verify)
+# Pipeline orchestrator (chains define -> run -> audit -> proof -> verify)
 forge pipeline "build auth system"                  # Full pipeline
 forge pipeline --from run --spec-dir specs/ "go"    # Start at run stage with existing specs
 forge pipeline --gate-all confirm "careful build"   # Pause at every gate for approval
@@ -193,7 +194,7 @@ src/
 ├── watch.ts       # WatchOptions, colorWatchLine, runWatch
 ├── audit.ts       # runAudit, runAuditRound, runAuditFixLoop + manifest integration
 ├── define.ts      # runDefine (spec generation from descriptions)
-├── prove.ts       # runProve (test protocol generation from specs)
+├── proof.ts       # runProof (test protocol generation from specs)
 ├── review.ts      # runReview
 ├── status.ts        # showStatus
 ├── stats.ts         # showStats (aggregate run statistics)
@@ -249,7 +250,7 @@ src/
 13. **Status** — `forge status` shows results from recent runs grouped by batch
 14. **Retry on transient errors** — auto-retries rate limits, network errors, and 500 server errors (3 attempts, exponential backoff)
 15. **Audit** — `forge audit` reviews the codebase against specs via a single read-heavy `query()` call and produces new spec files for any remaining work; output feeds directly into `forge run --spec-dir`
-16. **Audit fix loop** — `forge audit --fix` runs a convergence cycle: audit → run remediation → re-audit, up to 3 rounds (configurable). Flat `remediation/` directory with round-prefixed specs (`r1-`, `r2-`). Remediation files are preserved for audit trail. Clean-pass hints point to `forge prove`
+16. **Audit fix loop** — `forge audit --fix` runs a convergence cycle: audit → run remediation → re-audit, up to 3 rounds (configurable). Flat `remediation/` directory with round-prefixed specs (`r1-`, `r2-`). Remediation files are preserved for audit trail. Clean-pass hints point to `forge proof`
 17. **Spec lifecycle** — `.forge/specs.json` manifest tracks every spec from registration through execution; `forge specs` shows status, run history, cost, and detects orphaned/untracked specs. `--summary` shows directory-level roll-up for large manifests
 18. **Resolve specs** — `forge specs --resolve` marks specs as passed without running (for manually completed work)
 19. **Check specs** — `forge specs --check` uses a Sonnet agent to triage pending specs against the codebase and auto-resolve implemented ones
@@ -257,16 +258,16 @@ src/
 21. **Structured run logs** — `ForgeResult` includes `numTurns`, `toolCalls`, `toolBreakdown`, `verifyAttempts`, `retryAttempts`, `logPath` for post-run analysis
 22. **Stats** — `forge stats` aggregates across all runs: total cost, success rate, avg duration. `--by-spec` and `--by-model` breakdowns, `--since` date filter
 23. **Graceful Ctrl-C** — two-phase shutdown: first Ctrl-C aborts running SDK queries via `AbortController` and skips pending specs; second Ctrl-C force-exits. Batch summary shows cancelled specs with `--pending` hint
-25. **Prove** — `forge prove` reads specs and the codebase, then generates a structured test protocol (proof) with automated tests, manual checks, visual checks, and edge cases. Output goes to `.forge/proofs/` by default
-26. **Verify** — `forge verify` reads proofs, runs all automated checks via single agent query per proof, collects human-only steps, and creates a single GitHub PR with a results summary table and human verification task list. Completes the pipeline: define -> run -> audit -> prove -> verify
-27. **Nested session guard** — SDK-invoking commands (`run`, `audit`, `define`, `review`, `prove`, `verify`, `specs --check`, `pipeline`) are blocked when running inside Claude Code (`CLAUDECODE=1`). Prints the command to copy. Bypass with `FORGE_ALLOW_NESTED=1` (for debugging only — the nested SDK limitation is real)
-28. **Pipeline orchestrator** — `forge pipeline` chains define → run → audit → prove → verify into a single automated flow. Gates between stages control advancement: `auto` (proceed immediately), `confirm` (pause for approval), `review` (pause and show artifacts). Default gates: auto through audit, confirm before prove and verify
+25. **Proof** — `forge proof` reads specs and the codebase, then generates real `.test.ts` files colocated with source (or in the project's test directory), a `manual.md` human checklist, and a `manifest.json` mapping specs to tests. Auto-detects test convention (colocated vs separate) and test framework (bun/vitest/jest). Supports multiple spec paths: `forge proof a.md b.md c.md`. `forge prove` is a backward-compatible alias.
+26. **Verify** — `forge verify` reads proofs, runs all automated checks via single agent query per proof, collects human-only steps, and creates a single GitHub PR with a results summary table and human verification task list. Completes the pipeline: define -> run -> audit -> proof -> verify
+27. **Nested session guard** — SDK-invoking commands (`run`, `audit`, `define`, `review`, `proof`, `verify`, `specs --check`, `pipeline`) are blocked when running inside Claude Code (`CLAUDECODE=1`). Prints the command to copy. Bypass with `FORGE_ALLOW_NESTED=1` (for debugging only — the nested SDK limitation is real)
+28. **Pipeline orchestrator** — `forge pipeline` chains define → run → audit → proof → verify into a single automated flow. Gates between stages control advancement: `auto` (proceed immediately), `confirm` (pause for approval), `review` (pause and show artifacts). Default gates: auto through audit, confirm before proof and verify
 29. **Single-writer pipeline** — The pipeline process owns execution and polls for gate changes. TUI and MCP only mutate state (approve/skip gates) — they never spawn child processes. This prevents orphaned processes and race conditions. Pipeline stays alive through gates, polling every 2s for resolution
 30. **Pipeline TUI** — Third tab in `forge tui` shows pipeline stages, gates, costs, durations. Interactive controls: `a` advance gate, `s` skip gate, `p` pause, `c` cancel, `r` retry. All actions write state only — the running pipeline process picks up changes
 31. **Pipeline MCP** — `forge_pipeline` reads current state, `forge_pipeline_start` spawns a new pipeline process (PID liveness check prevents stale tasks from blocking new spawns)
 32. **TUI spec run** — Press `r` on a pending/failed spec in the Specs tab to spawn a detached `forge run --spec <path>`. Guards on status, strips Claude env vars, toast feedback
 33. **TUI pipeline start** — Press `n` in the Pipeline tab to start a new pipeline. Guards against active pipeline (running/paused_at_gate), spawns detached process, toast feedback
-34. **Scoped pipeline proofs** — Pipeline prove writes to `.forge/proofs/{pipeline-id}/` so verify only processes proofs from the current pipeline, not stale proofs from previous runs
+34. **Scoped pipeline proofs** — Pipeline proof writes to `.forge/proofs/{pipeline-id}/` so verify only processes proofs from the current pipeline, not stale proofs from previous runs
 
 ## Spec Naming
 

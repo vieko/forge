@@ -11,7 +11,7 @@ import { runReview } from './review.js';
 import { runWatch } from './watch.js';
 import { showSpecs } from './specs.js';
 import { runDefine } from './define.js';
-import { runProve } from './prove.js';
+import { runProof } from './proof.js';
 import { runVerify } from './proof-runner.js';
 import { showStats } from './stats.js';
 import { runPipeline } from './pipeline.js';
@@ -350,21 +350,7 @@ program
     }
   });
 
-program
-  .command('prove')
-  .description('Generate a structured test protocol (proof) from implemented specs')
-  .argument('<spec-path>', 'Spec file or directory to generate proof for')
-  .argument('[prompt]', 'Additional context')
-  .option('-o, --output-dir <path>', 'Output directory for proof files (default: .forge/proofs/)')
-  .option('-C, --cwd <path>', 'Working directory (target repo)')
-  .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'sonnet')
-  .option('-t, --max-turns <n>', 'Maximum turns (default: 100)', '100')
-  .option('-b, --max-budget <usd>', 'Maximum budget in USD')
-  .option('-v, --verbose', 'Show detailed output')
-  .option('-q, --quiet', 'Suppress progress output')
-  .option('-r, --resume <session>', 'Resume a previous session')
-  .option('-f, --fork <session>', 'Fork from a previous session')
-  .action(async (specPath: string, prompt: string | undefined, options: {
+const proofAction = async (specPaths: string[], options: {
     outputDir?: string;
     cwd?: string;
     model?: string;
@@ -379,10 +365,9 @@ program
     validateSession(options.resume, options.fork);
     validateBudget(options.maxBudget);
     try {
-      await runProve({
-        specPath,
+      await runProof({
+        specPaths,
         outputDir: options.outputDir,
-        prompt,
         cwd: options.cwd,
         model: options.model,
         maxTurns: parseTurns(options.maxTurns, 100),
@@ -396,7 +381,25 @@ program
       console.error('Error:', error instanceof Error ? error.message : error);
       process.exit(1);
     }
-  });
+  };
+
+const proofOpts = (cmd: ReturnType<typeof program.command>) => cmd
+  .argument('<spec-paths...>', 'Spec file(s) or directory to generate proof for')
+  .option('-o, --output-dir <path>', 'Output directory for proof files (default: .forge/proofs/)')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'sonnet')
+  .option('-t, --max-turns <n>', 'Maximum turns (default: 100)', '100')
+  .option('-b, --max-budget <usd>', 'Maximum budget in USD')
+  .option('-v, --verbose', 'Show detailed output')
+  .option('-q, --quiet', 'Suppress progress output')
+  .option('-r, --resume <session>', 'Resume a previous session')
+  .option('-f, --fork <session>', 'Fork from a previous session');
+
+proofOpts(program.command('proof').description('Generate a structured test protocol (proof) from implemented specs'))
+  .action(proofAction);
+
+proofOpts(program.command('prove', { hidden: true }).description('(deprecated alias for proof)'))
+  .action(proofAction);
 
 program
   .command('verify')
@@ -414,7 +417,7 @@ program
     quiet?: boolean;
     dryRun?: boolean;
   }) => {
-    guardNestedSession();
+    // No guardNestedSession() — verify runs test files directly, no SDK call
     try {
       await runVerify({
         proofDir,
@@ -559,12 +562,12 @@ program
 
 const pipelineCmd = program
   .command('pipeline')
-  .description('Run a full pipeline: define -> run -> audit -> prove -> verify')
+  .description('Run a full pipeline: define -> run -> audit -> proof -> verify')
   .argument('[goal]', 'High-level goal describing what to build')
-  .option('--from <stage>', 'Start from a specific stage (define, run, audit, prove, verify)')
+  .option('--from <stage>', 'Start from a specific stage (define, run, audit, proof, verify)')
   .option('-S, --spec-dir <path>', 'Skip define and seed with the given spec directory')
   .option('--gate-all <type>', 'Set all gates to this type (auto, confirm, review)')
-  .option('--gates <spec>', 'Per-stage gate overrides (e.g. define:auto,run:auto,audit:confirm,prove:confirm)')
+  .option('--gates <spec>', 'Per-stage gate overrides (e.g. define:auto,run:auto,audit:confirm,proof:confirm)')
   .option('--resume <id>', 'Resume a paused or incomplete pipeline')
   .option('-C, --cwd <path>', 'Working directory (target repo)')
   .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'opus')
@@ -624,20 +627,20 @@ const pipelineCmd = program
       gates = {
         'define -> run': type,
         'run -> audit': type,
-        'audit -> prove': type,
-        'prove -> verify': type,
+        'audit -> proof': type,
+        'proof -> verify': type,
       };
     }
 
     // Parse --gates (comma-separated stage:type pairs)
     if (options.gates) {
       if (!gates) gates = {};
-      const validGateStages = ['define', 'run', 'audit', 'prove'];
+      const validGateStages = ['define', 'run', 'audit', 'proof'];
       const gateKeyMap: Record<string, GateKey> = {
         'define': 'define -> run',
         'run': 'run -> audit',
-        'audit': 'audit -> prove',
-        'prove': 'prove -> verify',
+        'audit': 'audit -> proof',
+        'proof': 'proof -> verify',
       };
 
       const tokens = options.gates.split(',');
@@ -723,7 +726,7 @@ pipelineCmd
 
 // Quick alias: `forge "do something"` = `forge run "do something"`
 // Also handles `forge --spec-dir ... "prompt"` → `forge run --spec-dir ... "prompt"`
-const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'prove', 'verify', 'watch', 'specs', 'stats', 'tui', 'pipeline', 'help']);
+const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'proof', 'prove', 'verify', 'watch', 'specs', 'stats', 'tui', 'pipeline', 'help']);
 const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--dry-run', '--sequential-first', '--branch']);
 const args = process.argv.slice(2);
 if (args.length > 0 && !COMMANDS.has(args[0])) {

@@ -44,7 +44,7 @@ function createMockExecutor(overrides?: Partial<Record<StageName, Partial<StageR
     runDefine: makeHandler('define'),
     runForge: makeHandler('run'),
     runAudit: makeHandler('audit'),
-    runProve: makeHandler('prove'),
+    runProof: makeHandler('proof'),
     runVerify: makeHandler('verify'),
   };
 }
@@ -165,12 +165,12 @@ describe('DEFAULT_GATES', () => {
     expect(DEFAULT_GATES['run -> audit']).toBe('auto');
   });
 
-  test('audit -> prove defaults to confirm', () => {
-    expect(DEFAULT_GATES['audit -> prove']).toBe('confirm');
+  test('audit -> proof defaults to confirm', () => {
+    expect(DEFAULT_GATES['audit -> proof']).toBe('confirm');
   });
 
-  test('prove -> verify defaults to confirm', () => {
-    expect(DEFAULT_GATES['prove -> verify']).toBe('confirm');
+  test('proof -> verify defaults to confirm', () => {
+    expect(DEFAULT_GATES['proof -> verify']).toBe('confirm');
   });
 });
 
@@ -186,21 +186,21 @@ describe('gate configuration', () => {
 
     expect(pipeline.gates['define -> run'].type).toBe('auto');
     expect(pipeline.gates['run -> audit'].type).toBe('auto');
-    expect(pipeline.gates['audit -> prove'].type).toBe('confirm');
-    expect(pipeline.gates['prove -> verify'].type).toBe('confirm');
+    expect(pipeline.gates['audit -> proof'].type).toBe('confirm');
+    expect(pipeline.gates['proof -> verify'].type).toBe('confirm');
   });
 
   test('gate overrides apply correctly', async () => {
     const provider = new FileSystemStateProvider(tmpDir);
     const pipeline = await provider.createPipeline({
       goal: 'test',
-      gates: { 'define -> run': 'confirm', 'audit -> prove': 'auto' },
+      gates: { 'define -> run': 'confirm', 'audit -> proof': 'auto' },
     });
 
     expect(pipeline.gates['define -> run'].type).toBe('confirm');
     expect(pipeline.gates['run -> audit'].type).toBe('auto');
-    expect(pipeline.gates['audit -> prove'].type).toBe('auto');
-    expect(pipeline.gates['prove -> verify'].type).toBe('confirm');
+    expect(pipeline.gates['audit -> proof'].type).toBe('auto');
+    expect(pipeline.gates['proof -> verify'].type).toBe('confirm');
   });
 
   test('all gates start with waiting status', async () => {
@@ -224,12 +224,12 @@ describe('runPipeline', () => {
     const executor = createMockExecutor();
 
     const result = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> prove': 'auto', 'prove -> verify': 'auto' } },
+      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
     expect(result.status).toBe('completed');
-    expect(executor.calls).toEqual(['define', 'run', 'audit', 'prove', 'verify']);
+    expect(executor.calls).toEqual(['define', 'run', 'audit', 'proof', 'verify']);
     expect(result.totalCost).toBe(5.0); // 5 stages * $1.0
   });
 
@@ -249,13 +249,13 @@ describe('runPipeline', () => {
     }, 500);
 
     const result = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'confirm', 'audit -> prove': 'auto', 'prove -> verify': 'auto' } },
+      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'confirm', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
     clearTimeout(gateResolver);
     expect(result.status).toBe('completed');
-    expect(executor.calls).toEqual(['define', 'run', 'audit', 'prove', 'verify']);
+    expect(executor.calls).toEqual(['define', 'run', 'audit', 'proof', 'verify']);
     expect(result.gates['run -> audit'].status).toBe('approved');
   });
 
@@ -266,12 +266,12 @@ describe('runPipeline', () => {
     });
 
     const result = await runPipeline(
-      { goal: 'test', fromStage: 'audit', gates: { 'audit -> prove': 'auto', 'prove -> verify': 'auto' } },
+      { goal: 'test', fromStage: 'audit', gates: { 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
     expect(result.status).toBe('completed');
-    expect(executor.calls).toEqual(['audit', 'prove', 'verify']);
+    expect(executor.calls).toEqual(['audit', 'proof', 'verify']);
     expect(result.stages[0].status).toBe('skipped'); // define
     expect(result.stages[1].status).toBe('skipped'); // run
   });
@@ -283,7 +283,7 @@ describe('runPipeline', () => {
     const executor = createMockExecutor();
 
     const result = await runPipeline(
-      { goal: 'test', specDir, cwd: tmpDir, gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> prove': 'auto', 'prove -> verify': 'auto' } },
+      { goal: 'test', specDir, cwd: tmpDir, gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
@@ -318,7 +318,7 @@ describe('runPipeline', () => {
     });
 
     const result = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> prove': 'auto', 'prove -> verify': 'auto' } },
+      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
@@ -331,7 +331,7 @@ describe('runPipeline', () => {
     const events = createMockEvents();
 
     await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> prove': 'auto', 'prove -> verify': 'auto' } },
+      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, events, executor,
     );
 
@@ -369,7 +369,7 @@ describe('runPipeline', () => {
 
     clearInterval(gateResolver);
 
-    // Default gates: audit->prove is confirm, so should have paused there
+    // Default gates: audit->proof is confirm, so should have paused there
     const pauses = events.events.filter(e => e.type === 'gate_pause');
     expect(pauses.length).toBeGreaterThan(0);
   });
@@ -379,7 +379,7 @@ describe('runPipeline', () => {
     const executor = createMockExecutor();
 
     await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> prove': 'auto', 'prove -> verify': 'auto' } },
+      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
@@ -400,7 +400,7 @@ describe('pipeline resume', () => {
     const provider = new FileSystemStateProvider(tmpDir);
     const executor = createMockExecutor();
 
-    // Run all stages with auto gates through audit, confirm at audit->prove
+    // Run all stages with auto gates through audit, confirm at audit->proof
     // Schedule gate approval so it doesn't hang
     const gateResolver = setInterval(async () => {
       const p = await provider.loadActivePipeline();
@@ -417,7 +417,7 @@ describe('pipeline resume', () => {
     }, 300);
 
     const result = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> prove': 'confirm', 'prove -> verify': 'auto' } },
+      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'confirm', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
@@ -425,7 +425,7 @@ describe('pipeline resume', () => {
 
     // Pipeline ran all stages (gate was auto-approved during poll)
     expect(result.status).toBe('completed');
-    expect(executor.calls).toEqual(['define', 'run', 'audit', 'prove', 'verify']);
+    expect(executor.calls).toEqual(['define', 'run', 'audit', 'proof', 'verify']);
   });
 
   test('resume with invalid ID throws ForgeError', async () => {
@@ -450,14 +450,14 @@ describe('advanceGate', () => {
     // Create a pipeline manually in paused state
     const pipeline = await provider.createPipeline({ goal: 'test' });
     pipeline.status = 'paused_at_gate';
-    pipeline.gates['audit -> prove'] = { type: 'confirm', status: 'waiting' };
+    pipeline.gates['audit -> proof'] = { type: 'confirm', status: 'waiting' };
     await provider.savePipeline(pipeline);
 
-    await advanceGate(pipeline, 'audit -> prove', provider);
+    await advanceGate(pipeline, 'audit -> proof', provider);
 
     const loaded = await provider.loadPipeline(pipeline.id);
-    expect(loaded!.gates['audit -> prove'].status).toBe('approved');
-    expect(loaded!.gates['audit -> prove'].approvedAt).toBeTruthy();
+    expect(loaded!.gates['audit -> proof'].status).toBe('approved');
+    expect(loaded!.gates['audit -> proof'].approvedAt).toBeTruthy();
     expect(loaded!.status).toBe('running');
   });
 
@@ -485,13 +485,13 @@ describe('skipGate', () => {
     // Create a pipeline manually in paused state
     const pipeline = await provider.createPipeline({ goal: 'test' });
     pipeline.status = 'paused_at_gate';
-    pipeline.gates['audit -> prove'] = { type: 'confirm', status: 'waiting' };
+    pipeline.gates['audit -> proof'] = { type: 'confirm', status: 'waiting' };
     await provider.savePipeline(pipeline);
 
-    await skipGate(pipeline, 'audit -> prove', provider);
+    await skipGate(pipeline, 'audit -> proof', provider);
 
     const loaded = await provider.loadPipeline(pipeline.id);
-    expect(loaded!.gates['audit -> prove'].status).toBe('skipped');
+    expect(loaded!.gates['audit -> proof'].status).toBe('skipped');
     expect(loaded!.status).toBe('running');
   });
 });
@@ -514,19 +514,19 @@ describe('artifact propagation', () => {
         return { cost: 1, artifacts: {} };
       },
       runAudit: async () => ({ cost: 1, artifacts: {} }),
-      runProve: async () => ({ cost: 1, artifacts: {} }),
+      runProof: async () => ({ cost: 1, artifacts: {} }),
       runVerify: async () => ({ cost: 1, artifacts: {} }),
     };
 
     await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> prove': 'auto', 'prove -> verify': 'auto' } },
+      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
     expect(runArtifacts.specDir).toBe('/tmp/specs');
   });
 
-  test('artifacts flow from prove to verify', async () => {
+  test('artifacts flow from proof to verify', async () => {
     const provider = new FileSystemStateProvider(tmpDir);
     let verifyArtifacts: Record<string, string> = {};
 
@@ -534,7 +534,7 @@ describe('artifact propagation', () => {
       runDefine: async () => ({ cost: 1, artifacts: {} }),
       runForge: async () => ({ cost: 1, artifacts: {} }),
       runAudit: async () => ({ cost: 1, artifacts: {} }),
-      runProve: async () => ({ cost: 1, artifacts: { proofDir: '/tmp/proofs' } }),
+      runProof: async () => ({ cost: 1, artifacts: { proofDir: '/tmp/proofs' } }),
       runVerify: async (pipeline) => {
         const verifyStage = pipeline.stages.find(s => s.name === 'verify')!;
         verifyArtifacts = { ...verifyStage.artifacts };
@@ -543,7 +543,7 @@ describe('artifact propagation', () => {
     };
 
     await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> prove': 'auto', 'prove -> verify': 'auto' } },
+      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 

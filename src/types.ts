@@ -75,7 +75,7 @@ export interface ForgeResult {
   /** Batch run ID for grouping specs in the same run */
   runId?: string;
   /** Type of run */
-  type?: 'run' | 'audit' | 'review' | 'define' | 'prove' | 'verify';
+  type?: 'run' | 'audit' | 'review' | 'define' | 'proof' | 'verify';
   /** Agent turns used */
   numTurns?: number;
   /** Total tool invocations */
@@ -151,9 +151,9 @@ export interface DefineOptions {
 /**
  * Options for generating a test protocol (proof) from implemented specs.
  */
-export interface ProveOptions {
-  /** Path to a spec file or directory to generate proof for */
-  specPath: string;
+export interface ProofOptions {
+  /** Spec file(s) or directory to generate proof for */
+  specPaths: string[];
   /** Output directory for generated proof files (default: .forge/proofs/) */
   outputDir?: string;
   /** Additional context prompt */
@@ -201,25 +201,45 @@ export interface VerifyOptions {
 }
 
 /**
- * Result from verifying a single proof file.
+ * Result from verifying a single test file (from proof manifest).
  */
 export interface VerifyResult {
-  /** Path to the proof file that was verified */
-  proofPath: string;
-  /** Name of the proof file (basename) */
-  proofName: string;
+  /** Relative path to the test file that was executed */
+  testFile: string;
   /** Overall verification status */
   status: 'pass' | 'fail' | 'skipped';
-  /** Number of automated check items that passed */
-  automatedPassed: number;
-  /** Total number of automated check items */
-  automatedTotal: number;
-  /** Human-only verification steps (from Manual Verification and Visual Checks) */
-  humanSteps: string[];
-  /** Cost in USD (if available) */
-  costUsd?: number;
+  /** Exit code from the test runner (0 = pass) */
+  exitCode: number;
+  /** stderr output from the test runner (empty string on success) */
+  stderr: string;
   /** Duration in seconds */
   durationSeconds?: number;
+}
+
+// ── Proof Manifest ───────────────────────────────────────────
+
+/** A single entry in the proof manifest mapping a spec to its generated test file. */
+export interface ProofManifestEntry {
+  /** Relative path to the source spec file (e.g. "auth/login.md") */
+  specFile: string;
+  /** Category of the generated test: unit or integration */
+  category: 'unit' | 'integration';
+  /** Relative path to the generated test file (e.g. "unit/auth-login.test.ts") */
+  testFile: string;
+  /** Brief description of what the test covers */
+  description: string;
+}
+
+/** Manifest written by `forge proof` mapping specs to generated test files. */
+export interface ProofManifest {
+  /** ISO 8601 timestamp when the proof was generated */
+  generatedAt: string;
+  /** Path to the spec directory that was processed */
+  specDir: string;
+  /** List of generated test file entries */
+  entries: ProofManifestEntry[];
+  /** Number of manual verification steps in manual.md */
+  manualCheckCount: number;
 }
 
 // ── Spec Lifecycle Tracking ──────────────────────────────────
