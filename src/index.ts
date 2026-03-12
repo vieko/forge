@@ -21,6 +21,7 @@ import { STAGE_ORDER } from './pipeline-types.js';
 import type { StageName, GateKey, GateType } from './pipeline-types.js';
 import { triggerAbort, isInterrupted } from './abort.js';
 import { showBanner } from './display.js';
+import { formatConfig } from './config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -85,6 +86,7 @@ program
   .option('-t, --max-turns <n>', 'Maximum turns per spec (default: 250)', '250')
   .option('-b, --max-budget <usd>', 'Maximum budget in USD')
   .option('--plan-only', 'Only create tasks, do not implement')
+  .option('--plan-model <model>', 'Model to use for plan-only runs (e.g. sonnet)')
   .option('--dry-run', 'Preview tasks and estimate cost without executing')
   .option('-v, --verbose', 'Show detailed output')
   .option('-q, --quiet', 'Suppress progress output (for CI)')
@@ -106,6 +108,7 @@ program
     maxTurns?: string;
     maxBudget?: string;
     planOnly?: boolean;
+    planModel?: string;
     dryRun?: boolean;
     verbose?: boolean;
     quiet?: boolean;
@@ -151,6 +154,7 @@ program
         maxTurns: parseTurns(options.maxTurns, 250),
         maxBudgetUsd: parseBudget(options.maxBudget),
         planOnly: options.planOnly,
+        planModel: options.planModel,
         dryRun: options.dryRun,
         verbose: options.verbose,
         quiet: options.quiet,
@@ -537,6 +541,20 @@ program
   });
 
 program
+  .command('config')
+  .description('View current configuration')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .action(async (options: { cwd?: string }) => {
+    try {
+      const workingDir = options.cwd ? resolve(options.cwd) : process.cwd();
+      console.log(formatConfig(workingDir));
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+program
   .command('tui')
   .description('Interactive sessions viewer')
   .option('-C, --cwd <path>', 'Working directory (target repo)')
@@ -716,10 +734,53 @@ pipelineCmd
     }
   });
 
+// ── Executor Command ─────────────────────────────────────────
+
+program
+  .command('executor')
+  .description('Start the task executor daemon (picks up tasks queued by MCP)')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('--concurrency <n>', 'Max concurrent tasks (default: 2)')
+  .option('-q, --quiet', 'Suppress progress output')
+  .action(async (options: { cwd?: string; concurrency?: string; quiet?: boolean }) => {
+    try {
+      const { startExecutor } = await import('./executor.js');
+      await startExecutor({
+        cwd: options.cwd,
+        concurrency: options.concurrency ? parseInt(options.concurrency, 10) : undefined,
+        quiet: options.quiet,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+// Hidden alias: forge serve → forge executor (phase 2 will add HTTP supervision)
+program
+  .command('serve', { hidden: true })
+  .description('Start the task executor daemon (alias for executor)')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('--concurrency <n>', 'Max concurrent tasks (default: 2)')
+  .option('-q, --quiet', 'Suppress progress output')
+  .action(async (options: { cwd?: string; concurrency?: string; quiet?: boolean }) => {
+    try {
+      const { startExecutor } = await import('./executor.js');
+      await startExecutor({
+        cwd: options.cwd,
+        concurrency: options.concurrency ? parseInt(options.concurrency, 10) : undefined,
+        quiet: options.quiet,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
 // Quick alias: `forge "do something"` = `forge run "do something"`
 // Also handles `forge --spec-dir ... "prompt"` → `forge run --spec-dir ... "prompt"`
-const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'proof', 'prove', 'verify', 'watch', 'specs', 'stats', 'tui', 'pipeline', 'help']);
-const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--dry-run', '--sequential-first', '--branch']);
+const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'proof', 'prove', 'verify', 'watch', 'specs', 'stats', 'config', 'tui', 'pipeline', 'executor', 'serve', 'help']);
+const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--plan-model', '--dry-run', '--sequential-first', '--branch']);
 const args = process.argv.slice(2);
 if (args.length > 0 && !COMMANDS.has(args[0])) {
   if (!args[0].startsWith('-') || RUN_FLAGS.has(args[0])) {
@@ -738,7 +799,7 @@ function detectExtraSpecArgs(): void {
   const flagsWithValues = new Set([
     '-s', '--spec', '-S', '--spec-dir', '-C', '--cwd', '-m', '--model',
     '-t', '--max-turns', '-b', '--max-budget', '-r', '--resume', '-f', '--fork',
-    '--concurrency', '--sequential-first', '-B', '--branch',
+    '--concurrency', '--sequential-first', '-B', '--branch', '--plan-model',
   ]);
 
   const positionalArgs: string[] = [];

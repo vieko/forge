@@ -6,6 +6,7 @@ import { ForgeError, isTransientError, sleep, saveResult, ensureForgeDir } from 
 import { DIM, RESET, CMD, AGENT_VERBS, createInlineSpinner, formatProgress } from './display.js';
 import { rewriteBuildCommand } from './verify.js';
 import { getAbortController } from './abort.js';
+import { getDb, insertSession, updateSession } from './db.js';
 
 // What callers pass to runQuery()
 export interface QueryConfig {
@@ -28,6 +29,8 @@ export interface QueryConfig {
   monorepoContext?: MonorepoContext | null;
   /** Directory for .forge/ persistence (session logs, audit, results). Defaults to workingDir. Used to route writes to the original repo when running in a worktree. */
   persistDir?: string;
+  /** Tool names to disallow at the SDK level (removes from model context entirely) */
+  disallowedTools?: string[];
 }
 
 // What runQuery() returns on success
@@ -93,6 +96,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
     verbose, quiet, silent, onActivity,
     auditLogExtra = {}, sessionExtra = {},
     resume, forkSession, specLabel, monorepoContext,
+    disallowedTools,
   } = config;
 
   // Persistence base: original repo when in a worktree, otherwise workingDir
@@ -233,6 +237,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
             'Skill', 'Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob',
             'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'
           ],
+          ...(disallowedTools && disallowedTools.length > 0 && { disallowedTools }),
           permissionMode: 'default',
           includePartialMessages: true,
           hooks: {
@@ -253,6 +258,26 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
           if (!quiet) console.log(`${DIM}[forge]${RESET} Session: ${DIM}${sessionId}${RESET}`);
           if (!quiet && forkSession && resume) console.log(`${DIM}[forge]${RESET} Forked from: ${DIM}${resume}${RESET}`);
           persistSession().catch(() => {});
+
+          // Insert session row into DB (fire-and-forget, graceful degradation)
+          if (sessionId) {
+            try {
+              const db = getDb(persistBase);
+              if (db) {
+                insertSession(db, {
+                  id: sessionId,
+                  specPath: auditLogExtra.spec as string | undefined,
+                  pipelineId: sessionExtra.pipelineId as string | undefined,
+                  commandType: sessionExtra.type as string | undefined,
+                  model: modelName,
+                  startedAt: startTime.toISOString(),
+                });
+              }
+            } catch {
+              // Never crash on DB failures — filesystem remains authoritative
+            }
+          }
+
           if (useSpinner && !agentSpinner) {
             agentSpinner = createInlineSpinner(`${DIM}[forge]${RESET}`);
             agentSpinner.update(`${CMD}${AGENT_VERBS[0]}...${RESET}`);
@@ -457,6 +482,22 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
                 el.close();
               }
             }
+            // Update session row in DB with success status
+            if (sessionId) {
+              try {
+                const db = getDb(persistBase);
+                if (db) {
+                  updateSession(db, sessionId, {
+                    status: 'success',
+                    costUsd: message.total_cost_usd,
+                    endedAt: new Date().toISOString(),
+                  });
+                }
+              } catch {
+                // Never crash on DB failures
+              }
+            }
+
             return {
               resultText: message.result || '',
               costUsd: message.total_cost_usd,
@@ -535,6 +576,22 @@ forge run --resume ${message.session_id || sessionId} "continue"
             }
           }
 
+          // Update session row in DB with error status
+          if (sessionId || message.session_id) {
+            try {
+              const db = getDb(persistBase);
+              if (db) {
+                updateSession(db, sessionId || message.session_id, {
+                  status,
+                  costUsd: message.total_cost_usd,
+                  endedAt: endTime.toISOString(),
+                });
+              }
+            } catch {
+              // Never crash on DB failures
+            }
+          }
+
           await saveResult(persistBase, forgeResult, errorResultText);
           throw new ForgeError(label, forgeResult);
         }
@@ -590,6 +647,22 @@ forge run --resume ${message.session_id || sessionId} "continue"
         sessionId,
         error: errMsg,
       };
+      // Update session row in DB with error status
+      if (sessionId) {
+        try {
+          const db = getDb(persistBase);
+          if (db) {
+            updateSession(db, sessionId, {
+              status: 'error_execution',
+              costUsd: undefined,
+              endedAt: endTime.toISOString(),
+            });
+          }
+        } catch {
+          // Never crash on DB failures
+        }
+      }
+
       await saveResult(persistBase, forgeResult, `Error:\n${errMsg}`).catch(() => {});
       streamLog.current?.close();
       eventLog.current?.close();

@@ -88,7 +88,7 @@ export function isApiErrorResult(resultText: string): boolean {
 }
 
 export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string; _resultDir?: string }): Promise<ForgeResult> {
-  const { prompt, specPath, specContent, cwd, model, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir } = options;
+  const { prompt, specPath, specContent, cwd, model, planModel, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir } = options;
   const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
 
   // Resolve and validate working directory
@@ -102,7 +102,7 @@ export async function runSingleSpec(options: ForgeOptions & { specContent?: stri
     model,
     maxTurns,
     maxBudgetUsd,
-    defaultMaxBudgetUsd: dryRun ? 5.00 : 50.00,
+    defaultMaxBudgetUsd: dryRun || planOnly ? 5.00 : 50.00,
   });
   const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd, config } = resolved;
 
@@ -157,7 +157,43 @@ Output a structured summary:
 
 ${fullPrompt}`;
   } else if (planOnly) {
-    workflowPrompt = `Analyze this work and create a task breakdown. Do NOT implement - planning only.\n\n${fullPrompt}`;
+    workflowPrompt = `## Planning Mode (Read-Only)
+
+You are in planning mode. Explore the codebase, analyze the architecture, and produce a structured plan document.
+
+Do not create, modify, or delete files. Use only read-only tools (Read, Grep, Glob, Bash for \`ls\`, \`git log\`, \`find\`, \`cat\`, \`tree\`, etc.).
+
+## Task
+
+${fullPrompt}
+
+## Required Output
+
+Produce a structured plan document with these sections:
+
+### Goal Summary
+One-paragraph summary of what needs to be accomplished.
+
+### File Inventory
+List every file that will need to be created or modified, with a brief reason for each:
+- path/to/file.ts - [Brief reason]
+
+### Dependency Analysis
+Identify key dependencies, imports, and interfaces that the implementation will rely on. Note any external packages needed.
+
+### Implementation Steps
+Numbered, ordered steps with enough detail that an agent could execute each one. For each step:
+1. What to do
+2. Which files to touch
+3. Key considerations or edge cases
+
+### Risk Assessment
+- Potential breaking changes
+- Edge cases to handle
+- Testing considerations
+- Performance implications
+
+Do not use emojis in your output.`;
   } else {
     workflowPrompt = `## Outcome
 
@@ -186,7 +222,8 @@ Do not use emojis in your output.`;
   let verifyAttempt = 0;
   let currentPrompt = workflowPrompt;
 
-  const modelName = effectiveModel;
+  // Use plan model for plan-only runs if specified, otherwise fall back to effective model
+  const modelName = planOnly && planModel ? planModel : effectiveModel;
   const startTime = new Date();
 
   // Run the query
@@ -196,6 +233,12 @@ Do not use emojis in your output.`;
     }
     if (dryRun) {
       console.log(`${DIM}Mode: dry run (planning only)${RESET}\n`);
+    } else if (planOnly) {
+      console.log(`${DIM}Mode: plan only (read-only, budget: $${effectiveMaxBudgetUsd.toFixed(0)})${RESET}`);
+      if (planModel) {
+        console.log(`${DIM}Plan model: ${modelName}${RESET}`);
+      }
+      console.log('');
     }
   }
 
@@ -206,18 +249,20 @@ Do not use emojis in your output.`;
       workingDir,
       persistDir: resultDir !== workingDir ? resultDir : undefined,
       model: modelName,
-      maxTurns: dryRun ? 20 : effectiveMaxTurns,
+      maxTurns: dryRun ? 20 : planOnly ? 50 : effectiveMaxTurns,
       maxBudgetUsd: effectiveMaxBudgetUsd,
       verbose,
       quiet,
       silent: _silent,
       onActivity: _onActivity,
       auditLogExtra: specPath ? { spec: path.basename(specPath) } : {},
-      sessionExtra: { type: 'run', prompt, ...(isFork && { forkedFrom: options.fork }) },
+      sessionExtra: { type: planOnly ? 'plan' : 'run', prompt, ...(isFork && { forkedFrom: options.fork }) },
       resume: effectiveResume,
       forkSession: isFork,
       specLabel: _specLabel,
       monorepoContext,
+      // Plan-only: block Write and Edit at the SDK level (removed from model context entirely)
+      ...(planOnly && { disallowedTools: ['Write', 'Edit'] }),
     });
 
     const endTime = new Date();
@@ -423,6 +468,27 @@ forge run --resume ${qr.sessionId} "fix verification errors"
     };
 
     const resultsDir = await saveResult(resultDir, forgeResult, qr.resultText);
+
+    // Save plan document to .forge/plans/ for plan-only runs
+    if (planOnly) {
+      const plansDir = path.join(resultDir, '.forge', 'plans');
+      await fs.mkdir(plansDir, { recursive: true });
+      const planTimestamp = startTime.toISOString().replace(/[:.]/g, '-');
+      const planPath = path.join(plansDir, `${planTimestamp}.md`);
+      const planHeader = `---
+model: ${modelName}
+cost: ${qr.costUsd?.toFixed(4) ?? 'N/A'}
+session: ${qr.sessionId || 'N/A'}
+created: ${startTime.toISOString()}
+${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0, 100)}`}
+---
+
+`;
+      await fs.writeFile(planPath, planHeader + qr.resultText);
+      if (!_silent && !quiet) {
+        console.log(`\n  Plan:     ${DIM}${planPath}${RESET}`);
+      }
+    }
 
     // Update spec manifest on success
     const successSpecId = specPath ? specKey(specPath, resultDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);

@@ -56,36 +56,37 @@ describe('verify MCP: forge_start tool description', () => {
   });
 });
 
-// ── stripClaudeEnv for verify ───────────────────────────────
+// ── Command queue pattern (executor) ─────────────────────────
 
-describe('verify MCP: environment stripping', () => {
-  test('stripClaudeEnv function exists in mcp.ts', async () => {
+describe('verify MCP: command queue pattern', () => {
+  test('MCP inserts pending tasks into DB instead of spawning', async () => {
     const mcpPath = path.join(import.meta.dirname, 'mcp.ts');
     const content = await fs.readFile(mcpPath, 'utf-8');
 
-    expect(content).toContain('stripClaudeEnv');
-    expect(content).toContain('CLAUDECODE');
+    // No child process spawning — tasks are queued in DB for executor
+    expect(content).toContain('insertTask');
+    expect(content).toContain("status: 'pending'");
+    expect(content).not.toContain('stripClaudeEnv');
   });
 
-  test('stripClaudeEnv removes CLAUDECODE from env', async () => {
+  test('MCP checks executor liveness before queuing tasks', async () => {
     const mcpPath = path.join(import.meta.dirname, 'mcp.ts');
     const content = await fs.readFile(mcpPath, 'utf-8');
 
-    // The function should filter out CLAUDECODE
-    expect(content).toContain("k === 'CLAUDECODE'");
-    expect(content).toContain("k === 'CLAUDE_CODE_ENTRYPOINT'");
+    expect(content).toContain('isExecutorRunning');
+    expect(content).toContain('No executor running');
   });
 });
 
 // ── Async task pattern ──────────────────────────────────────
 
-describe('verify MCP: async task spawn pattern', () => {
-  test('forge_start uses child process spawn pattern', async () => {
+describe('verify MCP: async task queue pattern', () => {
+  test('forge_start uses DB task queue pattern', async () => {
     const mcpPath = path.join(import.meta.dirname, 'mcp.ts');
     const content = await fs.readFile(mcpPath, 'utf-8');
 
-    // forge_start spawns child processes and tracks them
-    expect(content).toContain('spawn');
+    // forge_start inserts pending tasks and returns task_id
+    expect(content).toContain('insertTask');
     expect(content).toContain('task_id');
   });
 

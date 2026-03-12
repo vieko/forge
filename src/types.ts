@@ -18,6 +18,8 @@ export interface ForgeOptions {
   maxBudgetUsd?: number;
   /** Only create tasks, don't implement */
   planOnly?: boolean;
+  /** Model to use for plan-only runs (e.g. 'sonnet' for cheaper planning) */
+  planModel?: string;
   /** Preview tasks and estimate cost without executing */
   dryRun?: boolean;
   /** Show detailed output */
@@ -386,3 +388,8 @@ export interface ReviewOptions {
   /** Write findings to file */
   output?: string;
 }
+
+// ── Local Configuration ──────────────────────────────────────
+
+// Re-export from config module for convenience
+export type { ForgeLocalConfig } from './config.js';

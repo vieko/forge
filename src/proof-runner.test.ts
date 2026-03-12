@@ -777,6 +777,8 @@ describe('verify MCP integration', () => {
 
   test('forge_start handles verify command', async () => {
     const mcpContent = await fs.readFile(path.join(import.meta.dirname, 'mcp.ts'), 'utf-8');
-    expect(mcpContent).toContain("command === 'verify'");
+    // verify is in the command enum and tasks are queued via insertTask
+    expect(mcpContent).toContain("'verify'");
+    expect(mcpContent).toContain('insertTask');
   });
 });

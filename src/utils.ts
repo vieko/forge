@@ -4,6 +4,7 @@ import path from 'path';
 import os from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { getDb, insertRun } from './db.js';
 
 // Custom error that carries the ForgeResult for cost tracking on failure
 export class ForgeError extends Error {
@@ -268,6 +269,32 @@ ${result.prompt}
 ${resultText}
 `;
   await fs.writeFile(resultPath, resultContent);
+
+  // Dual-write to SQLite (best-effort — filesystem is authoritative)
+  try {
+    const db = getDb(workingDir);
+    if (db) {
+      insertRun(db, {
+        id: timestamp,
+        specPath: result.specPath || null,
+        model: result.model || 'unknown',
+        status: result.status,
+        costUsd: result.costUsd ?? null,
+        durationSeconds: result.durationSeconds,
+        numTurns: result.numTurns ?? null,
+        toolCalls: result.toolCalls ?? null,
+        batchId: result.runId || null,
+        type: result.type || null,
+        prompt: result.prompt,
+        cwd: result.cwd,
+        sessionId: result.sessionId || null,
+        error: result.error || null,
+        createdAt: result.startedAt,
+      });
+    }
+  } catch {
+    // Best effort — don't fail the save if DB write fails
+  }
 
   return resultsDir;
 }

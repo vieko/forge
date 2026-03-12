@@ -81,8 +81,8 @@ beforeAll(async () => {
   }
 
   transport = new StdioClientTransport({
-    command: 'node',
-    args: [serverPath],
+    command: 'bun',
+    args: ['run', serverPath],
     env: { ...process.env, CLAUDECODE: undefined, CLAUDE_CODE_ENTRYPOINT: undefined } as Record<string, string>,
   });
 
@@ -417,9 +417,10 @@ describe('forge_stats', () => {
         ],
       }),
     ]));
-    // Results dir needed for loadSummaries (by_spec reads from manifest though)
+    // Results dir needed for DB backfill — specPath must match manifest entry
     await setupResults(dir, [
-      { ts: '2026-01-01T00-00-00Z', summary: makeSummary() },
+      { ts: '2026-01-01T00-00-00Z', summary: makeSummary({ specPath: 'auth.md' }) },
+      { ts: '2026-01-02T00-00-00Z', summary: makeSummary({ specPath: 'auth.md' }) },
     ]);
 
     const { json } = await callTool('forge_stats', { cwd: dir, by_spec: true });
@@ -885,8 +886,11 @@ describe('forge_pipeline_start', () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
 
-    // Start a pipeline command that will fail quickly (no API key / no CLI command yet)
-    // but the important thing is that forge_pipeline_start returns immediately
+    // Write executor PID file so the executor liveness check passes.
+    // Use current process PID (always alive during test execution).
+    await fs.writeFile(path.join(dir, '.forge', 'executor.pid'), String(process.pid));
+
+    // Queue a pipeline command — returns immediately with a pending task
     const { json } = await callTool('forge_pipeline_start', {
       goal: 'test pipeline for mcp tests',
       cwd: dir,
@@ -895,8 +899,7 @@ describe('forge_pipeline_start', () => {
     expect(json.task_id).toBeTruthy();
     expect(typeof json.task_id).toBe('string');
     expect(json.task_id.length).toBe(16); // 8 random bytes = 16 hex chars
-    expect(json.message).toContain('Started forge pipeline');
-    expect(json.pid).toBeTruthy();
+    expect(json.message).toContain('Queued forge pipeline');
     expect(json.hint).toContain('forge_task');
     expect(json.hint).toContain('forge_pipeline');
 
@@ -904,8 +907,8 @@ describe('forge_pipeline_start', () => {
     const { json: taskJson } = await callTool('forge_task', { task_id: json.task_id });
     expect(taskJson.task_id).toBe(json.task_id);
     expect(taskJson.command).toBe('forge pipeline');
-    // Status could be running or already failed (no CLI command), both are valid
-    expect(['running', 'failed', 'complete']).toContain(taskJson.status);
+    // Task is pending (waiting for executor pickup)
+    expect(['pending', 'running', 'failed', 'complete']).toContain(taskJson.status);
     expect(taskJson.elapsed).toBeTruthy();
   });
 });
@@ -917,8 +920,10 @@ describe('forge_start', () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
 
-    // Start a command that will fail quickly (no API key in test env)
-    // but the important thing is that forge_start returns immediately
+    // Write executor PID file so the executor liveness check passes.
+    await fs.writeFile(path.join(dir, '.forge', 'executor.pid'), String(process.pid));
+
+    // Queue a command — returns immediately with a pending task
     const { json } = await callTool('forge_start', {
       command: 'define',
       description: 'test task for mcp tests',
@@ -928,16 +933,15 @@ describe('forge_start', () => {
     expect(json.task_id).toBeTruthy();
     expect(typeof json.task_id).toBe('string');
     expect(json.task_id.length).toBe(16); // 8 random bytes = 16 hex chars
-    expect(json.message).toContain('Started forge define');
-    expect(json.pid).toBeTruthy();
+    expect(json.message).toContain('Queued forge define');
     expect(json.hint).toContain('forge_task');
 
     // Verify the task is trackable via forge_task
     const { json: taskJson } = await callTool('forge_task', { task_id: json.task_id });
     expect(taskJson.task_id).toBe(json.task_id);
     expect(taskJson.command).toBe('forge define');
-    // Status could be running or already failed (no API key), both are valid
-    expect(['running', 'failed', 'complete']).toContain(taskJson.status);
+    // Task is pending (waiting for executor pickup)
+    expect(['pending', 'running', 'failed', 'complete']).toContain(taskJson.status);
     expect(taskJson.elapsed).toBeTruthy();
   });
 });

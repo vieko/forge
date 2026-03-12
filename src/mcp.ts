@@ -5,8 +5,8 @@
  *
  * Exposes forge commands as MCP tools over stdio transport.
  * Fast tools (specs, status, stats) call internal functions directly.
- * SDK tools (define, proof, run, audit, verify) spawn child processes with
- * CLAUDECODE stripped from env to avoid the nested session guard.
+ * SDK tools (define, proof, run, audit, verify) insert pending task rows
+ * into the database. The executor daemon picks them up and runs them.
  *
  * Async two-tool pattern: forge_start → forge_task (poll).
  * Claude Code buffers stdio output, so long-running commands must
@@ -16,51 +16,33 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { spawn } from 'child_process';
 import crypto from 'crypto';
 import path from 'path';
 import { promises as fs } from 'fs';
 import { loadManifest, findUntrackedSpecs } from './specs.js';
 import { loadSummaries, aggregateRuns, computeSpecStats, computeModelStats, filterSince } from './stats.js';
+import {
+  getDb,
+  getDbWithBackfill,
+  queryStatusRuns,
+  queryAggregateStats,
+  querySpecStats,
+  queryModelStats as queryModelStatsDb,
+  insertTask,
+  getTaskById,
+  markStaleTasks,
+  getActiveTaskByCommandAndCwd,
+} from './db.js';
 import { FileSystemStateProvider } from './pipeline-state.js';
 import type { Pipeline, GateKey } from './pipeline-types.js';
+import { isExecutorRunning } from './executor.js';
 
-// ── Task manager ─────────────────────────────────────────────
+// ── Task tracking (DB-backed) ────────────────────────────────
 
-interface Task {
-  id: string;
-  command: string;
-  cwd: string;
-  status: 'running' | 'complete' | 'failed';
-  startedAt: number;
-  completedAt?: number;
-  exitCode?: number | null;
-  stdout: string[];
-  stderr: string[];
-  pid?: number;
-  sessionId?: string;
-}
-
-const MAX_BUFFER_LINES = 50;
 const TASK_TTL_MS = 60 * 60 * 1000; // 1 hour
 
-const tasks = new Map<string, Task>();
-
-function cleanupStaleTasks(): void {
-  const now = Date.now();
-  for (const [id, task] of tasks) {
-    if (task.status !== 'running' && now - task.startedAt > TASK_TTL_MS) {
-      tasks.delete(id);
-    }
-  }
-}
-
-function pushLine(buf: string[], line: string): void {
-  buf.push(line);
-  if (buf.length > MAX_BUFFER_LINES) {
-    buf.splice(0, buf.length - MAX_BUFFER_LINES);
-  }
-}
+/** In-memory index: taskId -> cwd. Resolves which DB to query within the same MCP process. */
+const taskCwdIndex = new Map<string, string>();
 
 function formatElapsed(ms: number): string {
   const s = Math.round(ms / 1000);
@@ -68,23 +50,6 @@ function formatElapsed(ms: number): string {
   const m = Math.floor(s / 60);
   const rem = s % 60;
   return rem > 0 ? `${m}m${rem}s` : `${m}m`;
-}
-
-/** Strip CLAUDECODE and related env vars so the child process can run SDK commands. */
-function stripClaudeEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v === undefined) continue;
-    if (k === 'CLAUDECODE') continue;
-    if (k === 'CLAUDE_CODE_ENTRYPOINT') continue;
-    env[k] = v;
-  }
-  return env;
-}
-
-/** Resolve the forge CLI binary path. Prefers the built dist/index.js in this package. */
-function forgeBin(): string {
-  return path.resolve(import.meta.dirname, 'index.js');
 }
 
 // ── MCP Server ───────────────────────────────────────────────
@@ -182,6 +147,40 @@ server.registerTool('forge_specs', {
 
 // ── Fast tool: forge_status ──────────────────────────────────
 
+/** Group status rows into batch entries (shared by DB and filesystem paths). */
+function groupStatusRows(rows: { specPath?: string | null; status: string; costUsd?: number | null; durationSeconds: number; model?: string; numTurns?: number | null; batchId?: string | null; startedAt: string }[], all?: boolean, count?: number) {
+  const groups = new Map<string, typeof rows>();
+  for (const s of rows) {
+    const key = s.batchId || s.startedAt;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(s);
+  }
+
+  const sorted = [...groups.entries()].sort((a, b) => {
+    return b[1][0].startedAt.localeCompare(a[1][0].startedAt);
+  });
+
+  const limit = all ? sorted.length : (count || 1);
+  const displayed = sorted.slice(0, limit);
+
+  return displayed.map(([key, specs]) => ({
+    runId: key,
+    startedAt: specs[0].startedAt,
+    specs: specs.map(s => ({
+      spec: s.specPath ? path.basename(s.specPath) : null,
+      status: s.status,
+      cost: s.costUsd ?? null,
+      duration: s.durationSeconds,
+      model: s.model || null,
+      turns: s.numTurns ?? null,
+    })),
+    total: specs.length,
+    passed: specs.filter(s => s.status === 'success').length,
+    totalCost: specs.reduce((sum, s) => sum + (s.costUsd || 0), 0),
+    totalDuration: specs.reduce((sum, s) => sum + s.durationSeconds, 0),
+  }));
+}
+
 server.registerTool('forge_status', {
   description: 'Show results from recent forge runs. Returns structured JSON with run results grouped by batch. Fast — no SDK call.',
   inputSchema: {
@@ -192,45 +191,40 @@ server.registerTool('forge_status', {
 }, async ({ cwd, all, count }) => {
   try {
     const workingDir = path.resolve(cwd);
-    const summaries = await loadSummaries(workingDir);
 
+    // Try DB first
+    let dbRows: { specPath: string | null; status: string; costUsd: number | null; durationSeconds: number; model: string; numTurns: number | null; batchId: string | null; startedAt: string }[] | null = null;
+    try {
+      const db = await getDbWithBackfill(workingDir);
+      if (db) {
+        dbRows = queryStatusRuns(db);
+      }
+    } catch {
+      // Fall through to filesystem
+    }
+
+    if (dbRows && dbRows.length > 0) {
+      const result = groupStatusRows(dbRows, all, count);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ runs: result }, null, 2) }] };
+    }
+
+    // Fallback: filesystem
+    const summaries = await loadSummaries(workingDir);
     if (summaries.length === 0) {
       return { content: [{ type: 'text' as const, text: JSON.stringify({ runs: [], message: 'No results found.' }) }] };
     }
 
-    // Group by runId
-    const groups = new Map<string, typeof summaries>();
-    for (const s of summaries) {
-      const key = s.runId || s.startedAt;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push(s);
-    }
-
-    // Sort newest first
-    const sorted = [...groups.entries()].sort((a, b) => {
-      return b[1][0].startedAt.localeCompare(a[1][0].startedAt);
-    });
-
-    const limit = all ? sorted.length : (count || 1);
-    const displayed = sorted.slice(0, limit);
-
-    const result = displayed.map(([key, specs]) => ({
-      runId: key,
-      startedAt: specs[0].startedAt,
-      specs: specs.map(s => ({
-        spec: s.specPath ? path.basename(s.specPath) : null,
-        status: s.status,
-        cost: s.costUsd,
-        duration: s.durationSeconds,
-        model: s.model,
-        turns: s.numTurns,
-      })),
-      total: specs.length,
-      passed: specs.filter(s => s.status === 'success').length,
-      totalCost: specs.reduce((sum, s) => sum + (s.costUsd || 0), 0),
-      totalDuration: specs.reduce((sum, s) => sum + s.durationSeconds, 0),
+    const fsRows = summaries.map(s => ({
+      specPath: s.specPath || null,
+      status: s.status,
+      costUsd: s.costUsd ?? null,
+      durationSeconds: s.durationSeconds,
+      model: s.model,
+      numTurns: s.numTurns ?? null,
+      batchId: s.runId || null,
+      startedAt: s.startedAt,
     }));
-
+    const result = groupStatusRows(fsRows, all, count);
     return { content: [{ type: 'text' as const, text: JSON.stringify({ runs: result }, null, 2) }] };
   } catch (err) {
     return {
@@ -241,6 +235,24 @@ server.registerTool('forge_status', {
 });
 
 // ── Fast tool: forge_stats ───────────────────────────────────
+
+/** Format aggregate stats into the JSON response shape. */
+function formatAggregateResponse(stats: { total: number; passed: number; failed: number; totalCost: number; totalDuration: number; totalTurns: number; runsWithTurns: number }) {
+  const successRate = stats.total > 0 ? ((stats.passed / stats.total) * 100).toFixed(1) : '0.0';
+  const avgCost = stats.total > 0 ? stats.totalCost / stats.total : 0;
+  const avgDuration = stats.total > 0 ? stats.totalDuration / stats.total : 0;
+  return {
+    total: stats.total,
+    passed: stats.passed,
+    failed: stats.failed,
+    successRate: `${successRate}%`,
+    totalCost: stats.totalCost,
+    avgCostPerRun: avgCost,
+    totalDuration: stats.totalDuration,
+    avgDurationPerRun: avgDuration,
+    avgTurnsPerRun: stats.runsWithTurns > 0 ? stats.totalTurns / stats.runsWithTurns : null,
+  };
+}
 
 server.registerTool('forge_stats', {
   description: 'Aggregate run statistics dashboard. Returns structured JSON with totals, success rate, cost, duration. Fast — no SDK call.',
@@ -253,6 +265,41 @@ server.registerTool('forge_stats', {
 }, async ({ cwd, by_spec, by_model, since }) => {
   try {
     const workingDir = path.resolve(cwd);
+
+    // Try DB first
+    try {
+      const db = await getDbWithBackfill(workingDir);
+      if (db) {
+        if (by_spec) {
+          const rows = querySpecStats(db, since);
+          const specStats = rows.map(r => ({
+            spec: r.specPath,
+            runs: r.runs,
+            passed: r.passed,
+            avgCost: r.avgCost,
+            avgDuration: r.avgDuration,
+          }));
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ by_spec: specStats }, null, 2) }] };
+        }
+
+        if (by_model) {
+          const rows = queryModelStatsDb(db, since);
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ by_model: rows }, null, 2) }] };
+        }
+
+        const row = queryAggregateStats(db, since);
+        if (row.total === 0) {
+          const msg = since ? `No runs found since ${since}.` : 'No runs found.';
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ message: msg }) }] };
+        }
+
+        return { content: [{ type: 'text' as const, text: JSON.stringify(formatAggregateResponse(row), null, 2) }] };
+      }
+    } catch {
+      // Fall through to filesystem
+    }
+
+    // Fallback: filesystem
     let summaries = await loadSummaries(workingDir);
 
     if (summaries.length === 0) {
@@ -278,26 +325,7 @@ server.registerTool('forge_stats', {
     }
 
     const stats = aggregateRuns(summaries);
-    const successRate = stats.total > 0 ? ((stats.passed / stats.total) * 100).toFixed(1) : '0.0';
-    const avgCost = stats.total > 0 ? stats.totalCost / stats.total : 0;
-    const avgDuration = stats.total > 0 ? stats.totalDuration / stats.total : 0;
-
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({
-          total: stats.total,
-          passed: stats.passed,
-          failed: stats.failed,
-          successRate: `${successRate}%`,
-          totalCost: stats.totalCost,
-          avgCostPerRun: avgCost,
-          totalDuration: stats.totalDuration,
-          avgDurationPerRun: avgDuration,
-          avgTurnsPerRun: stats.runsWithTurns > 0 ? stats.totalTurns / stats.runsWithTurns : null,
-        }, null, 2),
-      }],
-    };
+    return { content: [{ type: 'text' as const, text: JSON.stringify(formatAggregateResponse(stats), null, 2) }] };
   } catch (err) {
     return {
       content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
@@ -309,7 +337,7 @@ server.registerTool('forge_stats', {
 // ── Async tool: forge_start ──────────────────────────────────
 
 server.registerTool('forge_start', {
-  description: `Start a long-running forge command (define, proof, run, audit, verify). Returns a task_id immediately — use forge_task to poll for completion. The command runs in a separate process (not nested in Claude Code). Typical durations: define 3-5min, run 5-15min, audit 3-10min, proof 2-5min, verify 5-15min. Poll every 30-60s with forge_task.`,
+  description: `Queue a forge command (define, proof, run, audit, verify) for execution by the executor daemon. Returns a task_id immediately — use forge_task to poll for completion. Requires a running executor (forge executor). Typical durations: define 3-5min, run 5-15min, audit 3-10min, proof 2-5min, verify 5-15min. Poll every 30-60s with forge_task.`,
   inputSchema: {
     command: z.enum(['define', 'proof', 'prove', 'run', 'audit', 'verify']).describe('Forge command to run'),
     description: z.string().describe('Task description or prompt for the command'),
@@ -321,116 +349,62 @@ server.registerTool('forge_start', {
   },
 }, async ({ command, description, cwd, output_dir, model, spec_path, extra_args }) => {
   try {
-    cleanupStaleTasks();
+    const workingDir = path.resolve(cwd);
+    const db = getDb(workingDir);
+    if (!db) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Database unavailable. Ensure .forge directory exists.' }) }],
+        isError: true,
+      };
+    }
+
+    // Check executor liveness — tasks need a running executor to be picked up
+    if (!(await isExecutorRunning(workingDir))) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            error: 'No executor running. Start one with: forge executor',
+            hint: 'Run `forge executor` (or `forge serve`) in a terminal to start the task executor daemon.',
+          }),
+        }],
+        isError: true,
+      };
+    }
+
+    // Clean up stale tasks via SQL
+    markStaleTasks(db, TASK_TTL_MS);
 
     const taskId = crypto.randomBytes(8).toString('hex');
-    const workingDir = path.resolve(cwd);
 
-    // Build CLI arguments
-    const args: string[] = [forgeBin(), command];
-
-    // Commands that take positional path argument(s)
-    if ((command === 'audit' || command === 'verify') && spec_path) {
-      args.push(spec_path);
-    }
-    // proof/prove supports multiple spec paths (variadic positional args)
-    if ((command === 'proof' || command === 'prove') && spec_path) {
-      const paths = spec_path.split(/\s+/).filter(Boolean);
-      args.push(...paths);
-    }
-
-    // Commands that take a positional prompt/description argument
-    if (command === 'define' || command === 'run') {
-      args.push(description);
-    }
-
-    // For audit/proof/verify, the description is an optional second positional arg
-    if ((command === 'audit' || command === 'proof' || command === 'prove' || command === 'verify') && description) {
-      args.push(description);
-    }
-
-    // run with --spec or --spec-dir
-    if (command === 'run' && spec_path) {
-      const resolvedSpec = path.resolve(cwd, spec_path);
-      try {
-        const stat = await fs.stat(resolvedSpec);
-        args.push(stat.isDirectory() ? '--spec-dir' : '--spec', spec_path);
-      } catch {
-        // Path doesn't exist yet — fall back to --spec, let forge handle the error
-        args.push('--spec', spec_path);
-      }
-    }
-
-    if (output_dir) args.push('--output-dir', output_dir);
-    if (model) args.push('--model', model);
-
-    // Always pass --quiet to reduce noise in captured output
-    args.push('--quiet');
-
-    if (extra_args) args.push(...extra_args);
-
-    const child = spawn('bun', args, {
-      cwd: workingDir,
-      env: stripClaudeEnv(),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: false,
-    });
-
-    const task: Task = {
-      id: taskId,
-      command: `forge ${command}`,
-      cwd: workingDir,
-      status: 'running',
-      startedAt: Date.now(),
-      stdout: [],
-      stderr: [],
-      pid: child.pid,
+    // Store structured parameters for the executor to dispatch
+    const params: Record<string, unknown> = {
+      specPath: spec_path || null,
+      outputDir: output_dir || null,
+      model: model || null,
+      extraArgs: extra_args || [],
     };
 
-    child.stdout?.on('data', (data: Buffer) => {
-      for (const line of data.toString().split('\n')) {
-        if (line.trim()) pushLine(task.stdout, line);
-      }
+    // Insert task with status 'pending' — executor picks it up
+    insertTask(db, {
+      id: taskId,
+      command: `forge ${command}`,
+      description,
+      specPath: spec_path || null,
+      status: 'pending',
+      cwd: workingDir,
+      params,
     });
 
-    // Capture sessionId: poll latest-session.json shortly after start
-    // The child persists session info on SDK init before any work begins
-    setTimeout(async () => {
-      if (task.sessionId) return; // already captured
-      try {
-        const latestPath = path.join(workingDir, '.forge', 'latest-session.json');
-        const data = JSON.parse(await fs.readFile(latestPath, 'utf-8'));
-        if (data.sessionId) task.sessionId = data.sessionId;
-      } catch { /* ignore */ }
-    }, 3000);
-
-    child.stderr?.on('data', (data: Buffer) => {
-      for (const line of data.toString().split('\n')) {
-        if (line.trim()) pushLine(task.stderr, line);
-      }
-    });
-
-    child.on('close', (code) => {
-      task.status = code === 0 ? 'complete' : 'failed';
-      task.completedAt = Date.now();
-      task.exitCode = code;
-    });
-
-    child.on('error', (err) => {
-      task.status = 'failed';
-      task.completedAt = Date.now();
-      pushLine(task.stderr, `Process error: ${err.message}`);
-    });
-
-    tasks.set(taskId, task);
+    // Track for same-process lookups (forge_task resolution)
+    taskCwdIndex.set(taskId, workingDir);
 
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
           task_id: taskId,
-          message: `Started ${task.command}`,
-          pid: child.pid,
+          message: `Queued forge ${command}`,
           hint: 'Use forge_task to poll for completion, or forge_watch for detailed activity. Check every 30-60s.',
         }),
       }],
@@ -449,9 +423,30 @@ server.registerTool('forge_task', {
   description: 'Check status of a running/completed forge task. Returns status, elapsed time, and recent output lines. When status is "complete" or "failed", the task is done.',
   inputSchema: {
     task_id: z.string().describe('Task ID returned by forge_start'),
+    cwd: z.string().optional().describe('Working directory (target repo). Required after MCP server restart to locate the task database.'),
   },
-}, async ({ task_id }) => {
-  const task = tasks.get(task_id);
+}, async ({ task_id, cwd }) => {
+  // Resolve working directory for DB lookup
+  const resolvedCwd = taskCwdIndex.get(task_id) || (cwd ? path.resolve(cwd) : null);
+  if (!resolvedCwd) {
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify({ error: `Task ${task_id} not found. If the MCP server was restarted, provide the cwd parameter.` }) }],
+      isError: true,
+    };
+  }
+
+  const db = getDb(resolvedCwd);
+  if (!db) {
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Database unavailable.' }) }],
+      isError: true,
+    };
+  }
+
+  // Clean up stale tasks
+  markStaleTasks(db, TASK_TTL_MS);
+
+  const task = getTaskById(db, task_id);
   if (!task) {
     return {
       content: [{ type: 'text' as const, text: JSON.stringify({ error: `Task ${task_id} not found. It may have expired (TTL: 1 hour).` }) }],
@@ -459,16 +454,31 @@ server.registerTool('forge_task', {
     };
   }
 
-  const elapsed = (task.completedAt || Date.now()) - task.startedAt;
+  // Task lifecycle is managed by the executor daemon — no PID liveness checks needed here.
+  // Stale tasks are cleaned up by markStaleTasks() based on updatedAt TTL.
+  const effectiveStatus = task.status;
 
-  // Combine recent output (last 20 lines of each)
-  const recentStdout = task.stdout.slice(-20);
-  const recentStderr = task.stderr.slice(-10);
+  // Register in index for future lookups (in case cwd was provided explicitly)
+  if (!taskCwdIndex.has(task_id)) {
+    taskCwdIndex.set(task_id, task.cwd);
+  }
+
+  const createdMs = new Date(task.createdAt).getTime();
+  const updatedMs = new Date(task.updatedAt).getTime();
+  const elapsed = effectiveStatus === 'running' ? Date.now() - createdMs : updatedMs - createdMs;
+
+  const stdout: string[] = JSON.parse(task.stdout || '[]');
+  const stderr: string[] = JSON.parse(task.stderr || '[]');
+  const recentStdout = stdout.slice(-20);
+  const recentStderr = stderr.slice(-10);
+
+  // Map DB status 'completed' to API status 'complete' for backward compatibility
+  const apiStatus = effectiveStatus === 'completed' ? 'complete' : effectiveStatus;
 
   const result: Record<string, unknown> = {
     task_id: task.id,
     command: task.command,
-    status: task.status,
+    status: apiStatus,
     elapsed: formatElapsed(elapsed),
     elapsed_ms: elapsed,
     recent_output: recentStdout,
@@ -482,7 +492,7 @@ server.registerTool('forge_task', {
     result.recent_errors = recentStderr;
   }
 
-  if (task.status !== 'running') {
+  if (effectiveStatus !== 'running') {
     result.exit_code = task.exitCode;
     result.duration_seconds = Math.round(elapsed / 1000);
   }
@@ -504,7 +514,7 @@ server.registerTool('forge_task', {
           pending_stages: pendingStages,
           total_cost: active.totalCost,
         };
-        if (task.status !== 'running') {
+        if (effectiveStatus !== 'running') {
           result.hint = active.status === 'completed'
             ? 'Pipeline finished. All stages ran — do not run individual stages or create PRs (verify handles that).'
             : 'Pipeline failed. Check pipeline status for details.';
@@ -539,10 +549,14 @@ server.registerTool('forge_watch', {
     let logPath: string | undefined;
 
     if (task_id) {
-      const task = tasks.get(task_id);
-      if (task) {
-        workingDir = task.cwd;
-        sessionId = task.sessionId;
+      const taskCwd = taskCwdIndex.get(task_id) || workingDir;
+      const taskDb = getDb(taskCwd);
+      if (taskDb) {
+        const taskRow = getTaskById(taskDb, task_id);
+        if (taskRow) {
+          workingDir = taskRow.cwd;
+          sessionId = taskRow.sessionId || undefined;
+        }
       }
     }
 
@@ -773,7 +787,7 @@ server.registerTool('forge_pipeline', {
 // ── Async tool: forge_pipeline_start ─────────────────────────
 
 server.registerTool('forge_pipeline_start', {
-  description: 'Start a pipeline process. Spawns forge pipeline as a child process and returns a task_id for polling via forge_task. Typical duration: 15-60min depending on pipeline scope. Poll every 30-60s with forge_task.',
+  description: 'Queue a pipeline for execution by the executor daemon. Returns a task_id for polling via forge_task. Requires a running executor (forge executor). Typical duration: 15-60min depending on pipeline scope. Poll every 30-60s with forge_task.',
   inputSchema: {
     goal: z.string().describe('High-level goal describing what to build'),
     cwd: z.string().describe('Working directory (target repo)'),
@@ -785,112 +799,78 @@ server.registerTool('forge_pipeline_start', {
   },
 }, async ({ goal, cwd, spec_path, from_stage, gate_all, model, extra_args }) => {
   try {
-    cleanupStaleTasks();
-
-    const taskId = crypto.randomBytes(8).toString('hex');
     const workingDir = path.resolve(cwd);
-
-    // Guard: check if a pipeline process is already running for this repo
-    for (const [, task] of tasks) {
-      if (task.command === 'forge pipeline' && task.cwd === workingDir && task.status === 'running') {
-        // Verify the process is actually alive (may have been killed externally)
-        let alive = false;
-        if (task.pid) {
-          try { process.kill(task.pid, 0); alive = true; } catch { /* process dead */ }
-        }
-        if (!alive) {
-          task.status = 'failed';
-          task.completedAt = Date.now();
-          continue;
-        }
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-              error: 'A pipeline is already running for this directory',
-              task_id: task.id,
-              hint: 'Use forge_pipeline to check state or forge_task to poll the existing run.',
-            }),
-          }],
-          isError: true,
-        };
-      }
+    const db = getDb(workingDir);
+    if (!db) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Database unavailable. Ensure .forge directory exists.' }) }],
+        isError: true,
+      };
     }
 
-    // Build CLI arguments: forge pipeline "<goal>"
-    const args: string[] = [forgeBin(), 'pipeline', goal];
+    // Check executor liveness
+    if (!(await isExecutorRunning(workingDir))) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            error: 'No executor running. Start one with: forge executor',
+            hint: 'Run `forge executor` (or `forge serve`) in a terminal to start the task executor daemon.',
+          }),
+        }],
+        isError: true,
+      };
+    }
 
-    if (spec_path) args.push('--spec-dir', spec_path);
-    if (from_stage) args.push('--from', from_stage);
-    if (gate_all) args.push('--gate-all', gate_all);
-    if (model) args.push('--model', model);
+    // Clean up stale tasks via SQL
+    markStaleTasks(db, TASK_TTL_MS);
 
-    // Always pass --quiet to reduce noise in captured output
-    args.push('--quiet');
+    // Guard: check if a pipeline is already active (pending or running) for this repo
+    const existingTask = getActiveTaskByCommandAndCwd(db, 'forge pipeline', workingDir);
+    if (existingTask) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            error: 'A pipeline is already queued or running for this directory',
+            task_id: existingTask.id,
+            hint: 'Use forge_pipeline to check state or forge_task to poll the existing run.',
+          }),
+        }],
+        isError: true,
+      };
+    }
 
-    if (extra_args) args.push(...extra_args);
+    const taskId = crypto.randomBytes(8).toString('hex');
 
-    const child = spawn('bun', args, {
-      cwd: workingDir,
-      env: stripClaudeEnv(),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: false,
-    });
-
-    const task: Task = {
-      id: taskId,
-      command: 'forge pipeline',
-      cwd: workingDir,
-      status: 'running',
-      startedAt: Date.now(),
-      stdout: [],
-      stderr: [],
-      pid: child.pid,
+    // Store structured parameters for the executor to dispatch
+    const params: Record<string, unknown> = {
+      specPath: spec_path || null,
+      fromStage: from_stage || null,
+      gateAll: gate_all || null,
+      model: model || null,
+      extraArgs: extra_args || [],
     };
 
-    child.stdout?.on('data', (data: Buffer) => {
-      for (const line of data.toString().split('\n')) {
-        if (line.trim()) pushLine(task.stdout, line);
-      }
+    // Insert task with status 'pending' — executor picks it up
+    insertTask(db, {
+      id: taskId,
+      command: 'forge pipeline',
+      description: goal,
+      status: 'pending',
+      cwd: workingDir,
+      params,
     });
 
-    // Capture sessionId from latest-session.json after child starts
-    setTimeout(async () => {
-      if (task.sessionId) return;
-      try {
-        const latestPath = path.join(workingDir, '.forge', 'latest-session.json');
-        const data = JSON.parse(await fs.readFile(latestPath, 'utf-8'));
-        if (data.sessionId) task.sessionId = data.sessionId;
-      } catch { /* ignore */ }
-    }, 3000);
-
-    child.stderr?.on('data', (data: Buffer) => {
-      for (const line of data.toString().split('\n')) {
-        if (line.trim()) pushLine(task.stderr, line);
-      }
-    });
-
-    child.on('close', (code) => {
-      task.status = code === 0 ? 'complete' : 'failed';
-      task.completedAt = Date.now();
-      task.exitCode = code;
-    });
-
-    child.on('error', (err) => {
-      task.status = 'failed';
-      task.completedAt = Date.now();
-      pushLine(task.stderr, `Process error: ${err.message}`);
-    });
-
-    tasks.set(taskId, task);
+    // Track for same-process lookups
+    taskCwdIndex.set(taskId, workingDir);
 
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
           task_id: taskId,
-          message: 'Started forge pipeline',
-          pid: child.pid,
+          message: 'Queued forge pipeline',
           hint: 'Use forge_task to poll for completion, forge_watch for detailed activity, or forge_pipeline to check pipeline state. Check every 30-60s.',
         }),
       }],

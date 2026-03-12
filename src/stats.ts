@@ -3,6 +3,13 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { DIM, RESET, BOLD } from './display.js';
 import { loadManifest } from './specs.js';
+import {
+  getDbWithBackfill,
+  queryAggregateStats,
+  querySpecStats,
+  queryModelStats as queryModelStatsDb,
+} from './db.js';
+import type { AggregateRow, SpecStatsRow, ModelStatsRow } from './db.js';
 
 // ── Options ──────────────────────────────────────────────────
 
@@ -192,6 +199,150 @@ export function filterSince(summaries: ForgeResult[], since: string): ForgeResul
   return summaries.filter(s => s.startedAt >= since);
 }
 
+// ── Display helpers (shared by DB and fallback paths) ────────
+
+function printSpecBreakdown(specStats: { spec: string; runs: number; passed: number; avgCost: number; avgDuration: number }[], since?: string): void {
+  if (specStats.length === 0) {
+    console.log('No spec run data found.');
+    return;
+  }
+
+  const nameWidth = Math.max(20, ...specStats.map(s => s.spec.length));
+
+  console.log(`\n${BOLD}Per-Spec Breakdown${RESET}`);
+  if (since) console.log(`${DIM}(since ${since})${RESET}`);
+  console.log();
+
+  console.log(
+    `  ${'Spec'.padEnd(nameWidth)}  ${'Runs'.padStart(5)}  ${'Pass'.padStart(5)}  ${'Avg Cost'.padStart(9)}  ${'Avg Time'.padStart(9)}`,
+  );
+  console.log(`  ${DIM}${'─'.repeat(nameWidth + 36)}${RESET}`);
+
+  for (const s of specStats) {
+    const passRate = s.runs > 0 ? `${Math.round((s.passed / s.runs) * 100)}%` : '-';
+    const avgCost = s.avgCost > 0 ? `$${s.avgCost.toFixed(2)}` : '-';
+    const avgTime = formatDuration(s.avgDuration);
+
+    console.log(
+      `  ${s.spec.padEnd(nameWidth)}  ${String(s.runs).padStart(5)}  ${passRate.padStart(5)}  ${avgCost.padStart(9)}  ${avgTime.padStart(9)}`,
+    );
+  }
+
+  console.log('');
+}
+
+function printModelBreakdown(modelStats: { model: string; runs: number; passed: number; avgCost: number; avgDuration: number }[], since?: string): void {
+  if (modelStats.length === 0) {
+    console.log('No run data found.');
+    return;
+  }
+
+  const nameWidth = Math.max(10, ...modelStats.map(s => s.model.length));
+
+  console.log(`\n${BOLD}Per-Model Breakdown${RESET}`);
+  if (since) console.log(`${DIM}(since ${since})${RESET}`);
+  console.log();
+
+  console.log(
+    `  ${'Model'.padEnd(nameWidth)}  ${'Runs'.padStart(5)}  ${'Pass'.padStart(5)}  ${'Avg Cost'.padStart(9)}  ${'Avg Time'.padStart(9)}`,
+  );
+  console.log(`  ${DIM}${'─'.repeat(nameWidth + 36)}${RESET}`);
+
+  for (const s of modelStats) {
+    const passRate = s.runs > 0 ? `${Math.round((s.passed / s.runs) * 100)}%` : '-';
+    const avgCost = s.avgCost > 0 ? `$${s.avgCost.toFixed(2)}` : '-';
+    const avgTime = formatDuration(s.avgDuration);
+
+    console.log(
+      `  ${s.model.padEnd(nameWidth)}  ${String(s.runs).padStart(5)}  ${passRate.padStart(5)}  ${avgCost.padStart(9)}  ${avgTime.padStart(9)}`,
+    );
+  }
+
+  console.log('');
+}
+
+function printDashboard(stats: AggregatedStats, since?: string): void {
+  console.log(`\n${BOLD}Forge Stats${RESET}`);
+  if (since) console.log(`${DIM}(since ${since})${RESET}`);
+  console.log();
+
+  const passLabel = stats.passed > 0 ? `\x1b[32m${stats.passed} passed\x1b[0m` : '';
+  const failLabel = stats.failed > 0 ? `\x1b[31m${stats.failed} failed\x1b[0m` : '';
+  const breakdown = [passLabel, failLabel].filter(Boolean).join(', ');
+  console.log(`  Runs:      ${BOLD}${stats.total}${RESET} total${breakdown ? ` (${breakdown})` : ''}`);
+
+  const successRate = stats.total > 0 ? ((stats.passed / stats.total) * 100).toFixed(1) : '0.0';
+  console.log(`  Success:   ${BOLD}${successRate}%${RESET}`);
+
+  const avgCost = stats.total > 0 ? stats.totalCost / stats.total : 0;
+  console.log(`  Cost:      ${BOLD}$${stats.totalCost.toFixed(2)}${RESET} total${stats.total > 0 ? ` ($${avgCost.toFixed(2)} avg/run)` : ''}`);
+
+  const avgDuration = stats.total > 0 ? stats.totalDuration / stats.total : 0;
+  console.log(`  Duration:  ${BOLD}${formatDuration(stats.totalDuration)}${RESET} total${stats.total > 0 ? ` (${formatDuration(avgDuration)} avg/run)` : ''}`);
+
+  if (stats.runsWithTurns > 0) {
+    const avgTurns = stats.totalTurns / stats.runsWithTurns;
+    console.log(`  Turns:     ${BOLD}${avgTurns.toFixed(1)}${RESET} avg/run`);
+  }
+
+  console.log('');
+}
+
+// ── DB-backed stats queries ─────────────────────────────────
+
+/**
+ * Try to serve stats from the DB. Returns true if successful,
+ * false if DB is unavailable (caller should fall back to filesystem).
+ */
+async function showStatsFromDb(workingDir: string, options: StatsOptions): Promise<boolean> {
+  const db = await getDbWithBackfill(workingDir);
+  if (!db) return false;
+
+  try {
+    if (options.bySpec) {
+      const rows = querySpecStats(db, options.since);
+      const specStats = rows.map(r => ({
+        spec: r.specPath,
+        runs: r.runs,
+        passed: r.passed,
+        avgCost: r.avgCost,
+        avgDuration: r.avgDuration,
+      }));
+      printSpecBreakdown(specStats, options.since);
+      return true;
+    }
+
+    if (options.byModel) {
+      const rows = queryModelStatsDb(db, options.since);
+      const modelStats = rows.map(r => ({
+        model: r.model,
+        runs: r.runs,
+        passed: r.passed,
+        avgCost: r.avgCost,
+        avgDuration: r.avgDuration,
+      }));
+      printModelBreakdown(modelStats, options.since);
+      return true;
+    }
+
+    // Default dashboard
+    const row = queryAggregateStats(db, options.since);
+    if (row.total === 0) {
+      if (options.since) {
+        console.log(`No runs found since ${options.since}.`);
+      } else {
+        console.log('No runs found.');
+      }
+      return true;
+    }
+
+    printDashboard(row, options.since);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Main command ─────────────────────────────────────────────
 
 export async function showStats(options: StatsOptions): Promise<void> {
@@ -203,7 +354,11 @@ export async function showStats(options: StatsOptions): Promise<void> {
     process.exit(1);
   }
 
-  // Load summaries
+  // Try DB-backed stats first
+  const served = await showStatsFromDb(workingDir, options);
+  if (served) return;
+
+  // Fallback: filesystem scanning
   let summaries = await loadSummaries(workingDir);
 
   if (summaries.length === 0) {
@@ -220,109 +375,22 @@ export async function showStats(options: StatsOptions): Promise<void> {
     }
   }
 
-  // Per-spec breakdown
+  // Per-spec breakdown (fallback uses manifest)
   if (options.bySpec) {
     const manifest = await loadManifest(workingDir);
     const specStats = computeSpecStats(manifest);
-
-    if (specStats.length === 0) {
-      console.log('No spec run data in manifest.');
-      return;
-    }
-
-    // Dynamic column width
-    const nameWidth = Math.max(20, ...specStats.map(s => s.spec.length));
-
-    console.log(`\n${BOLD}Per-Spec Breakdown${RESET}`);
-    if (options.since) console.log(`${DIM}(since ${options.since})${RESET}`);
-    console.log();
-
-    // Header
-    console.log(
-      `  ${'Spec'.padEnd(nameWidth)}  ${'Runs'.padStart(5)}  ${'Pass'.padStart(5)}  ${'Avg Cost'.padStart(9)}  ${'Avg Time'.padStart(9)}`,
-    );
-    console.log(`  ${DIM}${'─'.repeat(nameWidth + 36)}${RESET}`);
-
-    for (const s of specStats) {
-      const passRate = s.runs > 0 ? `${Math.round((s.passed / s.runs) * 100)}%` : '-';
-      const avgCost = s.avgCost > 0 ? `$${s.avgCost.toFixed(2)}` : '-';
-      const avgTime = formatDuration(s.avgDuration);
-
-      console.log(
-        `  ${s.spec.padEnd(nameWidth)}  ${String(s.runs).padStart(5)}  ${passRate.padStart(5)}  ${avgCost.padStart(9)}  ${avgTime.padStart(9)}`,
-      );
-    }
-
-    console.log('');
+    printSpecBreakdown(specStats, options.since);
     return;
   }
 
   // Per-model breakdown
   if (options.byModel) {
     const modelStats = computeModelStats(summaries);
-
-    if (modelStats.length === 0) {
-      console.log('No run data found.');
-      return;
-    }
-
-    // Dynamic column width
-    const nameWidth = Math.max(10, ...modelStats.map(s => s.model.length));
-
-    console.log(`\n${BOLD}Per-Model Breakdown${RESET}`);
-    if (options.since) console.log(`${DIM}(since ${options.since})${RESET}`);
-    console.log();
-
-    // Header
-    console.log(
-      `  ${'Model'.padEnd(nameWidth)}  ${'Runs'.padStart(5)}  ${'Pass'.padStart(5)}  ${'Avg Cost'.padStart(9)}  ${'Avg Time'.padStart(9)}`,
-    );
-    console.log(`  ${DIM}${'─'.repeat(nameWidth + 36)}${RESET}`);
-
-    for (const s of modelStats) {
-      const passRate = s.runs > 0 ? `${Math.round((s.passed / s.runs) * 100)}%` : '-';
-      const avgCost = s.avgCost > 0 ? `$${s.avgCost.toFixed(2)}` : '-';
-      const avgTime = formatDuration(s.avgDuration);
-
-      console.log(
-        `  ${s.model.padEnd(nameWidth)}  ${String(s.runs).padStart(5)}  ${passRate.padStart(5)}  ${avgCost.padStart(9)}  ${avgTime.padStart(9)}`,
-      );
-    }
-
-    console.log('');
+    printModelBreakdown(modelStats, options.since);
     return;
   }
 
   // Default dashboard
   const stats = aggregateRuns(summaries);
-
-  console.log(`\n${BOLD}Forge Stats${RESET}`);
-  if (options.since) console.log(`${DIM}(since ${options.since})${RESET}`);
-  console.log();
-
-  // Runs
-  const passLabel = stats.passed > 0 ? `\x1b[32m${stats.passed} passed\x1b[0m` : '';
-  const failLabel = stats.failed > 0 ? `\x1b[31m${stats.failed} failed\x1b[0m` : '';
-  const breakdown = [passLabel, failLabel].filter(Boolean).join(', ');
-  console.log(`  Runs:      ${BOLD}${stats.total}${RESET} total${breakdown ? ` (${breakdown})` : ''}`);
-
-  // Success rate
-  const successRate = stats.total > 0 ? ((stats.passed / stats.total) * 100).toFixed(1) : '0.0';
-  console.log(`  Success:   ${BOLD}${successRate}%${RESET}`);
-
-  // Cost
-  const avgCost = stats.total > 0 ? stats.totalCost / stats.total : 0;
-  console.log(`  Cost:      ${BOLD}$${stats.totalCost.toFixed(2)}${RESET} total${stats.total > 0 ? ` ($${avgCost.toFixed(2)} avg/run)` : ''}`);
-
-  // Duration
-  const avgDuration = stats.total > 0 ? stats.totalDuration / stats.total : 0;
-  console.log(`  Duration:  ${BOLD}${formatDuration(stats.totalDuration)}${RESET} total${stats.total > 0 ? ` (${formatDuration(avgDuration)} avg/run)` : ''}`);
-
-  // Turns
-  if (stats.runsWithTurns > 0) {
-    const avgTurns = stats.totalTurns / stats.runsWithTurns;
-    console.log(`  Turns:     ${BOLD}${avgTurns.toFixed(1)}${RESET} avg/run`);
-  }
-
-  console.log('');
+  printDashboard(stats, options.since);
 }
