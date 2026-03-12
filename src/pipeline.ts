@@ -24,8 +24,10 @@ import { runForge as realRunForge } from './parallel.js';
 import { runAudit as realRunAudit } from './audit.js';
 import { runProof as realRunProof } from './proof.js';
 import { runVerify as realRunVerify } from './proof-runner.js';
-import { resolveWorkingDir, ForgeError, sleep } from './utils.js';
+import { resolveWorkingDir, ForgeError, sleep, createWorktree, commitWorktree, cleanupWorktree } from './utils.js';
 import { isInterrupted } from './abort.js';
+import { getConfig } from './config.js';
+import { resolveSetupCommands, resolveTeardownCommands, runWorkspaceHooks } from './workspace.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import type { ForgeResult, ProofManifest } from './types.js';
@@ -467,6 +469,133 @@ export async function runPipeline(
     await stateProvider.savePipeline(pipeline);
   }
 
+  // ── Worktree setup ─────────────────────────────────────────
+  // Every pipeline runs in a dedicated git worktree for isolation.
+  // The original repo's .forge/ directory receives all persistence
+  // writes (sessions, results, manifest) via persistDir.
+  const originalCwd = await resolveWorkingDir(options.cwd);
+
+  if (!options.resume) {
+    // New pipeline: create a fresh worktree
+    const branch = `forge-${pipeline.id}`;
+    let worktreePath: string;
+    try {
+      worktreePath = await createWorktree(originalCwd, branch);
+    } catch (err) {
+      // Worktree creation failed — mark pipeline as failed and bail
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      pipeline.status = 'failed';
+      pipeline.updatedAt = new Date().toISOString();
+      await stateProvider.savePipeline(pipeline);
+
+      await events.publish({
+        type: 'pipeline_failed',
+        pipelineId: pipeline.id,
+        timestamp: new Date().toISOString(),
+        stage: 'define',
+        error: `Worktree creation failed: ${errorMsg}`,
+      });
+
+      return pipeline;
+    }
+
+    // Store worktree info in pipeline record
+    pipeline.worktreePath = worktreePath;
+    pipeline.branch = branch;
+    pipeline.updatedAt = new Date().toISOString();
+    await stateProvider.savePipeline(pipeline);
+
+    if (!options.quiet) {
+      console.log(`\x1b[2m[forge]\x1b[0m Worktree: ${worktreePath} (branch: ${branch})`);
+    }
+
+    // ── Run workspace setup hooks ─────────────────────────────
+    const config = getConfig(originalCwd);
+    const setupCommands = await resolveSetupCommands(worktreePath, config);
+
+    if (setupCommands.length > 0) {
+      if (!options.quiet) {
+        console.log(`\x1b[2m[forge]\x1b[0m Running workspace setup (${setupCommands.length} command${setupCommands.length > 1 ? 's' : ''})...`);
+      }
+
+      const setupResult = await runWorkspaceHooks(
+        setupCommands,
+        worktreePath,
+        config.setupTimeout,
+        options.quiet,
+      );
+
+      if (!setupResult.success) {
+        // Setup failed -- mark pipeline as failed and clean up worktree
+        const errorMsg = `Workspace setup failed: ${setupResult.failedCommand}\n${setupResult.output}`;
+        pipeline.status = 'failed';
+        pipeline.updatedAt = new Date().toISOString();
+        await stateProvider.savePipeline(pipeline);
+
+        await events.publish({
+          type: 'pipeline_failed',
+          pipelineId: pipeline.id,
+          timestamp: new Date().toISOString(),
+          stage: 'define',
+          error: errorMsg,
+        });
+
+        // Best-effort worktree cleanup after setup failure
+        try {
+          await cleanupWorktree(worktreePath, originalCwd);
+        } catch {
+          // Best effort
+        }
+
+        return pipeline;
+      }
+
+      if (!options.quiet) {
+        console.log(`\x1b[2m[forge]\x1b[0m Workspace setup complete`);
+      }
+    }
+  } else if (pipeline.worktreePath) {
+    // Resuming: verify the worktree still exists
+    try {
+      await fs.access(pipeline.worktreePath);
+    } catch {
+      // Worktree was cleaned up — recreate it
+      const branch = pipeline.branch || `forge-${pipeline.id}`;
+      try {
+        const worktreePath = await createWorktree(originalCwd, branch);
+        pipeline.worktreePath = worktreePath;
+        pipeline.branch = branch;
+        pipeline.updatedAt = new Date().toISOString();
+        await stateProvider.savePipeline(pipeline);
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        pipeline.status = 'failed';
+        pipeline.updatedAt = new Date().toISOString();
+        await stateProvider.savePipeline(pipeline);
+
+        await events.publish({
+          type: 'pipeline_failed',
+          pipelineId: pipeline.id,
+          timestamp: new Date().toISOString(),
+          stage: 'define',
+          error: `Worktree recreation failed on resume: ${errorMsg}`,
+        });
+
+        return pipeline;
+      }
+    }
+  }
+
+  // Override options to route execution through the worktree
+  // and persist .forge/ writes to the original repo
+  if (pipeline.worktreePath) {
+    options = {
+      ...options,
+      cwd: pipeline.worktreePath,
+      persistDir: originalCwd,
+    };
+  }
+
   // ── Determine starting index ───────────────────────────────
   const fromIndex = options.fromStage
     ? STAGE_ORDER.indexOf(options.fromStage)
@@ -501,7 +630,8 @@ export async function runPipeline(
   pipeline.updatedAt = new Date().toISOString();
   await stateProvider.savePipeline(pipeline);
 
-  // ── Execute stages ─────────────────────────────────────────
+  // ── Execute stages (wrapped in try/finally for worktree cleanup) ──
+  try {
   for (let i = fromIndex; i < STAGE_ORDER.length; i++) {
     const stageName = STAGE_ORDER[i];
     let stage = findStage(pipeline, stageName);
@@ -736,6 +866,66 @@ export async function runPipeline(
   });
 
   return pipeline;
+
+  } finally {
+    // ── Worktree cleanup ─────────────────────────────────────
+    // Always clean up the worktree when the pipeline reaches a
+    // terminal state (completed, failed, cancelled). For pipelines
+    // paused at a gate, the worktree is preserved for the resume.
+    if (pipeline.worktreePath && pipeline.branch) {
+      const isTerminal = pipeline.status === 'completed' ||
+        pipeline.status === 'failed' || pipeline.status === 'cancelled';
+
+      if (isTerminal) {
+        // Commit changes on success before cleanup
+        if (pipeline.status === 'completed') {
+          try {
+            const committed = await commitWorktree(pipeline.worktreePath, pipeline.branch);
+            if (!options.quiet && committed) {
+              console.log(`\x1b[2m[forge]\x1b[0m Committed changes to branch \x1b[1m${pipeline.branch}\x1b[0m`);
+            }
+          } catch {
+            // Best effort — don't fail the pipeline on commit error
+          }
+        }
+
+        // Run teardown hooks before removing the worktree
+        try {
+          const teardownConfig = getConfig(originalCwd);
+          const teardownCommands = resolveTeardownCommands(teardownConfig);
+
+          if (teardownCommands.length > 0) {
+            if (!options.quiet) {
+              console.log(`\x1b[2m[forge]\x1b[0m Running workspace teardown (${teardownCommands.length} command${teardownCommands.length > 1 ? 's' : ''})...`);
+            }
+
+            const teardownResult = await runWorkspaceHooks(
+              teardownCommands,
+              pipeline.worktreePath,
+              teardownConfig.setupTimeout,
+              options.quiet,
+            );
+
+            if (!teardownResult.success && !options.quiet) {
+              console.log(`\x1b[2m[forge]\x1b[0m Teardown warning: ${teardownResult.failedCommand}`);
+            }
+          }
+        } catch {
+          // Best effort — don't fail the pipeline on teardown error
+        }
+
+        // Clean up the worktree
+        try {
+          await cleanupWorktree(pipeline.worktreePath, originalCwd);
+          if (!options.quiet) {
+            console.log(`\x1b[2m[forge]\x1b[0m Cleaned up worktree for branch \x1b[1m${pipeline.branch}\x1b[0m`);
+          }
+        } catch {
+          // Best effort — don't throw during cleanup
+        }
+      }
+    }
+  }
 }
 
 // ── Gate Advancement ─────────────────────────────────────────

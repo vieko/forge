@@ -111,6 +111,10 @@ export interface Pipeline {
   updatedAt: string;
   /** ISO 8601 timestamp when the pipeline completed (success or failure) */
   completedAt?: string;
+  /** Absolute path to the git worktree used for isolated execution */
+  worktreePath?: string;
+  /** Git branch name created for the worktree (e.g. forge-<id>) */
+  branch?: string;
 }
 
 // ── Pipeline Events (discriminated union) ────────────────────

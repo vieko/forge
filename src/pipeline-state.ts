@@ -154,6 +154,7 @@ function createPipelineObject(options: PipelineOptions): Pipeline {
     totalCost: 0,
     createdAt: now,
     updatedAt: now,
+    // worktreePath and branch are populated after worktree creation in runPipeline
   };
 }
 

@@ -40,7 +40,7 @@ describe('CONFIG_DEFAULTS', () => {
   test('has expected default values', () => {
     expect(CONFIG_DEFAULTS.setup).toEqual([]);
     expect(CONFIG_DEFAULTS.teardown).toEqual([]);
-    expect(CONFIG_DEFAULTS.setupTimeout).toBe(30000);
+    expect(CONFIG_DEFAULTS.setupTimeout).toBe(300000);
     expect(CONFIG_DEFAULTS.dbProvider).toBe('sqlite');
     expect(CONFIG_DEFAULTS.apiPort).toBe(4926);
     expect(CONFIG_DEFAULTS.apiToken).toBeNull();
@@ -64,7 +64,7 @@ describe('getConfig auto-creation', () => {
     const parsed = JSON.parse(content) as ForgeLocalConfig;
     expect(parsed.setup).toEqual([]);
     expect(parsed.teardown).toEqual([]);
-    expect(parsed.setupTimeout).toBe(30000);
+    expect(parsed.setupTimeout).toBe(300000);
     expect(parsed.dbProvider).toBe('sqlite');
     expect(parsed.apiPort).toBe(4926);
     expect(parsed.apiToken).toBeNull();
@@ -74,7 +74,7 @@ describe('getConfig auto-creation', () => {
     const config = getConfig(tmpDir);
     expect(config.setup).toEqual([]);
     expect(config.teardown).toEqual([]);
-    expect(config.setupTimeout).toBe(30000);
+    expect(config.setupTimeout).toBe(300000);
     expect(config.dbProvider).toBe('sqlite');
     expect(config.apiPort).toBe(4926);
     expect(config.apiToken).toBeNull();
@@ -168,7 +168,7 @@ describe('getConfig invalid value fallback', () => {
   test('falls back to default for invalid setupTimeout (negative)', async () => {
     await writeConfig({ setupTimeout: -5000 });
     const config = getConfig(tmpDir);
-    expect(config.setupTimeout).toBe(30000); // default
+    expect(config.setupTimeout).toBe(300000); // default
   });
 
   test('falls back to default for invalid setup (not array)', async () => {

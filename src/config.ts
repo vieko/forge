@@ -32,7 +32,7 @@ const StrictFieldSchemas = {
 const ConfigSchema = z.object({
   setup: z.array(z.string()).default([]).catch([]),
   teardown: z.array(z.string()).default([]).catch([]),
-  setupTimeout: z.number().positive().default(30000).catch(30000),
+  setupTimeout: z.number().positive().default(300000).catch(300000),
   dbProvider: z.enum(['sqlite', 'turso']).default('sqlite').catch('sqlite' as const),
   apiPort: z.number().int().positive().default(4926).catch(4926),
   apiToken: z.string().nullable().default(null).catch(null),
@@ -52,7 +52,7 @@ export interface ForgeLocalConfig {
 export const CONFIG_DEFAULTS: ForgeLocalConfig = {
   setup: [],
   teardown: [],
-  setupTimeout: 30000,
+  setupTimeout: 300000,
   dbProvider: 'sqlite',
   apiPort: 4926,
   apiToken: null,

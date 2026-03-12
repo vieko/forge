@@ -16,6 +16,10 @@ import type {
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 // ── Test Helpers ─────────────────────────────────────────────
 
@@ -24,6 +28,9 @@ let tmpDir: string;
 async function makeTmpDir(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'forge-pipeline-test-'));
   await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
+  // Initialize as git repo (worktree-first pipelines require git)
+  await execAsync('git init', { cwd: dir });
+  await execAsync('git commit --allow-empty -m "init"', { cwd: dir });
   return dir;
 }
 

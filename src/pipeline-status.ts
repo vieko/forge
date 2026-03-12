@@ -66,6 +66,12 @@ function renderPipeline(pipeline: Pipeline): void {
   console.log(`  ${BOLD}Pipeline${RESET} ${DIM}${pipeline.id}${RESET}`);
   console.log(`  Status:  ${pipelineStatusLabel(pipeline.status)}`);
   console.log(`  Goal:    ${pipeline.goal}`);
+  if (pipeline.branch) {
+    console.log(`  Branch:  ${CMD}${pipeline.branch}${RESET}`);
+  }
+  if (pipeline.worktreePath) {
+    console.log(`  Worktree: ${DIM}${pipeline.worktreePath}${RESET}`);
+  }
   console.log(`  Created: ${DIM}${pipeline.createdAt}${RESET}`);
   if (pipeline.completedAt) {
     console.log(`  Ended:   ${DIM}${pipeline.completedAt}${RESET}`);

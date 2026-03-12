@@ -155,6 +155,8 @@ function rowsToPipeline(
     updatedAt: pipelineRow.updated_at,
   };
   if (pipelineRow.completed_at) pipeline.completedAt = pipelineRow.completed_at;
+  if (pipelineRow.worktree_path) pipeline.worktreePath = pipelineRow.worktree_path;
+  if (pipelineRow.branch) pipeline.branch = pipelineRow.branch;
 
   return pipeline;
 }
@@ -186,9 +188,9 @@ export class SqliteStateProvider implements StateProvider {
     this.db.transaction(() => {
       // Insert pipeline row
       this.db.run(
-        `INSERT INTO pipelines (id, goal, status, total_cost, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [id, pipeline.goal, pipeline.status, 0, now, now],
+        `INSERT INTO pipelines (id, goal, status, branch, worktree_path, total_cost, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, pipeline.goal, pipeline.status, null, null, 0, now, now],
       );
 
       // Insert stage rows
@@ -246,12 +248,6 @@ export class SqliteStateProvider implements StateProvider {
 
   async savePipeline(pipeline: Pipeline): Promise<void> {
     this.db.transaction(() => {
-      // Extract optional fields that may be added by future specs (worktree-pipelines)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const ext = pipeline as any;
-      const branch: string | null = ext.branch ?? null;
-      const worktreePath: string | null = ext.worktreePath ?? null;
-
       // Upsert pipeline row
       this.db.run(
         `INSERT OR REPLACE INTO pipelines (id, goal, status, branch, worktree_path, total_cost, created_at, updated_at, completed_at)
@@ -260,8 +256,8 @@ export class SqliteStateProvider implements StateProvider {
           pipeline.id,
           pipeline.goal,
           pipeline.status,
-          branch,
-          worktreePath,
+          pipeline.branch ?? null,
+          pipeline.worktreePath ?? null,
           pipeline.totalCost,
           pipeline.createdAt,
           pipeline.updatedAt,
