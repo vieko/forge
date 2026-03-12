@@ -219,6 +219,9 @@ export async function runVerify(options: VerifyOptions): Promise<void> {
   // Resolve and validate working directory
   const workingDir = await resolveWorkingDir(options.cwd);
 
+  // Persistence base: original repo when in a worktree, otherwise workingDir
+  const persistBase = options.persistDir || workingDir;
+
   // Resolve proof directory
   const resolvedProofDir = path.resolve(workingDir, proofDir);
 
@@ -335,6 +338,7 @@ Description: <one sentence — what does this PR bring to the table?>
   const qr = await runQuery({
     prompt: verifyPrompt,
     workingDir,
+    persistDir: persistBase !== workingDir ? persistBase : undefined,
     model: effectiveModel,
     maxTurns: effectiveMaxTurns,
     maxBudgetUsd: effectiveMaxBudgetUsd,
@@ -363,7 +367,7 @@ Description: <one sentence — what does this PR bring to the table?>
     logPath: qr.logPath,
   };
 
-  await saveResult(workingDir, forgeResult, qr.resultText);
+  await saveResult(persistBase, forgeResult, qr.resultText);
 
   // Print summary
   if (!quiet) {

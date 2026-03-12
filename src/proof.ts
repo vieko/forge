@@ -322,6 +322,9 @@ export async function runProof(options: ProofOptions): Promise<void> {
   // Resolve and validate working directory
   const workingDir = await resolveWorkingDir(options.cwd);
 
+  // Persistence base: original repo when in a worktree, otherwise workingDir
+  const persistBase = options.persistDir || workingDir;
+
   // Load config and merge with defaults (CLI flags override config)
   const resolved = await resolveConfig(workingDir, {
     model,
@@ -339,7 +342,7 @@ export async function runProof(options: ProofOptions): Promise<void> {
   // Resolve output directory (for manifest.json and manual.md only)
   const outputDir = options.outputDir
     ? path.resolve(workingDir, options.outputDir)
-    : path.join(workingDir, '.forge', 'proofs');
+    : path.join(persistBase, '.forge', 'proofs');
 
   // Ensure output directory exists
   await fs.mkdir(outputDir, { recursive: true });
@@ -391,6 +394,7 @@ export async function runProof(options: ProofOptions): Promise<void> {
     const qr = await runQuery({
       prompt,
       workingDir,
+      persistDir: persistBase !== workingDir ? persistBase : undefined,
       model: effectiveModel,
       maxTurns: effectiveMaxTurns,
       maxBudgetUsd: effectiveMaxBudgetUsd,
@@ -421,7 +425,7 @@ export async function runProof(options: ProofOptions): Promise<void> {
       type: 'proof',
     };
 
-    await saveResult(workingDir, forgeResult, qr.resultText);
+    await saveResult(persistBase, forgeResult, qr.resultText);
 
     totalCost += qr.costUsd ?? 0;
     totalDuration += durationSeconds;

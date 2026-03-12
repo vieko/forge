@@ -192,12 +192,14 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
         prompt: pipeline.goal,
         outputDir,
         cwd,
+        persistDir: options.persistDir,
         model: options.model,
         quiet: options.quiet,
         verbose: options.verbose,
       });
 
-      const cost = await extractCostFromResults(cwd, before);
+      const persistBase = options.persistDir || cwd;
+      const cost = await extractCostFromResults(persistBase, before);
       const specs = await scanMdFiles(outputDir);
 
       return {
@@ -211,6 +213,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
 
     async runForge(pipeline, options): Promise<StageResult> {
       const cwd = await resolveWorkingDir(options.cwd);
+      const persistBase = options.persistDir || cwd;
       const stage = findStage(pipeline, 'run');
       const specDir = stage.artifacts.specDir || options.specDir;
       if (!specDir) {
@@ -226,12 +229,13 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
         prompt: 'implement specifications',
         specDir: resolvedSpecDir,
         cwd,
+        persistDir: persistBase !== cwd ? persistBase : undefined,
         model: options.model,
         quiet: options.quiet,
         verbose: options.verbose,
       });
 
-      const cost = await extractCostFromResults(cwd, before);
+      const cost = await extractCostFromResults(persistBase, before);
 
       return {
         cost,
@@ -241,6 +245,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
 
     async runAudit(pipeline, options): Promise<StageResult> {
       const cwd = await resolveWorkingDir(options.cwd);
+      const persistBase = options.persistDir || cwd;
       const stage = findStage(pipeline, 'audit');
       const specDir = stage.artifacts.specDir || options.specDir;
       if (!specDir) {
@@ -254,13 +259,14 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
       await realRunAudit({
         specDir: resolvedSpecDir,
         cwd,
+        persistDir: options.persistDir,
         model: options.model,
         quiet: options.quiet,
         verbose: options.verbose,
         fix: true,
       });
 
-      const cost = await extractCostFromResults(cwd, before);
+      const cost = await extractCostFromResults(persistBase, before);
 
       // Check for remediation specs produced by the audit fix loop
       const remediationDir = path.join(resolvedSpecDir, 'remediation');
@@ -281,13 +287,14 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
 
     async runProof(pipeline, options): Promise<StageResult> {
       const cwd = await resolveWorkingDir(options.cwd);
+      const persistBase = options.persistDir || cwd;
       const stage = findStage(pipeline, 'proof');
       const specDir = stage.artifacts.specDir || options.specDir;
       if (!specDir) {
         throw new Error('proof stage requires specDir artifact');
       }
       const resolvedSpecDir = path.resolve(cwd, specDir);
-      const proofDir = path.join(cwd, '.forge', 'proofs', pipeline.id);
+      const proofDir = path.join(persistBase, '.forge', 'proofs', pipeline.id);
 
       const before = Date.now();
 
@@ -295,12 +302,13 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
         specPaths: [resolvedSpecDir],
         outputDir: proofDir,
         cwd,
+        persistDir: options.persistDir,
         model: options.model,
         quiet: options.quiet,
         verbose: options.verbose,
       });
 
-      const cost = await extractCostFromResults(cwd, before);
+      const cost = await extractCostFromResults(persistBase, before);
 
       // Read manifest to get accurate proof count
       let proofCount = 0;
@@ -323,6 +331,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
 
     async runVerify(pipeline, options): Promise<StageResult> {
       const cwd = await resolveWorkingDir(options.cwd);
+      const persistBase = options.persistDir || cwd;
       const stage = findStage(pipeline, 'verify');
       const proofDir = stage.artifacts.proofDir;
       if (!proofDir) {
@@ -336,11 +345,12 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
       await realRunVerify({
         proofDir,
         cwd,
+        persistDir: options.persistDir,
         model: options.model,
         quiet: options.quiet,
       });
 
-      const cost = await extractCostFromResults(cwd, before);
+      const cost = await extractCostFromResults(persistBase, before);
 
       return {
         cost,
@@ -605,13 +615,14 @@ export async function runPipeline(
 
     // ── Execute the stage ──────────────────────────────────
     const cwd = await resolveWorkingDir(options.cwd);
-    const sessionsBefore = await snapshotSessionIds(cwd);
+    const persistBase = options.persistDir || cwd;
+    const sessionsBefore = await snapshotSessionIds(persistBase);
 
     try {
       const result = await executeStage(executor, stageName, pipeline, options);
 
       // Capture new session IDs created during this stage
-      const sessionsAfter = await snapshotSessionIds(cwd);
+      const sessionsAfter = await snapshotSessionIds(persistBase);
       for (const sid of sessionsAfter) {
         if (!sessionsBefore.has(sid)) stage.sessions.push(sid);
       }

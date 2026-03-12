@@ -11,17 +11,26 @@ $ forge run --spec specs/power-ups.md "implement power-ups"
 # 8 power-ups implemented, verification passed — $6.03, ~8 min
 ```
 
+## Requirements
+
+[Bun](https://bun.sh/) >= 1.2.0
+
+```bash
+curl -fsSL https://bun.sh/install | bash
+```
+
 ## Installation
 
 ```bash
 # From npm
-npm install -g @vieko/forge
+bun install -g @vieko/forge
 
 # From source
 git clone https://github.com/vieko/forge.git
 cd forge
 bun install
 bun run build
+bun link          # Makes `forge` available globally
 ```
 
 ## Usage
@@ -37,9 +46,15 @@ forge run --resume <session-id> "continue"               # Resume session
 ```bash
 forge define "build auth system"                         # Generate specs from description
 forge audit specs/                                       # Audit codebase against specs
+forge audit specs/ --fix                                 # Audit-fix convergence loop
+forge proof specs/feature.md                             # Generate test protocols
+forge verify .forge/proofs/                              # Run tests and create PR
+forge pipeline "build auth system"                       # Full pipeline (define->run->audit->proof->verify)
+forge tui                                                # Interactive TUI
 forge review                                             # Review git changes
 forge watch                                              # Live-tail session logs
 forge status                                             # View recent results
+forge stats                                              # Aggregate run statistics
 forge specs                                              # List tracked specs with status
 forge specs --add                                        # Register all untracked specs
 forge specs --resolve game.md                            # Mark spec as passed
@@ -76,6 +91,14 @@ Project-level overrides in `.forge/config.json`:
 ## Read More
 
 - [The Orchestrator I Didn't Build](https://vieko.dev/outcomes)
+
+## MCP Server
+
+Forge exposes an MCP server for integration with Claude Code:
+
+```bash
+claude mcp add forge --scope user -t stdio -- bun /path/to/forge/dist/mcp.js
+```
 
 ## Development
 

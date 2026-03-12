@@ -17,6 +17,9 @@ export async function runDefine(options: DefineOptions): Promise<void> {
   // Resolve and validate working directory
   const workingDir = await resolveWorkingDir(options.cwd);
 
+  // Persistence base: original repo when in a worktree, otherwise workingDir
+  const persistBase = options.persistDir || workingDir;
+
   // Load config and merge with defaults (CLI flags override config)
   const resolved = await resolveConfig(workingDir, {
     model,
@@ -47,6 +50,14 @@ export async function runDefine(options: DefineOptions): Promise<void> {
   // Ensure output directory exists
   await fs.mkdir(outputDir, { recursive: true });
 
+  // Read AGENTS.md if present (complementary to CLAUDE.md auto-discovery)
+  let agentsMdContent: string | null = null;
+  try {
+    agentsMdContent = await fs.readFile(path.join(workingDir, 'AGENTS.md'), 'utf-8');
+  } catch {
+    // No AGENTS.md — purely additive, not an error
+  }
+
   if (!quiet) {
     console.log(`${DIM}Prompt:${RESET}      ${prompt}`);
     console.log(`${DIM}Output:${RESET}      ${DIM}${outputDir}${RESET}`);
@@ -54,6 +65,10 @@ export async function runDefine(options: DefineOptions): Promise<void> {
   }
 
   // Construct define prompt
+  const agentsMdSection = agentsMdContent
+    ? `\n## Repository Agent Conventions (AGENTS.md)\n\n${agentsMdContent}\n`
+    : '';
+
   const definePrompt = `## Outcome
 
 Analyze the codebase and decompose the following description into focused,
@@ -101,10 +116,10 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
 - **Reference actual files.** Explore the codebase and list specific file paths in the Context section.
 - **Use \`depends:\` sparingly.** Only when one spec genuinely requires another to complete first.
 - **Always include a build/type-check criterion** (e.g. "TypeScript compiles without errors").
-- **Respect CLAUDE.md conventions.** The target repo's CLAUDE.md documents project rules. Specs must not contradict those rules, even if existing code does. When the codebase diverges from CLAUDE.md, follow CLAUDE.md.
+- **Respect CLAUDE.md and AGENTS.md conventions.** The target repo's CLAUDE.md and AGENTS.md document project rules. Specs must not contradict those rules, even if existing code does. When the codebase diverges from these convention files, follow the convention files. AGENTS.md conventions take precedence over inferred codebase patterns.
 - **Do NOT implement any code.** Only produce spec files.
 
-## Acceptance Criteria
+${agentsMdSection}## Acceptance Criteria
 
 - Codebase explored to understand current architecture and patterns
 - Description fully decomposed into focused specs
@@ -121,6 +136,7 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
   const qr = await runQuery({
     prompt: definePrompt,
     workingDir,
+    persistDir: persistBase !== workingDir ? persistBase : undefined,
     model: effectiveModel,
     maxTurns: effectiveMaxTurns,
     maxBudgetUsd: effectiveMaxBudgetUsd,
@@ -151,7 +167,7 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
     type: 'define',
   };
 
-  await saveResult(workingDir, forgeResult, qr.resultText);
+  await saveResult(persistBase, forgeResult, qr.resultText);
 
   // Post-query: list generated spec files
   let outputSpecs: string[] = [];
@@ -163,10 +179,10 @@ depends: [other-spec.md]   # optional — only when this spec truly requires ano
   // Register define-generated specs in the manifest
   if (outputSpecs.length > 0) {
     const defineSource = `define:${forgeResult.startedAt}`;
-    await withManifestLock(workingDir, (manifest) => {
+    await withManifestLock(persistBase, (manifest) => {
       for (const specFile of outputSpecs) {
         const specFilePath = path.join(outputDir, specFile);
-        const key = specKey(specFilePath, workingDir);
+        const key = specKey(specFilePath, persistBase);
         findOrCreateEntry(manifest, key, defineSource as `define:${string}`);
       }
     });

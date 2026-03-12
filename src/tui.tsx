@@ -1325,7 +1325,7 @@ function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
         for (const [k, v] of Object.entries(process.env)) {
           if (v !== undefined && k !== 'CLAUDECODE' && k !== 'CLAUDE_CODE_ENTRYPOINT') env[k] = v;
         }
-        const child = spawn('node', [forgeBin, 'run', '--spec', entry.spec, '-C', cwd, '--quiet'], {
+        const child = spawn('bun', [forgeBin, 'run', '--spec', entry.spec, '-C', cwd, '--quiet'], {
           cwd,
           env,
           stdio: ['ignore', 'ignore', 'ignore'],
@@ -1812,7 +1812,7 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
       for (const [k, v] of Object.entries(process.env)) {
         if (v !== undefined && k !== 'CLAUDECODE' && k !== 'CLAUDE_CODE_ENTRYPOINT') env[k] = v;
       }
-      const child = spawn('node', [forgeBin, 'pipeline', 'implement pending specs', '-C', cwd, '--quiet'], {
+      const child = spawn('bun', [forgeBin, 'pipeline', 'implement pending specs', '-C', cwd, '--quiet'], {
         cwd,
         env,
         stdio: ['ignore', 'ignore', 'ignore'],
@@ -2106,7 +2106,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
       for (const [k, v] of Object.entries(process.env)) {
         if (v !== undefined && k !== 'CLAUDECODE' && k !== 'CLAUDE_CODE_ENTRYPOINT') env[k] = v;
       }
-      const child = spawn('node', [forgeBin, 'pipeline', '--resume', pipeline.id, '-C', cwd, '--quiet'], {
+      const child = spawn('bun', [forgeBin, 'pipeline', '--resume', pipeline.id, '-C', cwd, '--quiet'], {
         cwd,
         env,
         stdio: ['ignore', 'ignore', 'ignore'],

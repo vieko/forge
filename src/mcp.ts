@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 /**
  * Forge MCP Server
@@ -369,7 +369,7 @@ server.registerTool('forge_start', {
 
     if (extra_args) args.push(...extra_args);
 
-    const child = spawn('node', args, {
+    const child = spawn('bun', args, {
       cwd: workingDir,
       env: stripClaudeEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -830,7 +830,7 @@ server.registerTool('forge_pipeline_start', {
 
     if (extra_args) args.push(...extra_args);
 
-    const child = spawn('node', args, {
+    const child = spawn('bun', args, {
       cwd: workingDir,
       env: stripClaudeEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],

@@ -14,7 +14,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "cli": "bun run src/index.ts",
-    "mcp": "node dist/mcp.js"
+    "mcp": "bun dist/mcp.js"
   },
   "keywords": [
     "claude",
@@ -48,6 +48,6 @@
     "typescript": "^5.3.3"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "bun": ">=1.2.0"
   }
 }

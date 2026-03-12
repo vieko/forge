@@ -758,11 +758,12 @@ export async function runForge(options: ForgeOptions): Promise<void> {
   }
 
   // When in worktree mode, results/manifest persist to the original repo
-  const resultDir = originalRepoDir || workingDir;
+  // persistDir (from external callers like pipeline) takes precedence over worktree-derived originalRepoDir
+  const resultDir = options.persistDir || originalRepoDir || workingDir;
 
   // Internal option: pass result dir through to runSingleSpec and runSpecBatch
-  const runOptions: ForgeOptions & { _resultDir?: string } = originalRepoDir
-    ? { ...options, _resultDir: originalRepoDir }
+  const runOptions: ForgeOptions & { _resultDir?: string } = resultDir !== workingDir
+    ? { ...options, _resultDir: resultDir }
     : options;
 
   try {

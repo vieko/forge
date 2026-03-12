@@ -206,6 +206,8 @@ export interface PipelineOptions {
   specDir?: string;
   /** Working directory (target repo) */
   cwd?: string;
+  /** Directory for .forge/ persistence (session logs, results, manifest). Defaults to cwd. Used to route writes to the original repo when running in a worktree. */
+  persistDir?: string;
   /** Model to use */
   model?: string;
   /** Resume an existing pipeline by ID */

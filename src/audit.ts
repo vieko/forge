@@ -12,6 +12,8 @@ import { isInterrupted } from './abort.js';
 
 interface ResolvedAuditContext {
   workingDir: string;
+  /** Directory for .forge/ persistence. Defaults to workingDir. */
+  persistBase: string;
   effectiveModel: string;
   effectiveMaxTurns: number;
   effectiveMaxBudgetUsd: number;
@@ -101,6 +103,7 @@ async function readSpecContents(
   resolvedSpecDir: string,
   specFiles: string[],
   workingDir: string,
+  persistBase: string,
 ): Promise<{ specContents: string[]; allSpecContents: string }> {
   const specContents: string[] = [];
   for (const file of specFiles) {
@@ -110,11 +113,11 @@ async function readSpecContents(
   const allSpecContents = specContents.join('\n\n---\n\n');
 
   // Auto-register input specs in the manifest
-  await withManifestLock(workingDir, (manifest) => {
+  await withManifestLock(persistBase, (manifest) => {
     const tracked = new Set(manifest.specs.map(e => e.spec));
     for (let i = 0; i < specFiles.length; i++) {
       const absPath = path.join(resolvedSpecDir, specFiles[i]);
-      const key = specKey(absPath, workingDir);
+      const key = specKey(absPath, persistBase);
       if (!tracked.has(key)) {
         const rawContent = specContents[i].replace(/^### .+\n\n/, '');
         findOrCreateEntry(manifest, key, resolveSpecSource(rawContent, absPath));
@@ -133,7 +136,7 @@ async function runAuditRound(
   specPrefix: string,
   options: AuditOptions,
 ): Promise<AuditRoundResult> {
-  const { workingDir, effectiveModel, effectiveMaxTurns, effectiveMaxBudgetUsd, allSpecContents, verbose, quiet, singleFile, specFiles, resolvedSpecDir } = ctx;
+  const { workingDir, persistBase, effectiveModel, effectiveMaxTurns, effectiveMaxBudgetUsd, allSpecContents, verbose, quiet, singleFile, specFiles, resolvedSpecDir } = ctx;
   const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
   const auditTarget = singleFile ? specFiles[0] : path.basename(resolvedSpecDir);
 
@@ -177,6 +180,7 @@ ${options.prompt ? `## Additional Context\n\n${options.prompt}\n` : ''}
   const qr = await runQuery({
     prompt: auditPrompt,
     workingDir,
+    persistDir: persistBase !== workingDir ? persistBase : undefined,
     model: effectiveModel,
     maxTurns: effectiveMaxTurns,
     maxBudgetUsd: effectiveMaxBudgetUsd,
@@ -207,7 +211,7 @@ ${options.prompt ? `## Additional Context\n\n${options.prompt}\n` : ''}
     type: 'audit',
   };
 
-  await saveResult(workingDir, forgeResult, qr.resultText);
+  await saveResult(persistBase, forgeResult, qr.resultText);
 
   // Post-query: list generated spec files and rename if needed
   let outputSpecs: string[] = [];
@@ -234,10 +238,10 @@ ${options.prompt ? `## Additional Context\n\n${options.prompt}\n` : ''}
   // Register audit-generated specs in the manifest
   if (outputSpecs.length > 0) {
     const auditSource = `audit:${forgeResult.startedAt}`;
-    await withManifestLock(workingDir, (manifest) => {
+    await withManifestLock(persistBase, (manifest) => {
       for (const specFile of outputSpecs) {
         const specFilePath = path.join(outputDir, specFile);
-        const key = specKey(specFilePath, workingDir);
+        const key = specKey(specFilePath, persistBase);
         findOrCreateEntry(manifest, key, auditSource as `audit:${string}`);
       }
     });
@@ -263,6 +267,9 @@ export async function runAudit(options: AuditOptions): Promise<void> {
   // Resolve and validate working directory
   const workingDir = await resolveWorkingDir(options.cwd);
 
+  // Persistence base: original repo when in a worktree, otherwise workingDir
+  const persistBase = options.persistDir || workingDir;
+
   // Load config and merge with defaults (CLI flags override config)
   const resolved = await resolveConfig(workingDir, {
     model,
@@ -276,11 +283,12 @@ export async function runAudit(options: AuditOptions): Promise<void> {
   const { resolvedSpecDir, specFiles, singleFile } = await resolveAuditInputs(specDir, workingDir, quiet);
 
   // Read and register spec contents
-  const { specContents, allSpecContents } = await readSpecContents(resolvedSpecDir, specFiles, workingDir);
+  const { specContents, allSpecContents } = await readSpecContents(resolvedSpecDir, specFiles, workingDir, persistBase);
 
   // Build context for audit round(s)
   const ctx: ResolvedAuditContext = {
     workingDir,
+    persistBase,
     effectiveModel,
     effectiveMaxTurns,
     effectiveMaxBudgetUsd,
@@ -344,7 +352,7 @@ export async function runAudit(options: AuditOptions): Promise<void> {
 // ── Audit-fix convergence loop ───────────────────────────────
 
 async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions): Promise<void> {
-  const { workingDir, resolvedSpecDir, quiet } = ctx;
+  const { workingDir, persistBase, resolvedSpecDir, quiet } = ctx;
   const maxRounds = options.fixRounds ?? 3;
 
   // Remediation directory: flat, no nesting
@@ -435,6 +443,7 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
         prompt: 'implement remaining work',
         specDir: remediationDir,
         cwd: workingDir,
+        persistDir: persistBase !== workingDir ? persistBase : undefined,
         model: options.model,
         quiet: options.quiet,
         verbose: options.verbose,
@@ -450,7 +459,7 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
     // Estimate fix cost from remediation results (best-effort)
     let fixCost = 0;
     try {
-      const resultsBase = path.join(workingDir, '.forge', 'results');
+      const resultsBase = path.join(persistBase, '.forge', 'results');
       const dirs = (await fs.readdir(resultsBase)).sort().reverse();
       for (const dir of dirs.slice(0, auditResult.outputSpecs.length)) {
         try {

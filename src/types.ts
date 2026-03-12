@@ -42,6 +42,8 @@ export interface ForgeOptions {
   force?: boolean;
   /** Run in an isolated git worktree on the named branch */
   branch?: string;
+  /** Directory for .forge/ persistence (session logs, results, manifest). Defaults to cwd. Used to route writes to the original repo when running in a worktree. */
+  persistDir?: string;
 }
 
 /**
@@ -102,6 +104,8 @@ export interface AuditOptions {
   prompt?: string;
   /** Working directory (target repo) */
   cwd?: string;
+  /** Directory for .forge/ persistence (session logs, results, manifest). Defaults to cwd. Used to route writes to the original repo when running in a worktree. */
+  persistDir?: string;
   /** Model to use (shorthand like 'opus'/'sonnet' or full ID) */
   model?: string;
   /** Maximum turns (default: 100) */
@@ -132,6 +136,8 @@ export interface DefineOptions {
   outputDir?: string;
   /** Working directory (target repo) */
   cwd?: string;
+  /** Directory for .forge/ persistence (session logs, results, manifest). Defaults to cwd. Used to route writes to the original repo when running in a worktree. */
+  persistDir?: string;
   /** Model to use (shorthand like 'opus'/'sonnet' or full ID) */
   model?: string;
   /** Maximum turns (default: 100) */
@@ -160,6 +166,8 @@ export interface ProofOptions {
   prompt?: string;
   /** Working directory (target repo) */
   cwd?: string;
+  /** Directory for .forge/ persistence (session logs, results, manifest). Defaults to cwd. Used to route writes to the original repo when running in a worktree. */
+  persistDir?: string;
   /** Model to use (shorthand like 'opus'/'sonnet' or full ID) */
   model?: string;
   /** Maximum turns (default: 100) */
@@ -188,6 +196,8 @@ export interface VerifyOptions {
   prompt?: string;
   /** Working directory (target repo) */
   cwd?: string;
+  /** Directory for .forge/ persistence (session logs, results, manifest). Defaults to cwd. Used to route writes to the original repo when running in a worktree. */
+  persistDir?: string;
   /** Model to use (shorthand like 'opus'/'sonnet' or full ID) */
   model?: string;
   /** Maximum turns (default: 100) */

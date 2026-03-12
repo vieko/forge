@@ -150,14 +150,14 @@ describe('TUI: CLI command registration', () => {
     expect(sectionAfterTui).toContain('runTui');
   });
 
-  test('tui command re-execs under bun when Node detected', async () => {
+  test('tui command does not contain Node re-exec hack (Bun is the runtime)', async () => {
     const indexPath = path.join(import.meta.dirname, 'index.ts');
     const content = await fs.readFile(indexPath, 'utf-8');
 
     const tuiIdx = content.indexOf(".command('tui')");
     const sectionAfterTui = content.slice(tuiIdx, tuiIdx + 500);
-    // OpenTUI requires Bun
-    expect(sectionAfterTui).toContain('Bun');
+    // No re-exec needed — entire CLI runs under Bun
+    expect(sectionAfterTui).not.toContain('execFileSync');
   });
 });
 
