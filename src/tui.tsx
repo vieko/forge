@@ -10,7 +10,15 @@ import type { ForgeResult, SessionEvent, SpecManifest, SpecEntry, SpecRun } from
 import type { Pipeline, Stage, GateKey, PipelineStatus, StageStatus, StageName } from './pipeline-types.js';
 import { loadManifest } from './specs.js';
 import { FileSystemStateProvider } from './pipeline-state.js';
+import { SqliteStateProvider } from './db-pipeline-state.js';
 import { createFileWatcher, type FileWatcherHandle } from './file-watcher.js';
+import {
+  getDb,
+  getDbWithBackfill,
+  ensureSessionsBackfill,
+  queryAllSessions,
+} from './db.js';
+import type { Database } from 'bun:sqlite';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -306,6 +314,120 @@ function groupEvents(events: SessionEvent[]): GroupedBlock[] {
 
   flushText();
   return blocks;
+}
+
+// ── Database Change Detection ─────────────────────────────────
+
+/**
+ * Poll `PRAGMA data_version` at a fixed interval to detect DB writes.
+ * Returns a monotonically increasing counter that bumps whenever the
+ * DB is written to (even in WAL mode). Components use this as a
+ * dependency to re-fetch data.
+ *
+ * WAL mode writes go to forge.db-wal, so file mtime on forge.db is
+ * unreliable. data_version is the correct signal.
+ */
+function useDbPoll(db: Database | null, intervalMs: number = 1000): number {
+  const [version, setVersion] = useState(0);
+  const prevVersionRef = useRef(-1);
+
+  useEffect(() => {
+    if (!db) return;
+
+    const check = () => {
+      try {
+        const row = db.query('PRAGMA data_version').get() as { data_version: number } | null;
+        if (row && row.data_version !== prevVersionRef.current) {
+          prevVersionRef.current = row.data_version;
+          setVersion(v => v + 1);
+        }
+      } catch {
+        // DB may have been closed — ignore
+      }
+    };
+
+    // Initial check
+    check();
+
+    const timer = setInterval(check, intervalMs);
+    return () => clearInterval(timer);
+  }, [db, intervalMs]);
+
+  return version;
+}
+
+/**
+ * Load sessions from the sessions DB table, converting rows to SessionInfo[].
+ * Running sessions (status = 'running' or null) are detected from the DB.
+ * Falls back to the filesystem-based loadSessions() if DB is unavailable.
+ */
+function loadSessionsFromDb(db: Database, cwd: string): SessionInfo[] {
+  const rows = queryAllSessions(db, 200);
+  const sessions: SessionInfo[] = [];
+
+  for (const row of rows) {
+    const isRunning = !row.status || row.status === 'running';
+    const specName = row.specPath
+      ? basename(row.specPath, '.md')
+      : (row.commandType || 'run');
+    const sessionId = row.id;
+    const eventsPath = join(cwd, '.forge', 'sessions', sessionId, 'events.jsonl');
+
+    sessions.push({
+      sessionId,
+      status: row.status || 'running',
+      specName,
+      specPath: row.specPath ?? undefined,
+      model: row.model || '--',
+      costUsd: row.costUsd ?? undefined,
+      durationSeconds: undefined, // sessions table does not store duration directly
+      startedAt: row.startedAt || new Date().toISOString(),
+      eventsPath,
+      isRunning,
+      type: row.commandType ?? undefined,
+    });
+  }
+
+  // Sort: running sessions first, then by recency (newest first)
+  sessions.sort((a, b) => {
+    if (a.isRunning !== b.isRunning) return a.isRunning ? -1 : 1;
+    return b.startedAt.localeCompare(a.startedAt);
+  });
+
+  return sessions;
+}
+
+/**
+ * Enrich sessions with duration and cost data from the runs table.
+ * The sessions table lacks duration, but the runs table has it keyed by sessionId.
+ */
+function enrichSessionsWithRuns(sessions: SessionInfo[], db: Database): void {
+  try {
+    const rows = db.query(
+      `SELECT sessionId, durationSeconds, costUsd FROM runs WHERE sessionId IS NOT NULL`
+    ).all() as { sessionId: string; durationSeconds: number; costUsd: number | null }[];
+
+    const runMap = new Map<string, { durationSeconds: number; costUsd: number | null }>();
+    for (const row of rows) {
+      if (!runMap.has(row.sessionId)) {
+        runMap.set(row.sessionId, row);
+      }
+    }
+
+    for (const session of sessions) {
+      const run = runMap.get(session.sessionId);
+      if (run) {
+        if (session.durationSeconds === undefined) {
+          session.durationSeconds = run.durationSeconds;
+        }
+        if (session.costUsd === undefined && run.costUsd !== null) {
+          session.costUsd = run.costUsd;
+        }
+      }
+    }
+  } catch {
+    // Best effort — runs table may not be populated
+  }
 }
 
 // ── Data Loading ─────────────────────────────────────────────
@@ -1740,36 +1862,28 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const { width } = useTerminalDimensions();
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
-  const providerRef = useRef(new FileSystemStateProvider(cwd));
+  const fsProviderRef = useRef(new FileSystemStateProvider(cwd));
   const toast = useToast();
 
-  // Load pipelines reactively via fs.watch on .forge/pipelines/ directory
+  // DB + provider: use state so changes trigger re-render
+  const pipelineDb = useMemo(() => getDb(cwd), [cwd]);
+  const dbProvider = useMemo(
+    () => pipelineDb ? new SqliteStateProvider(pipelineDb) : null,
+    [pipelineDb]
+  );
+  const pipelineDbVersion = useDbPoll(pipelineDb, 1000);
+
+  // Load pipelines from DB (or filesystem fallback) when data_version changes
   useEffect(() => {
     let mounted = true;
     const load = async () => {
-      const loaded = await providerRef.current.listPipelines();
+      const provider = dbProvider || fsProviderRef.current;
+      const loaded = await provider.listPipelines();
       if (mounted) setPipelines(loaded);
     };
     load();
-
-    // Watch the pipelines directory for new/updated pipeline files
-    const pipelinesDir = join(cwd, '.forge', 'pipelines');
-    const dirHandle = createFileWatcher(pipelinesDir, () => { load(); }, {
-      debounceMs: 100,
-      fallbackIntervalMs: 15000,
-      type: 'directory',
-    });
-
-    // Also watch pipeline.json (active pipeline — written on every state change)
-    const activePath = join(cwd, '.forge', 'pipeline.json');
-    const fileHandle = createFileWatcher(activePath, () => { load(); }, {
-      debounceMs: 100,
-      fallbackIntervalMs: 15000,
-      type: 'file',
-    });
-
-    return () => { mounted = false; dirHandle.dispose(); fileHandle.dispose(); };
-  }, [cwd]);
+    return () => { mounted = false; };
+  }, [cwd, pipelineDbVersion, dbProvider]);
 
   // Clamp selected index when pipelines change
   useEffect(() => {
@@ -1798,7 +1912,8 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
 
   const handleNewPipeline = async () => {
     // Guard: check for already-active pipeline
-    const all = await providerRef.current.listPipelines();
+    const provider = dbProvider || fsProviderRef.current;
+    const all = await provider.listPipelines();
     const active = all.some(p => p.status === 'running' || p.status === 'paused_at_gate');
     if (active) {
       toast.show('Pipeline already active', '#888888');
@@ -1928,7 +2043,13 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
   const [selectedStageIndex, setSelectedStageIndex] = useState(0);
   const [pipeline, setPipeline] = useState(initialPipeline);
   const { width } = useTerminalDimensions();
-  const providerRef = useRef(new FileSystemStateProvider(cwd));
+
+  // Provider: prefer SqliteStateProvider, fall back to FileSystemStateProvider
+  const detailDb = useMemo(() => getDb(cwd), [cwd]);
+  const provider = useMemo<SqliteStateProvider | FileSystemStateProvider>(
+    () => detailDb ? new SqliteStateProvider(detailDb) : new FileSystemStateProvider(cwd),
+    [detailDb, cwd]
+  );
 
   // Dialog and toast state
   const dialog = useConfirmDialog();
@@ -1940,25 +2061,20 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
     pipeline.stages.map(s => `${s.name}:${s.status}`).join(',')
   );
 
-  // Watch for updates when pipeline is active via fs.watch
+  // Poll DB for pipeline detail updates (replaces per-pipeline-file fs.watch)
+  const detailDbVersion = useDbPoll(detailDb, 1000);
+
+  // Reload pipeline from DB when data_version changes
   useEffect(() => {
     if (pipeline.status !== 'running' && pipeline.status !== 'paused_at_gate') return;
     let mounted = true;
     const reload = async () => {
-      const updated = await providerRef.current.loadPipeline(pipeline.id);
+      const updated = await provider.loadPipeline(pipeline.id);
       if (mounted && updated) setPipeline(updated);
     };
-
-    // Watch the specific pipeline file for changes
-    const pipelineFile = join(cwd, '.forge', 'pipelines', `${pipeline.id}.json`);
-    const handle = createFileWatcher(pipelineFile, () => { reload(); }, {
-      debounceMs: 100,
-      fallbackIntervalMs: 15000,
-      type: 'file',
-    });
-
-    return () => { mounted = false; handle.dispose(); };
-  }, [pipeline.id, pipeline.status, cwd]);
+    reload();
+    return () => { mounted = false; };
+  }, [pipeline.id, pipeline.status, cwd, detailDbVersion]);
 
   // Fire toasts on pipeline state transitions
   useEffect(() => {
@@ -2013,7 +2129,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
     updated.gates[gk] = { ...pipeline.gates[gk], status: 'approved' as const, approvedAt: new Date().toISOString() };
     updated.status = 'running';
     updated.updatedAt = new Date().toISOString();
-    await providerRef.current.savePipeline(updated);
+    await provider.savePipeline(updated);
     setPipeline(updated);
     toast.show(`Gate '${gk}' approved — pipeline will resume`, '#22c55e');
   };
@@ -2031,7 +2147,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
     updated.gates[gk] = { ...pipeline.gates[gk], status: 'skipped' as const, approvedAt: new Date().toISOString() };
     updated.status = 'running';
     updated.updatedAt = new Date().toISOString();
-    await providerRef.current.savePipeline(updated);
+    await provider.savePipeline(updated);
     setPipeline(updated);
     toast.show(`Gate '${gk}' skipped — pipeline will resume`, '#eab308');
   };
@@ -2050,7 +2166,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
     const updated = { ...pipeline };
     updated.status = 'paused_at_gate';
     updated.updatedAt = new Date().toISOString();
-    await providerRef.current.savePipeline(updated);
+    await provider.savePipeline(updated);
     setPipeline(updated);
     toast.show('Pipeline paused -- will pause at next gate check', '#eab308');
   };
@@ -2071,7 +2187,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
         ? { ...s, status: 'cancelled' as const }
         : s
     );
-    await providerRef.current.savePipeline(updated);
+    await provider.savePipeline(updated);
     setPipeline(updated);
     toast.show('Pipeline cancelled', '#ef4444');
   };
@@ -2095,7 +2211,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
         ? { ...s, status: 'pending' as const, error: undefined }
         : s
     );
-    await providerRef.current.savePipeline(updated);
+    await provider.savePipeline(updated);
     setPipeline(updated);
 
     // Safe to spawn: pipeline was failed, no process is running
@@ -2258,48 +2374,40 @@ function App({ cwd }: { cwd: string }) {
   const [stageSessionIds, setStageSessionIds] = useState<string[]>([]);
   const [stageSessionInfo, setStageSessionInfo] = useState<SessionInfo | null>(null);
 
-  // Load sessions reactively via fs.watch on .forge directories
+  // Database instance — triggers re-render when ready so useDbPoll sees it
+  const [db, setDb] = useState<Database | null>(null);
+  const dbInitRef = useRef(false);
+
+  // Initialize DB and run backfill on mount
   useEffect(() => {
-    let mounted = true;
-    const watchers: FileWatcherHandle[] = [];
+    if (dbInitRef.current) return;
+    dbInitRef.current = true;
 
-    const load = async () => {
-      const loaded = await loadSessions(cwd);
-      if (mounted) setSessions(loaded);
+    const init = async () => {
+      const instance = await getDbWithBackfill(cwd);
+      if (instance) {
+        await ensureSessionsBackfill(instance, cwd);
+        setDb(instance);
+      }
     };
-
-    // Initial load
-    load();
-
-    // Watch .forge/sessions/ for new session directories
-    const sessionsDir = join(cwd, '.forge', 'sessions');
-    watchers.push(createFileWatcher(sessionsDir, () => { load(); }, {
-      debounceMs: 100,
-      fallbackIntervalMs: 15_000,
-      type: 'directory',
-    }));
-
-    // Watch .forge/results/ for completed session results
-    const resultsDir = join(cwd, '.forge', 'results');
-    watchers.push(createFileWatcher(resultsDir, () => { load(); }, {
-      debounceMs: 100,
-      fallbackIntervalMs: 15_000,
-      type: 'directory',
-    }));
-
-    // Watch .forge/latest-session.json for session start/resume events
-    const latestPath = join(cwd, '.forge', 'latest-session.json');
-    watchers.push(createFileWatcher(latestPath, () => { load(); }, {
-      debounceMs: 100,
-      fallbackIntervalMs: 15_000,
-      type: 'file',
-    }));
-
-    return () => {
-      mounted = false;
-      for (const w of watchers) w.dispose();
-    };
+    init();
   }, [cwd]);
+
+  // Poll PRAGMA data_version for DB change detection (~1s interval)
+  const dbVersion = useDbPoll(db, 1000);
+
+  // Load sessions from DB when data_version changes (replaces 3 file watchers)
+  useEffect(() => {
+    if (!db) {
+      // Fallback to filesystem if DB unavailable
+      loadSessions(cwd).then(loaded => setSessions(loaded));
+      return;
+    }
+
+    const loaded = loadSessionsFromDb(db, cwd);
+    enrichSessionsWithRuns(loaded, db);
+    setSessions(loaded);
+  }, [cwd, dbVersion, db]);
 
   const handleQuit = () => {
     shutdownTui();
