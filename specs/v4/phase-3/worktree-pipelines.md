@@ -1,5 +1,5 @@
 ---
-depends: [db-pipelines.md]
+depends: [db-pipelines.md, persist-routing.md]
 ---
 
 # Worktree-First Pipeline Execution
