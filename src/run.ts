@@ -90,8 +90,8 @@ export function isApiErrorResult(resultText: string): boolean {
   return false;
 }
 
-export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string; _resultDir?: string; _taskId?: string; _parentTaskId?: string }): Promise<ForgeResult> {
-  const { prompt, specPath, specContent, cwd, model, planModel, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir, _taskId, _parentTaskId } = options;
+export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string; _resultDir?: string; _taskId?: string; _parentTaskId?: string; _skipTaskTracking?: boolean }): Promise<ForgeResult> {
+  const { prompt, specPath, specContent, cwd, model, planModel, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir, _taskId, _parentTaskId, _skipTaskTracking = false } = options;
   const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
 
   // Resolve and validate working directory
@@ -111,10 +111,10 @@ export async function runSingleSpec(options: ForgeOptions & { specContent?: stri
 
   // ── CLI Task tracking ──────────────────────────────────────
   // Insert a task record so CLI runs are visible in TUI, status, and stats.
-  // Use provided _taskId (from batch parent) or generate one.
+  // Skip when called from the executor — the executor already tracks its own task.
   const taskId = _taskId || crypto.randomUUID();
   const db = getDb(resultDir);
-  if (db) {
+  if (db && !_skipTaskTracking) {
     try {
       insertCliTask(db, {
         id: taskId,
@@ -292,7 +292,7 @@ Do not use emojis in your output.`;
     const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
 
     // Link session ID to task record
-    if (db && qr.sessionId) {
+    if (db && !_skipTaskTracking && qr.sessionId) {
       try {
         updateTaskSessionId(db, taskId, qr.sessionId);
       } catch {
@@ -407,7 +407,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
           }
 
           // Update task record on failure
-          if (db) {
+          if (db && !_skipTaskTracking) {
             try {
               if (isInterrupted()) {
                 cancelTask(db, taskId);
@@ -482,7 +482,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       }
 
       // Update task record on API error override
-      if (db) {
+      if (db && !_skipTaskTracking) {
         try {
           updateTaskStatus(db, taskId, 'failed', 1);
         } catch { /* best effort */ }
@@ -609,7 +609,7 @@ ${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0,
     }
 
     // Update task record on success
-    if (db) {
+    if (db && !_skipTaskTracking) {
       try {
         updateTaskStatus(db, taskId, 'completed', 0);
       } catch { /* best effort */ }
@@ -620,7 +620,7 @@ ${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0,
 
   // All verification attempts exhausted — should not normally reach here
   // Update task record
-  if (db) {
+  if (db && !_skipTaskTracking) {
     try {
       updateTaskStatus(db, taskId, 'failed', 1);
     } catch { /* best effort */ }

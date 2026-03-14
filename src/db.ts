@@ -7,7 +7,7 @@
 
 import { Database } from 'bun:sqlite';
 import path from 'path';
-import { promises as fs } from 'fs';
+import { promises as fs, statSync, mkdirSync } from 'fs';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -277,10 +277,10 @@ export function getDb(workingDir: string): Database | null {
     // Ensure .forge/ directory exists (sync for simplicity — getDb is lazy)
     const forgeDir = path.join(workingDir, '.forge');
     try {
-      const stat = require('fs').statSync(forgeDir);
-      if (!stat.isDirectory()) return null;
+      const st = statSync(forgeDir);
+      if (!st.isDirectory()) return null;
     } catch {
-      require('fs').mkdirSync(forgeDir, { recursive: true });
+      mkdirSync(forgeDir, { recursive: true });
     }
 
     const db = new Database(resolved);

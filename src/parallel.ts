@@ -878,7 +878,7 @@ async function runForgeInner(
 
     // Insert parent batch task for rerun-failed
     const batchTaskId = crypto.randomUUID();
-    if (db) {
+    if (db && !options._skipTaskTracking) {
       try {
         insertCliTask(db, {
           id: batchTaskId,
@@ -896,7 +896,7 @@ async function runForgeInner(
 
     // Update parent batch task status + manifest cleanup on cancel
     const anyCancelled = results.some(r => r.status === 'cancelled');
-    if (db) {
+    if (db && !options._skipTaskTracking) {
       try {
         const allPassed = results.every(r => r.status === 'success');
         if (anyCancelled && isInterrupted()) {
@@ -935,7 +935,7 @@ async function runForgeInner(
 
     // Insert parent batch task for pending specs
     const pendingBatchTaskId = crypto.randomUUID();
-    if (db) {
+    if (db && !options._skipTaskTracking) {
       try {
         insertCliTask(db, {
           id: pendingBatchTaskId,
@@ -953,7 +953,7 @@ async function runForgeInner(
 
     // Update parent batch task status + manifest cleanup on cancel
     const pendingAnyCancelled = results.some(r => r.status === 'cancelled');
-    if (db) {
+    if (db && !options._skipTaskTracking) {
       try {
         const allPassed = results.every(r => r.status === 'success');
         if (pendingAnyCancelled && isInterrupted()) {
@@ -1063,7 +1063,7 @@ async function runForgeInner(
 
     // Insert parent batch task for spec-dir
     const specDirBatchTaskId = crypto.randomUUID();
-    if (db) {
+    if (db && !options._skipTaskTracking) {
       try {
         insertCliTask(db, {
           id: specDirBatchTaskId,
@@ -1082,7 +1082,7 @@ async function runForgeInner(
 
     // Update parent batch task status + manifest cleanup on cancel
     const specDirAnyCancelled = results.some(r => r.status === 'cancelled');
-    if (db) {
+    if (db && !options._skipTaskTracking) {
       try {
         const allPassed = results.every(r => r.status === 'success');
         if (specDirAnyCancelled && isInterrupted()) {

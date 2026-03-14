@@ -553,6 +553,19 @@ export async function runPipeline(
       if (!options.quiet) {
         console.log(`\x1b[2m[forge]\x1b[0m Workspace setup complete`);
       }
+
+      // Persist setup output for debugging (truncate to 10KB)
+      const MAX_HOOK_OUTPUT = 10 * 1024;
+      const setupOutput = setupResult.output.length > MAX_HOOK_OUTPUT
+        ? setupResult.output.slice(0, MAX_HOOK_OUTPUT) + '\n... (truncated)'
+        : setupResult.output;
+
+      await events.publish({
+        type: 'workspace_setup',
+        pipelineId: pipeline.id,
+        timestamp: new Date().toISOString(),
+        output: setupOutput,
+      });
     }
   } else if (pipeline.worktreePath) {
     // Resuming: verify the worktree still exists
@@ -567,6 +580,51 @@ export async function runPipeline(
         pipeline.branch = branch;
         pipeline.updatedAt = new Date().toISOString();
         await stateProvider.savePipeline(pipeline);
+
+        // Run workspace setup hooks in the recreated worktree
+        const config = getConfig(originalCwd);
+        const setupCommands = await resolveSetupCommands(worktreePath, config);
+
+        if (setupCommands.length > 0) {
+          if (!options.quiet) {
+            console.log(`\x1b[2m[forge]\x1b[0m Running workspace setup (${setupCommands.length} command${setupCommands.length > 1 ? 's' : ''})...`);
+          }
+
+          const setupResult = await runWorkspaceHooks(
+            setupCommands,
+            worktreePath,
+            config.setupTimeout,
+            options.quiet,
+          );
+
+          if (!setupResult.success) {
+            const errorMsg = `Workspace setup failed on resume: ${setupResult.failedCommand}\n${setupResult.output}`;
+            pipeline.status = 'failed';
+            pipeline.updatedAt = new Date().toISOString();
+            await stateProvider.savePipeline(pipeline);
+
+            await events.publish({
+              type: 'pipeline_failed',
+              pipelineId: pipeline.id,
+              timestamp: new Date().toISOString(),
+              stage: 'define',
+              error: errorMsg,
+            });
+
+            // Best-effort worktree cleanup after setup failure
+            try {
+              await cleanupWorktree(worktreePath, originalCwd);
+            } catch {
+              // Best effort
+            }
+
+            return pipeline;
+          }
+
+          if (!options.quiet) {
+            console.log(`\x1b[2m[forge]\x1b[0m Workspace setup complete`);
+          }
+        }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         pipeline.status = 'failed';
@@ -905,6 +963,19 @@ export async function runPipeline(
               teardownConfig.setupTimeout,
               options.quiet,
             );
+
+            // Persist teardown output for debugging (truncate to 10KB)
+            const MAX_TEARDOWN_OUTPUT = 10 * 1024;
+            const teardownOutput = teardownResult.output.length > MAX_TEARDOWN_OUTPUT
+              ? teardownResult.output.slice(0, MAX_TEARDOWN_OUTPUT) + '\n... (truncated)'
+              : teardownResult.output;
+
+            await events.publish({
+              type: 'workspace_teardown',
+              pipelineId: pipeline.id,
+              timestamp: new Date().toISOString(),
+              output: teardownOutput,
+            });
 
             if (!teardownResult.success && !options.quiet) {
               console.log(`\x1b[2m[forge]\x1b[0m Teardown warning: ${teardownResult.failedCommand}`);

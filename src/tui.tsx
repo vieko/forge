@@ -5,6 +5,7 @@ import type { ScrollBoxRenderable, ScrollBoxChild } from '@opentui/core';
 import { createRoot, useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { readdir, readFile, stat, open } from 'fs/promises';
+import { spawn } from 'child_process';
 import { join, basename, dirname } from 'path';
 import type { ForgeResult, SessionEvent, SpecManifest, SpecEntry, SpecRun } from './types.js';
 import type { Pipeline, Stage, GateKey, PipelineStatus, StageStatus, StageName } from './pipeline-types.js';
@@ -1631,7 +1632,6 @@ function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
         return;
       }
       try {
-        const { spawn } = require('child_process');
         const forgeBin = join(dirname(require.resolve('./index.js')), 'index.js');
         const env: Record<string, string> = {};
         for (const [k, v] of Object.entries(process.env)) {
@@ -2238,7 +2238,6 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
     }
 
     try {
-      const { spawn } = require('child_process');
       const forgeBin = join(dirname(require.resolve('./index.js')), 'index.js');
       const env: Record<string, string> = {};
       for (const [k, v] of Object.entries(process.env)) {
@@ -2533,7 +2532,6 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
 
     // Safe to spawn: pipeline was failed, no process is running
     try {
-      const { spawn } = require('child_process');
       const forgeBin = join(dirname(require.resolve('./index.js')), 'index.js');
       const env: Record<string, string> = {};
       for (const [k, v] of Object.entries(process.env)) {

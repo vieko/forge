@@ -197,6 +197,7 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
             quiet: true,
             sequential: isSequential,
             force: extraArgs.includes('--force') || extraArgs.includes('-F'),
+            _skipTaskTracking: true,
             _onSpecResult: quiet ? undefined : (spec, status) => {
               const icon = status === 'success' ? '+' : 'x';
               console.log(`${DIM}[executor]${RESET}   ${icon} ${spec} (${taskShortId})`);
@@ -210,6 +211,7 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
             model: params.model as string | undefined,
             quiet: true,
             _silent: true,
+            _skipTaskTracking: true,
           });
         }
       } else {
@@ -219,6 +221,7 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
           model: params.model as string | undefined,
           quiet: true,
           _silent: true,
+          _skipTaskTracking: true,
         });
       }
       break;
