@@ -1,5 +1,5 @@
 ---
-depends: [worktree-pipelines.md, config.md]
+depends: [worktree-pipelines.md, config.md, detect-package-manager.md]
 ---
 
 # Workspace Setup and Teardown Hooks

@@ -244,8 +244,8 @@ describe('runPipeline', () => {
     const provider = new FileSystemStateProvider(tmpDir);
     const executor = createMockExecutor();
 
-    // Schedule gate approval after a short delay (during poll wait)
-    const gateResolver = setTimeout(async () => {
+    // Poll for gate approval (worktree creation may take >500ms, so use interval)
+    const gateResolver = setInterval(async () => {
       const p = await provider.loadActivePipeline();
       if (p && p.gates['run -> audit'].status === 'waiting') {
         p.gates['run -> audit'].status = 'approved';
@@ -253,18 +253,18 @@ describe('runPipeline', () => {
         p.status = 'running';
         await provider.savePipeline(p);
       }
-    }, 500);
+    }, 300);
 
     const result = await runPipeline(
       { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'confirm', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
-    clearTimeout(gateResolver);
+    clearInterval(gateResolver);
     expect(result.status).toBe('completed');
     expect(executor.calls).toEqual(['define', 'run', 'audit', 'proof', 'verify']);
     expect(result.gates['run -> audit'].status).toBe('approved');
-  });
+  }, 15000);
 
   test('--from skips earlier stages', async () => {
     const provider = new FileSystemStateProvider(tmpDir);
@@ -281,7 +281,7 @@ describe('runPipeline', () => {
     expect(executor.calls).toEqual(['audit', 'proof', 'verify']);
     expect(result.stages[0].status).toBe('skipped'); // define
     expect(result.stages[1].status).toBe('skipped'); // run
-  });
+  }, 15000);
 
   test('--spec-dir skips define and seeds run artifacts', async () => {
     const provider = new FileSystemStateProvider(tmpDir);

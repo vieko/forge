@@ -16,7 +16,7 @@ export interface Migration {
   up: (db: Database) => void;
 }
 
-/** Row shape for the tasks table (MCP task tracking). */
+/** Row shape for the tasks table (unified task tracking: CLI + MCP). */
 export interface TaskRow {
   id: string;
   command: string;
@@ -30,6 +30,9 @@ export interface TaskRow {
   exitCode: number | null;
   cwd: string;
   params: string;  // JSON object of task parameters for executor dispatch
+  parentTaskId: string | null;  // FK to parent batch task (null for standalone or parent tasks)
+  source: string;  // 'cli' or 'mcp', indicates entry point
+  cancelledAt: string | null;  // ISO timestamp when cancelled (null otherwise)
   createdAt: string;
   updatedAt: string;
 }
@@ -182,6 +185,23 @@ export const migrations: Migration[] = [
     version: 6,
     up: (db: Database) => {
       db.run(`ALTER TABLE tasks ADD COLUMN params TEXT NOT NULL DEFAULT '{}'`);
+    },
+  },
+
+  // Version 7: Unified task tracking — CLI + MCP write to the same tasks table
+  {
+    version: 7,
+    up: (db: Database) => {
+      // parentTaskId: FK to parent batch task (null for standalone or parent tasks)
+      db.run(`ALTER TABLE tasks ADD COLUMN parentTaskId TEXT`);
+      // source: 'cli' or 'mcp', indicates entry point
+      db.run(`ALTER TABLE tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'cli'`);
+      // cancelledAt: ISO timestamp when cancelled
+      db.run(`ALTER TABLE tasks ADD COLUMN cancelledAt TEXT`);
+      // Index for child task lookups
+      db.run('CREATE INDEX IF NOT EXISTS idx_tasks_parentTaskId ON tasks(parentTaskId)');
+      // Index for source-based queries
+      db.run('CREATE INDEX IF NOT EXISTS idx_tasks_source ON tasks(source)');
     },
   },
 ];
@@ -883,7 +903,8 @@ export async function ensureDbGitignore(forgeDir: string): Promise<void> {
 
 /**
  * Insert a task row into the tasks table.
- * Called by MCP forge_start to queue a pending task for the executor.
+ * Called by MCP forge_start to queue a pending task for the executor,
+ * or by CLI commands to record a running task.
  */
 export function insertTask(db: Database, task: {
   id: string;
@@ -898,11 +919,14 @@ export function insertTask(db: Database, task: {
   exitCode?: number | null;
   cwd: string;
   params?: Record<string, unknown>;
+  parentTaskId?: string | null;
+  source?: string;
 }): void {
   const now = new Date().toISOString();
+  const startedAt = task.status === 'running' ? now : null;
   db.run(
-    `INSERT INTO tasks (id, command, description, specPath, status, pid, sessionId, stdout, stderr, exitCode, cwd, params, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, command, description, specPath, status, pid, sessionId, stdout, stderr, exitCode, cwd, params, parentTaskId, source, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       task.id,
       task.command,
@@ -916,10 +940,103 @@ export function insertTask(db: Database, task: {
       task.exitCode ?? null,
       task.cwd,
       JSON.stringify(task.params ?? {}),
+      task.parentTaskId ?? null,
+      task.source ?? 'cli',
       now,
       now,
     ],
   );
+}
+
+/**
+ * Insert a CLI task that is already running (no queue hop).
+ * Convenience wrapper around insertTask with CLI-specific defaults.
+ */
+export function insertCliTask(db: Database, task: {
+  id: string;
+  command: string;
+  description?: string | null;
+  specPath?: string | null;
+  cwd: string;
+  parentTaskId?: string | null;
+}): void {
+  insertTask(db, {
+    ...task,
+    status: 'running',
+    pid: process.pid,
+    source: 'cli',
+  });
+}
+
+/**
+ * Cancel a task: set status to 'cancelled', record cancelledAt timestamp.
+ * Returns true if the task was updated (was running or pending).
+ */
+export function cancelTask(db: Database, id: string): boolean {
+  const now = new Date().toISOString();
+  db.run(
+    `UPDATE tasks SET status = 'cancelled', cancelledAt = ?, updatedAt = ? WHERE id = ? AND status IN ('running', 'pending')`,
+    [now, now, id],
+  );
+  const row = db.query('SELECT status FROM tasks WHERE id = ?').get(id) as { status: string } | null;
+  return row?.status === 'cancelled';
+}
+
+/**
+ * Get child tasks for a parent batch task.
+ */
+export function getChildTasks(db: Database, parentTaskId: string): TaskRow[] {
+  return db.query(
+    'SELECT * FROM tasks WHERE parentTaskId = ? ORDER BY createdAt ASC',
+  ).all(parentTaskId) as TaskRow[];
+}
+
+/**
+ * Query recent tasks for status display, ordered by createdAt DESC.
+ * Includes both CLI and MCP tasks.
+ */
+export function queryRecentTasks(db: Database, limit?: number): TaskRow[] {
+  if (limit) {
+    return db.query(
+      'SELECT * FROM tasks ORDER BY createdAt DESC LIMIT ?',
+    ).all(limit) as TaskRow[];
+  }
+  return db.query(
+    'SELECT * FROM tasks ORDER BY createdAt DESC',
+  ).all() as TaskRow[];
+}
+
+/** Per-source stats row from SQL GROUP BY. */
+export interface SourceStatsRow {
+  source: string;
+  total: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+}
+
+/**
+ * Query per-source task stats from the tasks table grouped by source.
+ * Optional `since` ISO date filters by createdAt >= since.
+ */
+export function querySourceStats(db: Database, since?: string): SourceStatsRow[] {
+  const whereClause = since ? 'WHERE createdAt >= ?' : '';
+  const params = since ? [since] : [];
+
+  const rows = db.query(`
+    SELECT
+      source,
+      COUNT(*) as total,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+      SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as cancelled
+    FROM tasks
+    WHERE parentTaskId IS NULL ${since ? 'AND createdAt >= ?' : ''}
+    GROUP BY source
+    ORDER BY total DESC
+  `).all(...params) as SourceStatsRow[];
+
+  return rows;
 }
 
 /**
@@ -965,17 +1082,42 @@ export function updateTaskSessionId(db: Database, id: string, sessionId: string)
 }
 
 /**
- * Mark stale running tasks as failed via SQL.
- * Tasks with status='running' and updatedAt older than TTL are considered abandoned
- * (their process died without updating). This replaces the in-memory cleanup.
+ * Mark stale running tasks as failed.
+ *
+ * Two detection strategies:
+ * 1. TTL-based: Tasks with updatedAt older than TTL are considered abandoned.
+ * 2. PID liveness: Tasks (especially CLI source) whose PID is no longer alive
+ *    are marked as failed immediately, regardless of TTL.
+ *
+ * This catches both executor tasks that timed out and CLI processes that crashed.
  */
 export function markStaleTasks(db: Database, ttlMs: number): void {
   const now = new Date().toISOString();
   const cutoff = new Date(Date.now() - ttlMs).toISOString();
+
+  // Strategy 1: TTL-based (original behavior)
   db.run(
     `UPDATE tasks SET status = 'failed', updatedAt = ? WHERE status = 'running' AND updatedAt < ?`,
     [now, cutoff],
   );
+
+  // Strategy 2: PID liveness check for running tasks with a PID
+  const runningWithPid = db.query(
+    `SELECT id, pid FROM tasks WHERE status = 'running' AND pid IS NOT NULL`,
+  ).all() as Array<{ id: string; pid: number }>;
+
+  for (const task of runningWithPid) {
+    try {
+      // Signal 0: check if process exists without killing it
+      process.kill(task.pid, 0);
+    } catch {
+      // Process is dead — mark task as failed
+      db.run(
+        `UPDATE tasks SET status = 'failed', updatedAt = ? WHERE id = ? AND status = 'running'`,
+        [now, task.id],
+      );
+    }
+  }
 }
 
 /**
@@ -996,6 +1138,27 @@ export function getActiveTaskByCommandAndCwd(db: Database, command: string, cwd:
   return db.query(
     `SELECT * FROM tasks WHERE command = ? AND cwd = ? AND status IN ('running', 'pending') ORDER BY createdAt DESC LIMIT 1`,
   ).get(command, cwd) as TaskRow | null;
+}
+
+/**
+ * Query active tasks (pending or running), sorted: running first, then pending, by createdAt.
+ * Used by the TUI to display the executor task queue.
+ */
+export function getActiveTasks(db: Database): TaskRow[] {
+  return db.query(
+    `SELECT * FROM tasks WHERE status IN ('pending', 'running') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, createdAt ASC`,
+  ).all() as TaskRow[];
+}
+
+/**
+ * Query recently completed or failed tasks within a time window.
+ * Used by the TUI task history view (e.g. last hour).
+ */
+export function getRecentCompletedTasks(db: Database, sinceMs: number): TaskRow[] {
+  const cutoff = new Date(Date.now() - sinceMs).toISOString();
+  return db.query(
+    `SELECT * FROM tasks WHERE status IN ('completed', 'failed') AND updatedAt >= ? ORDER BY updatedAt DESC`,
+  ).all(cutoff) as TaskRow[];
 }
 
 /**

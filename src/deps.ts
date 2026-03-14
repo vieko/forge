@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
+import type { SpecManifest } from './types.js';
 
 /**
  * Parsed spec with optional dependency metadata from YAML frontmatter.
@@ -138,24 +139,58 @@ export async function loadSpecDeps(
 }
 
 /**
- * Validate that all dependency references point to specs that exist in the batch.
- * Throws with a descriptive error if any are missing.
+ * Validate that all dependency references point to specs that exist in the batch
+ * or are satisfied by passed specs in the manifest.
+ *
+ * When a manifest is provided:
+ * - A dependency matched by filename to a `passed` manifest entry is satisfied.
+ * - A dependency matched to a non-passed manifest entry emits a warning (returned).
+ * - A dependency not found in the batch or manifest throws an error.
+ *
+ * Without a manifest, all deps must be in the batch (original behavior).
+ *
+ * @returns Array of warning strings (empty if none).
  */
-export function validateDeps(specs: SpecDep[]): void {
+export function validateDeps(specs: SpecDep[], manifest?: SpecManifest): string[] {
   const nameSet = new Set(specs.map(s => s.name));
+  const warnings: string[] = [];
+
+  // Build manifest lookup by basename: track passed names and non-passed names with status
+  const manifestPassedNames = new Set<string>();
+  const manifestNonPassedNames = new Map<string, string>(); // basename -> status
+  if (manifest) {
+    for (const entry of manifest.specs) {
+      const basename = path.basename(entry.spec);
+      if (entry.status === 'passed') {
+        manifestPassedNames.add(basename);
+        manifestNonPassedNames.delete(basename); // passed takes precedence
+      } else if (!manifestPassedNames.has(basename)) {
+        manifestNonPassedNames.set(basename, entry.status);
+      }
+    }
+  }
 
   const missing: string[] = [];
   for (const spec of specs) {
     for (const dep of spec.depends) {
-      if (!nameSet.has(dep)) {
-        missing.push(`${spec.name} depends on "${dep}" which is not in the spec batch`);
+      if (nameSet.has(dep)) continue;
+      if (manifestPassedNames.has(dep)) continue;
+
+      const nonPassedStatus = manifestNonPassedNames.get(dep);
+      if (nonPassedStatus !== undefined) {
+        warnings.push(`${spec.name} depends on ${dep} (status: ${nonPassedStatus} in manifest) — may not be satisfied`);
+        continue;
       }
+
+      missing.push(`${spec.name} depends on "${dep}" which is not in the spec batch`);
     }
   }
 
   if (missing.length > 0) {
     throw new Error(`Unresolved spec dependencies:\n  ${missing.join('\n  ')}`);
   }
+
+  return warnings;
 }
 
 // ── Cycle detection ─────────────────────────────────────────
@@ -212,10 +247,17 @@ export function detectCycle(specs: SpecDep[]): string[] | null {
  *
  * Specs with no dependencies land in the first level.
  * This enables maximum parallelism within each level.
+ *
+ * When a manifest is provided, dependencies satisfied by passed manifest
+ * entries are excluded from ordering — a spec whose only deps are
+ * manifest-satisfied goes in level 0 (runs immediately).
  */
-export function topoSort(specs: SpecDep[]): DepLevel[] {
-  // Validate deps exist
-  validateDeps(specs);
+export function topoSort(specs: SpecDep[], manifest?: SpecManifest): DepLevel[] {
+  // Validate deps exist (with manifest awareness)
+  const warnings = validateDeps(specs, manifest);
+  for (const w of warnings) {
+    console.warn(`\x1b[33m[forge]\x1b[0m Warning: ${w}`);
+  }
 
   // Check for cycles
   const cycle = detectCycle(specs);
@@ -225,27 +267,18 @@ export function topoSort(specs: SpecDep[]): DepLevel[] {
     );
   }
 
-  const nameToSpec = new Map(specs.map(s => [s.name, s]));
-
-  // Compute in-degree for each spec
-  const inDegree = new Map<string, number>();
+  // For topo ordering, only consider in-batch deps.
+  // Out-of-batch deps are either manifest-satisfied or validated above.
+  const nameSet = new Set(specs.map(s => s.name));
+  const inBatchDeps = new Map<string, string[]>();
   for (const spec of specs) {
-    if (!inDegree.has(spec.name)) inDegree.set(spec.name, 0);
-    for (const dep of spec.depends) {
-      // dep → spec (spec depends on dep)
-      // This means spec has an incoming edge from dep
-    }
-  }
-
-  // Count incoming edges: for each spec, each dependency adds 1 to its in-degree
-  for (const spec of specs) {
-    inDegree.set(spec.name, spec.depends.length);
+    inBatchDeps.set(spec.name, spec.depends.filter(d => nameSet.has(d)));
   }
 
   const levels: DepLevel[] = [];
 
-  // Start with all specs that have no dependencies
-  let ready = specs.filter(s => s.depends.length === 0);
+  // Start with all specs that have no in-batch dependencies
+  let ready = specs.filter(s => inBatchDeps.get(s.name)!.length === 0);
 
   const processed = new Set<string>();
 
@@ -258,11 +291,11 @@ export function topoSort(specs: SpecDep[]): DepLevel[] {
       processed.add(s.name);
     }
 
-    // Find next level: specs whose dependencies are all processed
+    // Find next level: specs whose in-batch dependencies are all processed
     const nextReady: SpecDep[] = [];
     for (const spec of specs) {
       if (processed.has(spec.name)) continue;
-      if (spec.depends.every(dep => processed.has(dep))) {
+      if (inBatchDeps.get(spec.name)!.every(dep => processed.has(dep))) {
         nextReady.push(spec);
       }
     }

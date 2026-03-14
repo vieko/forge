@@ -2,13 +2,15 @@ import type { ForgeOptions, ForgeResult } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import { ForgeError, execAsync, createWorktree, commitWorktree, cleanupWorktree } from './utils.js';
 import { DIM, RESET, BOLD, CMD, AGENT_VERBS, SPINNER_FRAMES, formatElapsed, showBanner } from './display.js';
 import { runSingleSpec, type BatchResult } from './run.js';
 import { loadSpecDeps, topoSort, hasDependencies, type SpecDep, type DepLevel } from './deps.js';
-import { withManifestLock, findOrCreateEntry, specKey, loadManifest, resolveSpecFile, resolveSpecDir, resolveSpecSource, assessSpecComplexity } from './specs.js';
+import { withManifestLock, findOrCreateEntry, specKey, loadManifest, resolveSpecFile, resolveSpecDir, resolveSpecSource, assessSpecComplexity, resetRunningSpecs } from './specs.js';
 import { resolveWorkingDir } from './utils.js';
 import { isInterrupted } from './abort.js';
+import { getDb, insertCliTask, updateTaskStatus, cancelTask } from './db.js';
 
 // Worker pool: runs tasks with bounded concurrency
 // Checks isInterrupted() before picking up each new item.
@@ -288,8 +290,8 @@ export async function smartDispatch(
   return null;
 }
 
-// Internal options type: ForgeOptions + worktree result dir
-type RunOptions = ForgeOptions & { _resultDir?: string };
+// Internal options type: ForgeOptions + worktree result dir + batch task tracking
+type RunOptions = ForgeOptions & { _resultDir?: string; _parentTaskId?: string };
 
 // Run specs sequentially
 async function runSpecsSequential(
@@ -327,6 +329,7 @@ async function runSpecsSequential(
     try {
       const specContent = await fs.readFile(specFilePath, 'utf-8');
 
+      const childTaskId = crypto.randomUUID();
       const result = await runSingleSpec({
         ...options,
         specPath: specFilePath,
@@ -334,12 +337,15 @@ async function runSpecsSequential(
         specDir: undefined,
         _runId: runId,
         _specLabel: `${i + 1}/${specs.length}`,
+        _taskId: childTaskId,
+        _parentTaskId: options._parentTaskId,
       });
 
       const duration = (Date.now() - startTime) / 1000;
       const cost = result.costUsd;
       results.push({ spec: specFile, status: 'success', cost, duration });
       if (useTracker) tracker.done(trackerIndices[i], duration, cost);
+      options._onSpecResult?.(specFile, 'success');
     } catch (err) {
       const duration = (Date.now() - startTime) / 1000;
       const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
@@ -361,6 +367,7 @@ async function runSpecsSequential(
         duration
       });
       if (useTracker) tracker.fail(trackerIndices[i], duration, cost);
+      options._onSpecResult?.(specFile, 'failed');
 
       if (!quiet) {
         console.error(`\nSpec ${specFile} failed:`, err instanceof Error ? err.message : err);
@@ -381,17 +388,22 @@ async function runSpecsParallel(
 ): Promise<BatchResult[]> {
   const results: BatchResult[] = [];
   const names = specs.map(s => s.name);
-  const display = createSpecDisplay(names);
+  const { quiet } = options;
+
+  // In quiet mode (executor), skip the interactive spinner display entirely.
+  // The executor logs per-spec results in its own format.
+  const display = quiet ? null : createSpecDisplay(names);
 
   try {
     await workerPool(names, concurrency, async (specFile, i) => {
       const specFilePath = specs[i].path;
-      display.start(i);
+      display?.start(i);
 
       const startTime = Date.now();
       try {
         const specContent = await fs.readFile(specFilePath, 'utf-8');
 
+        const childTaskId = crypto.randomUUID();
         const result = await runSingleSpec({
           ...options,
           specPath: specFilePath,
@@ -399,28 +411,32 @@ async function runSpecsParallel(
           specDir: undefined,
           quiet: true,
           _silent: true,
-          _onActivity: (detail) => display.activity(i, detail),
+          _onActivity: (detail) => display?.activity(i, detail),
           _runId: runId,
+          _taskId: childTaskId,
+          _parentTaskId: options._parentTaskId,
         });
 
         const duration = (Date.now() - startTime) / 1000;
-        display.done(i, duration);
+        display?.done(i, duration);
         results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration });
+        options._onSpecResult?.(specFile, 'success');
       } catch (err) {
         const duration = (Date.now() - startTime) / 1000;
         const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
         const errMsg = isInterrupted() ? 'cancelled' : (err instanceof Error ? err.message : 'Unknown error');
-        display.fail(i, errMsg);
+        display?.fail(i, errMsg);
         results.push({
           spec: specFile,
           status: isInterrupted() ? 'cancelled' : `failed: ${errMsg}`,
           cost,
           duration
         });
+        if (!isInterrupted()) options._onSpecResult?.(specFile, 'failed');
       }
     });
   } finally {
-    display.stop();
+    display?.stop();
   }
 
   // Mark any specs that were never started (skipped by interrupted worker pool)
@@ -473,7 +489,8 @@ export async function runSpecBatch(
 
   // Dependency-aware execution: topological levels
   if (useDeps && parallel) {
-    const levels = topoSort(specDeps);
+    const manifest = await loadManifest(batchWorkingDir);
+    const levels = topoSort(specDeps, manifest);
 
     // Flatten all spec names across levels for the tracker
     const allSpecNames: string[] = [];
@@ -647,7 +664,7 @@ export function printBatchSummary(
   const totalSpecDuration = results.reduce((sum, r) => sum + r.duration, 0);
   const totalCost = results.reduce((sum, r) => sum + (r.cost || 0), 0);
 
-  if (!quiet || parallel) {
+  if (!quiet) {
     const successCount = results.filter(r => r.status === 'success').length;
     const cancelledCount = results.filter(r => r.status === 'cancelled').length;
     const failedCount = results.length - successCount - cancelledCount;
@@ -821,6 +838,9 @@ async function runForgeInner(
   // Generate a unique run ID for batch grouping
   const runId = `${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
 
+  // Database for CLI task tracking
+  const db = getDb(resultDir);
+
   // ── Smart dispatch: detect if prompt is a spec dir or file ──
   if (!options.specDir && !options.specPath && !rerunFailed && !pendingOnly) {
     const dispatched = await smartDispatch(options.prompt, resultDir, effectiveWorkingDir);
@@ -856,9 +876,39 @@ async function runForgeInner(
       }
     }
 
+    // Insert parent batch task for rerun-failed
+    const batchTaskId = crypto.randomUUID();
+    if (db) {
+      try {
+        insertCliTask(db, {
+          id: batchTaskId,
+          command: 'run',
+          description: `rerun-failed: ${failedPaths.length} spec(s)`,
+          cwd: effectiveWorkingDir,
+        });
+      } catch { /* best effort */ }
+    }
+    const batchOptions: RunOptions = { ...options, _parentTaskId: batchTaskId };
+
     const wallClockStart = Date.now();
-    const { results, hasTracker } = await runSpecBatch(failedPaths, failedNames, options, concurrency, runId);
+    const { results, hasTracker } = await runSpecBatch(failedPaths, failedNames, batchOptions, concurrency, runId);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
+
+    // Update parent batch task status + manifest cleanup on cancel
+    const anyCancelled = results.some(r => r.status === 'cancelled');
+    if (db) {
+      try {
+        const allPassed = results.every(r => r.status === 'success');
+        if (anyCancelled && isInterrupted()) {
+          cancelTask(db, batchTaskId);
+        } else {
+          updateTaskStatus(db, batchTaskId, allPassed ? 'completed' : 'failed', allPassed ? 0 : 1);
+        }
+      } catch { /* best effort */ }
+    }
+    if (anyCancelled) {
+      await resetRunningSpecs(resultDir).catch(() => {});
+    }
 
     printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, undefined, hasTracker);
     return { anyPassed: results.some(r => r.status === 'success') };
@@ -883,9 +933,39 @@ async function runForgeInner(
       }
     }
 
+    // Insert parent batch task for pending specs
+    const pendingBatchTaskId = crypto.randomUUID();
+    if (db) {
+      try {
+        insertCliTask(db, {
+          id: pendingBatchTaskId,
+          command: 'run',
+          description: `pending: ${pendingPaths.length} spec(s)`,
+          cwd: effectiveWorkingDir,
+        });
+      } catch { /* best effort */ }
+    }
+    const pendingBatchOptions: RunOptions = { ...options, _parentTaskId: pendingBatchTaskId };
+
     const wallClockStart = Date.now();
-    const { results, hasTracker } = await runSpecBatch(pendingPaths, pendingNames, options, concurrency, runId);
+    const { results, hasTracker } = await runSpecBatch(pendingPaths, pendingNames, pendingBatchOptions, concurrency, runId);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
+
+    // Update parent batch task status + manifest cleanup on cancel
+    const pendingAnyCancelled = results.some(r => r.status === 'cancelled');
+    if (db) {
+      try {
+        const allPassed = results.every(r => r.status === 'success');
+        if (pendingAnyCancelled && isInterrupted()) {
+          cancelTask(db, pendingBatchTaskId);
+        } else {
+          updateTaskStatus(db, pendingBatchTaskId, allPassed ? 'completed' : 'failed', allPassed ? 0 : 1);
+        }
+      } catch { /* best effort */ }
+    }
+    if (pendingAnyCancelled) {
+      await resetRunningSpecs(resultDir).catch(() => {});
+    }
 
     printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, undefined, hasTracker);
     return { anyPassed: results.some(r => r.status === 'success') };
@@ -981,9 +1061,40 @@ async function runForgeInner(
       }
     }
 
+    // Insert parent batch task for spec-dir
+    const specDirBatchTaskId = crypto.randomUUID();
+    if (db) {
+      try {
+        insertCliTask(db, {
+          id: specDirBatchTaskId,
+          command: 'run',
+          description: `spec-dir: ${specFiles.length} spec(s) in ${path.relative(resultDir, resolvedDir) || resolvedDir}`,
+          specPath: resolvedDir,
+          cwd: effectiveWorkingDir,
+        });
+      } catch { /* best effort */ }
+    }
+    const specDirOptions: RunOptions = { ...options, _parentTaskId: specDirBatchTaskId };
+
     const wallClockStart = Date.now();
-    const { results, hasTracker } = await runSpecBatch(specFilePaths, specFiles, options, concurrency, runId, skippedNames);
+    const { results, hasTracker } = await runSpecBatch(specFilePaths, specFiles, specDirOptions, concurrency, runId, skippedNames);
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
+
+    // Update parent batch task status + manifest cleanup on cancel
+    const specDirAnyCancelled = results.some(r => r.status === 'cancelled');
+    if (db) {
+      try {
+        const allPassed = results.every(r => r.status === 'success');
+        if (specDirAnyCancelled && isInterrupted()) {
+          cancelTask(db, specDirBatchTaskId);
+        } else {
+          updateTaskStatus(db, specDirBatchTaskId, allPassed ? 'completed' : 'failed', allPassed ? 0 : 1);
+        }
+      } catch { /* best effort */ }
+    }
+    if (specDirAnyCancelled) {
+      await resetRunningSpecs(resultDir).catch(() => {});
+    }
 
     const displayDir = path.relative(resultDir, resolvedDir) || resolvedDir;
     printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, displayDir, hasTracker);

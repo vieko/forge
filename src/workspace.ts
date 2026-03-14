@@ -6,7 +6,7 @@
 
 import { promises as fs } from 'fs';
 import path from 'path';
-import { execAsync } from './utils.js';
+import { execAsync, detectPackageManager } from './utils.js';
 import type { ForgeLocalConfig } from './config.js';
 
 // ── Types ────────────────────────────────────────────────────
@@ -27,27 +27,38 @@ export interface WorkspaceHookResult {
  * working directory. Multiple project types can coexist (e.g. a
  * monorepo with both package.json and Cargo.toml).
  *
- * Detection rules:
- *   package.json  ->  bun install
- *   Cargo.toml    ->  cargo build
- *   go.mod        ->  go mod download
+ * Detection rules (Node.js uses lockfile-based package manager detection):
+ *   bun.lockb / bun.lock    ->  bun install
+ *   pnpm-lock.yaml          ->  pnpm install
+ *   yarn.lock               ->  yarn install
+ *   package-lock.json        ->  npm install
+ *   package.json (no lock)  ->  npm install
+ *   Cargo.toml              ->  cargo build
+ *   go.mod                  ->  go mod download
  */
 export async function detectSetupCommands(workingDir: string): Promise<string[]> {
   const commands: string[] = [];
 
-  const checks: Array<{ file: string; command: string }> = [
-    { file: 'package.json', command: 'bun install' },
-    { file: 'Cargo.toml', command: 'cargo build' },
-    { file: 'go.mod', command: 'go mod download' },
-  ];
+  // Node.js: detect package manager from lockfiles
+  const pm = await detectPackageManager(workingDir);
+  if (pm) {
+    commands.push(`${pm} install`);
+  }
 
-  for (const { file, command } of checks) {
-    try {
-      await fs.access(path.join(workingDir, file));
-      commands.push(command);
-    } catch {
-      // File not present -- skip
-    }
+  // Rust
+  try {
+    await fs.access(path.join(workingDir, 'Cargo.toml'));
+    commands.push('cargo build');
+  } catch {
+    // Not present -- skip
+  }
+
+  // Go
+  try {
+    await fs.access(path.join(workingDir, 'go.mod'));
+    commands.push('go mod download');
+  } catch {
+    // Not present -- skip
   }
 
   return commands;

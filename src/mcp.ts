@@ -35,7 +35,7 @@ import {
 } from './db.js';
 import { FileSystemStateProvider } from './pipeline-state.js';
 import type { Pipeline, GateKey } from './pipeline-types.js';
-import { isExecutorRunning } from './executor.js';
+import { isExecutorRunning, ensureExecutorRunning } from './executor.js';
 
 // ── Task tracking (DB-backed) ────────────────────────────────
 
@@ -337,7 +337,7 @@ server.registerTool('forge_stats', {
 // ── Async tool: forge_start ──────────────────────────────────
 
 server.registerTool('forge_start', {
-  description: `Queue a forge command (define, proof, run, audit, verify) for execution by the executor daemon. Returns a task_id immediately — use forge_task to poll for completion. Requires a running executor (forge executor). Typical durations: define 3-5min, run 5-15min, audit 3-10min, proof 2-5min, verify 5-15min. Poll every 30-60s with forge_task.`,
+  description: `Queue a forge command (define, proof, run, audit, verify) for execution by the executor daemon. Returns a task_id immediately — use forge_task to poll for completion. Auto-spawns the executor if not running. Typical durations: define 3-5min, run 5-15min, audit 3-10min, proof 2-5min, verify 5-15min. Poll every 30-60s with forge_task.`,
   inputSchema: {
     command: z.enum(['define', 'proof', 'prove', 'run', 'audit', 'verify']).describe('Forge command to run'),
     description: z.string().describe('Task description or prompt for the command'),
@@ -358,13 +358,14 @@ server.registerTool('forge_start', {
       };
     }
 
-    // Check executor liveness — tasks need a running executor to be picked up
-    if (!(await isExecutorRunning(workingDir))) {
+    // Auto-spawn executor if not running — tasks need a running executor to be picked up
+    const executorResult = await ensureExecutorRunning(workingDir);
+    if (!executorResult.running) {
       return {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            error: 'No executor running. Start one with: forge executor',
+            error: 'Failed to start executor. Start one manually with: forge executor',
             hint: 'Run `forge executor` (or `forge serve`) in a terminal to start the task executor daemon.',
           }),
         }],
@@ -394,19 +395,25 @@ server.registerTool('forge_start', {
       status: 'pending',
       cwd: workingDir,
       params,
+      source: 'mcp',
     });
 
     // Track for same-process lookups (forge_task resolution)
     taskCwdIndex.set(taskId, workingDir);
 
+    const response: Record<string, unknown> = {
+      task_id: taskId,
+      message: `Queued forge ${command}`,
+      hint: 'Use forge_task to poll for completion, or forge_watch for detailed activity. Check every 30-60s.',
+    };
+    if (executorResult.spawned) {
+      response.executor_spawned = true;
+    }
+
     return {
       content: [{
         type: 'text' as const,
-        text: JSON.stringify({
-          task_id: taskId,
-          message: `Queued forge ${command}`,
-          hint: 'Use forge_task to poll for completion, or forge_watch for detailed activity. Check every 30-60s.',
-        }),
+        text: JSON.stringify(response),
       }],
     };
   } catch (err) {
@@ -787,7 +794,7 @@ server.registerTool('forge_pipeline', {
 // ── Async tool: forge_pipeline_start ─────────────────────────
 
 server.registerTool('forge_pipeline_start', {
-  description: 'Queue a pipeline for execution by the executor daemon. Returns a task_id for polling via forge_task. Requires a running executor (forge executor). Typical duration: 15-60min depending on pipeline scope. Poll every 30-60s with forge_task.',
+  description: 'Queue a pipeline for execution by the executor daemon. Returns a task_id for polling via forge_task. Auto-spawns the executor if not running. Typical duration: 15-60min depending on pipeline scope. Poll every 30-60s with forge_task.',
   inputSchema: {
     goal: z.string().describe('High-level goal describing what to build'),
     cwd: z.string().describe('Working directory (target repo)'),
@@ -808,13 +815,14 @@ server.registerTool('forge_pipeline_start', {
       };
     }
 
-    // Check executor liveness
-    if (!(await isExecutorRunning(workingDir))) {
+    // Auto-spawn executor if not running
+    const executorResult = await ensureExecutorRunning(workingDir);
+    if (!executorResult.running) {
       return {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            error: 'No executor running. Start one with: forge executor',
+            error: 'Failed to start executor. Start one manually with: forge executor',
             hint: 'Run `forge executor` (or `forge serve`) in a terminal to start the task executor daemon.',
           }),
         }],
@@ -860,19 +868,25 @@ server.registerTool('forge_pipeline_start', {
       status: 'pending',
       cwd: workingDir,
       params,
+      source: 'mcp',
     });
 
     // Track for same-process lookups
     taskCwdIndex.set(taskId, workingDir);
 
+    const response: Record<string, unknown> = {
+      task_id: taskId,
+      message: 'Queued forge pipeline',
+      hint: 'Use forge_task to poll for completion, forge_watch for detailed activity, or forge_pipeline to check pipeline state. Check every 30-60s.',
+    };
+    if (executorResult.spawned) {
+      response.executor_spawned = true;
+    }
+
     return {
       content: [{
         type: 'text' as const,
-        text: JSON.stringify({
-          task_id: taskId,
-          message: 'Queued forge pipeline',
-          hint: 'Use forge_task to poll for completion, forge_watch for detailed activity, or forge_pipeline to check pipeline state. Check every 30-60s.',
-        }),
+        text: JSON.stringify(response),
       }],
     };
   } catch (err) {

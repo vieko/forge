@@ -2,8 +2,8 @@ import type { ForgeResult } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { DIM, RESET, BOLD, showBanner } from './display.js';
-import { getDbWithBackfill, queryStatusRuns } from './db.js';
-import type { StatusRunRow } from './db.js';
+import { getDbWithBackfill, queryStatusRuns, queryRecentTasks, getChildTasks } from './db.js';
+import type { StatusRunRow, TaskRow } from './db.js';
 
 // ── Shared display logic ────────────────────────────────────
 
@@ -61,6 +61,76 @@ function printGroups(
       } else if (specDir && isBatch) {
         console.log(`\n  ${DIM}Next step:${RESET}`);
         console.log(`    forge audit ${specDir} --fix "verify and fix"`);
+      }
+    }
+  }
+
+  console.log('');
+}
+
+// ── Task status display ──────────────────────────────────────
+
+/** Status icon for task status. */
+function taskStatusIcon(status: string): string {
+  switch (status) {
+    case 'completed': return '\x1b[32m+\x1b[0m';
+    case 'failed': return '\x1b[31mx\x1b[0m';
+    case 'cancelled': return '\x1b[33m-\x1b[0m';
+    case 'running': return '\x1b[36m>\x1b[0m';
+    case 'pending': return `${DIM}-${RESET}`;
+    default: return '?';
+  }
+}
+
+/** Format task elapsed time from createdAt to updatedAt. */
+function taskDuration(task: TaskRow): string {
+  const created = new Date(task.createdAt).getTime();
+  const updated = new Date(task.updatedAt).getTime();
+  const seconds = (updated - created) / 1000;
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return s > 0 ? `${m}m${s}s` : `${m}m`;
+}
+
+function printTasks(
+  tasks: TaskRow[],
+  db: import('bun:sqlite').Database,
+  options: { all?: boolean; last?: number },
+): void {
+  // Only show parent tasks (no parentTaskId) — children are displayed nested
+  const parentTasks = tasks.filter(t => !t.parentTaskId);
+  const limit = options.all ? parentTasks.length : Math.min(options.last || 5, parentTasks.length);
+  const displayed = parentTasks.slice(0, limit);
+
+  if (displayed.length === 0) return;
+
+  console.log(`${BOLD}Recent Tasks${RESET}`);
+  console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
+
+  const nameWidth = 40;
+
+  for (const task of displayed) {
+    const icon = taskStatusIcon(task.status);
+    const label = task.description
+      ? task.description.substring(0, nameWidth)
+      : task.command;
+    const source = task.source === 'mcp' ? `${DIM}(mcp)${RESET}` : '';
+    const dur = taskDuration(task);
+    const id = task.id.substring(0, 8);
+
+    console.log(`  ${icon} ${label.padEnd(nameWidth)} ${task.status.padEnd(10)} ${dur.padStart(6)}  ${DIM}${id}${RESET} ${source}`);
+
+    // Show child tasks for batch parents
+    const children = getChildTasks(db, task.id);
+    if (children.length > 0) {
+      for (const child of children) {
+        const childIcon = taskStatusIcon(child.status);
+        const childLabel = child.specPath
+          ? path.basename(child.specPath)
+          : (child.description || child.command).substring(0, nameWidth - 4);
+        const childDur = taskDuration(child);
+        console.log(`    ${childIcon} ${childLabel.padEnd(nameWidth - 4)} ${child.status.padEnd(10)} ${childDur.padStart(6)}`);
       }
     }
   }
@@ -164,6 +234,12 @@ export async function showStatus(options: { cwd?: string; all?: boolean; last?: 
     if (db) {
       const rows = queryStatusRuns(db);
       showStatusFromDb(rows, options);
+
+      // Show recent tasks (CLI + MCP)
+      const tasks = queryRecentTasks(db, options.all ? undefined : 20);
+      if (tasks.length > 0) {
+        printTasks(tasks, db, options);
+      }
       return;
     }
   } catch {

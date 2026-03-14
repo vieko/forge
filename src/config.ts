@@ -19,6 +19,7 @@ const StrictFieldSchemas = {
   setup: z.array(z.string()),
   teardown: z.array(z.string()),
   setupTimeout: z.number().positive(),
+  executorIdleTimeout: z.number().positive(),
   dbProvider: z.enum(['sqlite', 'turso']),
   apiPort: z.number().int().positive(),
   apiToken: z.string().nullable(),
@@ -33,6 +34,7 @@ const ConfigSchema = z.object({
   setup: z.array(z.string()).default([]).catch([]),
   teardown: z.array(z.string()).default([]).catch([]),
   setupTimeout: z.number().positive().default(300000).catch(300000),
+  executorIdleTimeout: z.number().positive().default(300000).catch(300000),
   dbProvider: z.enum(['sqlite', 'turso']).default('sqlite').catch('sqlite' as const),
   apiPort: z.number().int().positive().default(4926).catch(4926),
   apiToken: z.string().nullable().default(null).catch(null),
@@ -44,6 +46,7 @@ export interface ForgeLocalConfig {
   setup: string[];
   teardown: string[];
   setupTimeout: number;
+  executorIdleTimeout: number;
   dbProvider: 'sqlite' | 'turso';
   apiPort: number;
   apiToken: string | null;
@@ -53,6 +56,7 @@ export const CONFIG_DEFAULTS: ForgeLocalConfig = {
   setup: [],
   teardown: [],
   setupTimeout: 300000,
+  executorIdleTimeout: 300000,
   dbProvider: 'sqlite',
   apiPort: 4926,
   apiToken: null,
@@ -115,6 +119,13 @@ function applyEnvOverrides(config: ForgeLocalConfig): ForgeLocalConfig {
     }
   }
 
+  if (process.env.FORGE_EXECUTOR_IDLE_TIMEOUT !== undefined) {
+    const timeout = parseInt(process.env.FORGE_EXECUTOR_IDLE_TIMEOUT, 10);
+    if (!isNaN(timeout) && timeout > 0) {
+      result.executorIdleTimeout = timeout;
+    }
+  }
+
   return result;
 }
 
@@ -161,6 +172,7 @@ export function getConfig(workingDir: string): ForgeLocalConfig {
     setup: parsed.setup,
     teardown: parsed.teardown,
     setupTimeout: parsed.setupTimeout,
+    executorIdleTimeout: parsed.executorIdleTimeout,
     dbProvider: parsed.dbProvider,
     apiPort: parsed.apiPort,
     apiToken: parsed.apiToken,
@@ -216,6 +228,7 @@ export function formatConfig(workingDir: string): string {
     { key: 'setup' },
     { key: 'teardown' },
     { key: 'setupTimeout', envVar: 'FORGE_SETUP_TIMEOUT' },
+    { key: 'executorIdleTimeout', envVar: 'FORGE_EXECUTOR_IDLE_TIMEOUT' },
     { key: 'dbProvider', envVar: 'FORGE_DB_PROVIDER' },
     { key: 'apiPort', envVar: 'FORGE_API_PORT' },
     { key: 'apiToken', envVar: 'FORGE_API_TOKEN' },

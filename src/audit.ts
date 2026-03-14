@@ -1,4 +1,4 @@
-import type { AuditOptions, ForgeResult } from './types.js';
+import type { AuditOptions, ForgeResult, GapTrackingEntry, GapRoundRecord, GapFixStatus } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
@@ -349,6 +349,98 @@ export async function runAudit(options: AuditOptions): Promise<void> {
   }
 }
 
+// ── Gap name normalization ────────────────────────────────────
+
+/** Strip round prefixes (r1-, r2-, etc.) to get the base gap name. */
+function stripRoundPrefix(filename: string): string {
+  return filename.replace(/^(r\d+-)+/, '');
+}
+
+/** Extract the first sentence from the ## Outcome section of a spec file. */
+async function extractOutcomeSentence(specFilePath: string): Promise<string | undefined> {
+  try {
+    const content = await fs.readFile(specFilePath, 'utf-8');
+    const outcomeMatch = content.match(/^##\s+Outcome\s*\n+(.+)/m);
+    if (outcomeMatch) {
+      // First sentence: up to the first period followed by whitespace/newline/end
+      const firstSentence = outcomeMatch[1].trim().match(/^[^.]+\./);
+      return firstSentence ? firstSentence[0] : outcomeMatch[1].trim().split('\n')[0];
+    }
+  } catch {}
+  return undefined;
+}
+
+/** Collect fix results for remediation specs from the results directory. */
+async function collectFixResults(
+  persistBase: string,
+  remediationDir: string,
+  roundSpecs: string[],
+): Promise<Map<string, GapFixStatus>> {
+  const fixStatuses = new Map<string, GapFixStatus>();
+  try {
+    const resultsBase = path.join(persistBase, '.forge', 'results');
+    const dirs = (await fs.readdir(resultsBase)).sort().reverse();
+
+    // Map base gap names to their spec filenames for matching
+    const specBasenames = new Set(roundSpecs.map(f => stripRoundPrefix(f)));
+
+    for (const dir of dirs) {
+      if (fixStatuses.size >= specBasenames.size) break;
+      try {
+        const summary: ForgeResult = JSON.parse(
+          await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
+        );
+        if (!summary.specPath) continue;
+
+        const specBase = stripRoundPrefix(path.basename(summary.specPath));
+        if (!specBasenames.has(specBase)) continue;
+        if (fixStatuses.has(specBase)) continue;
+
+        if (summary.status === 'success') {
+          fixStatuses.set(specBase, 'success');
+        } else if (summary.status === 'error_execution') {
+          fixStatuses.set(specBase, 'error_execution');
+        } else {
+          fixStatuses.set(specBase, 'error_verification');
+        }
+      } catch { continue; }
+    }
+  } catch {}
+  return fixStatuses;
+}
+
+// ── Gap tracking timeline rendering ──────────────────────────
+
+/** Format a single gap's round history as a readable timeline string. */
+function formatGapTimeline(entry: GapTrackingEntry): string {
+  const parts: string[] = [];
+  for (const r of entry.rounds) {
+    if (r.action === 'found_and_fixed') {
+      if (r.fixStatus === 'success') {
+        parts.push(`r${r.round}: found -> fixed`);
+      } else if (r.fixStatus === 'error_verification') {
+        parts.push(`r${r.round}: found -> fix failed (verification)`);
+      } else if (r.fixStatus === 'error_execution') {
+        parts.push(`r${r.round}: found -> fix failed (execution)`);
+      } else {
+        parts.push(`r${r.round}: found -> fixed`);
+      }
+    } else {
+      parts.push(`r${r.round}: found`);
+    }
+  }
+
+  // If resolved, append "clean" after the last round
+  if (entry.status === 'resolved' || entry.status === 'resolved_multi') {
+    const lastRound = entry.rounds[entry.rounds.length - 1];
+    parts.push(`r${lastRound.round + 1}: clean`);
+  } else {
+    parts.push('(persists)');
+  }
+
+  return parts.join(' -> ');
+}
+
 // ── Audit-fix convergence loop ───────────────────────────────
 
 async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions): Promise<void> {
@@ -371,7 +463,17 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
   let totalDuration = 0;
   let round = 0;
   let prevGapNames: Set<string> | null = null;
+  let stoppedNotConverging = false;
+  let hasVerificationFailures = false;
+
   const roundSummaries: Array<{ round: number; gaps: number; fixesRan: boolean; durationSeconds: number; costUsd: number }> = [];
+
+  // Gap tracking: keyed by base gap name (stripped of r{N}- prefix)
+  const gapHistory = new Map<string, GapRoundRecord[]>();
+  // Track which gaps were seen in each round (for detecting resolution)
+  const gapSeenInRound = new Map<string, Set<number>>();
+  // Track fix results per gap per round
+  const gapFixResults = new Map<string, Map<number, GapFixStatus>>();
 
   while (round < maxRounds && !isInterrupted()) {
     round++;
@@ -396,6 +498,15 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
       printRunSummary({ durationSeconds: auditResult.durationSeconds, costUsd: auditResult.costUsd });
     }
 
+    // Record which gaps were found this round
+    const currentGapBaseNames = auditResult.outputSpecs.map(f => stripRoundPrefix(f));
+    for (const gapName of currentGapBaseNames) {
+      if (!gapSeenInRound.has(gapName)) {
+        gapSeenInRound.set(gapName, new Set());
+      }
+      gapSeenInRound.get(gapName)!.add(round);
+    }
+
     // Clean audit -- all specs implemented
     if (auditResult.outputSpecs.length === 0) {
       roundSummaries.push({
@@ -413,8 +524,14 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
     }
 
     // Convergence detection: bail if same gaps found as previous round
-    const currentGapNames = new Set(auditResult.outputSpecs.map(f => f.replace(/^(r\d+-)+/, '')));
-    if (prevGapNames && currentGapNames.size === prevGapNames.size && [...currentGapNames].every(g => prevGapNames!.has(g))) {
+    const currentGapNamesSet = new Set(currentGapBaseNames);
+    if (prevGapNames && currentGapNamesSet.size === prevGapNames.size && [...currentGapNamesSet].every(g => prevGapNames!.has(g))) {
+      // Record these gaps as "found" with no fix (we're stopping)
+      for (const gapName of currentGapBaseNames) {
+        if (!gapHistory.has(gapName)) gapHistory.set(gapName, []);
+        gapHistory.get(gapName)!.push({ round, action: 'found', fixStatus: null });
+      }
+
       roundSummaries.push({
         round,
         gaps: auditResult.outputSpecs.length,
@@ -423,12 +540,14 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
         costUsd: auditResult.costUsd,
       });
 
+      stoppedNotConverging = true;
+
       if (!quiet) {
-        console.log(`\n  \x1b[33mRound ${round}: Same ${currentGapNames.size} gap(s) as previous round -- not converging. Stopping.\x1b[0m\n`);
+        console.log(`\n  \x1b[33mRound ${round}: Same ${currentGapNamesSet.size} gap(s) as previous round -- not converging. Stopping.\x1b[0m\n`);
       }
       break;
     }
-    prevGapNames = currentGapNames;
+    prevGapNames = currentGapNamesSet;
 
     if (!quiet) {
       console.log(`\n  ${BOLD}${auditResult.outputSpecs.length}${RESET} gap(s) found:\n`);
@@ -438,6 +557,7 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
 
     // 2. Run remediation specs
     const fixStartTime = Date.now();
+    let fixFailed = false;
     try {
       await runForge({
         prompt: 'implement remaining work',
@@ -449,12 +569,16 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
         verbose: options.verbose,
       });
     } catch {
+      fixFailed = true;
       // Partial failures are OK -- the next audit round will catch what's still broken
       if (!quiet) {
         console.log(`\n${DIM}[forge]${RESET} Some fixes failed. Continuing to next audit round...\n`);
       }
     }
     const fixDuration = (Date.now() - fixStartTime) / 1000;
+
+    // Collect per-spec fix results from the results directory
+    const fixStatuses = await collectFixResults(persistBase, remediationDir, auditResult.outputSpecs);
 
     // Estimate fix cost from remediation results (best-effort)
     let fixCost = 0;
@@ -471,6 +595,21 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
       }
     } catch {}
 
+    // Record gap tracking for this round
+    for (const gapName of currentGapBaseNames) {
+      if (!gapHistory.has(gapName)) gapHistory.set(gapName, []);
+      const fixStatus = fixStatuses.get(gapName) ?? (fixFailed ? 'error_execution' : 'success');
+      gapHistory.get(gapName)!.push({ round, action: 'found_and_fixed', fixStatus });
+
+      // Store per-gap fix result
+      if (!gapFixResults.has(gapName)) gapFixResults.set(gapName, new Map());
+      gapFixResults.get(gapName)!.set(round, fixStatus);
+
+      if (fixStatus === 'error_verification' || fixStatus === 'error_execution') {
+        hasVerificationFailures = true;
+      }
+    }
+
     totalCost += fixCost;
     totalDuration += fixDuration;
 
@@ -485,15 +624,135 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
     // 3. Loop back to re-audit
   }
 
+  // ── Build gap tracking entries ────────────────────────────
+  const lastRound = roundSummaries[roundSummaries.length - 1];
+  const converged = lastRound && lastRound.gaps === 0;
+  const totalRoundsRan = roundSummaries.length;
+
+  // Determine which gaps are resolved vs unresolved
+  // A gap is resolved if it appeared in at least one round but NOT in the final audit
+  // (either the final audit was clean, or the gap wasn't found again)
+  const finalRoundGaps = new Set<string>();
+  if (!converged) {
+    // The last round had gaps -- those in the last audit are unresolved
+    const lastRoundNumber = roundSummaries[roundSummaries.length - 1].round;
+    for (const [gapName, rounds] of gapSeenInRound) {
+      if (rounds.has(lastRoundNumber)) {
+        finalRoundGaps.add(gapName);
+      }
+    }
+  }
+
+  const gapTracking: GapTrackingEntry[] = [];
+  for (const [gapName, records] of gapHistory) {
+    const isUnresolved = finalRoundGaps.has(gapName);
+    const appearedInMultipleRounds = records.length > 1;
+
+    let status: GapTrackingEntry['status'];
+    if (isUnresolved) {
+      status = 'unresolved';
+    } else if (appearedInMultipleRounds) {
+      status = 'resolved_multi';
+    } else {
+      status = 'resolved';
+    }
+
+    const entry: GapTrackingEntry = {
+      name: gapName.replace(/\.md$/, ''),
+      status,
+      rounds: records,
+    };
+
+    // For unresolved gaps, extract description and path
+    if (isUnresolved) {
+      const lastRecord = records[records.length - 1];
+      const specFilePath = path.join(remediationDir, `r${lastRecord.round}-${gapName}`);
+      entry.latestSpecPath = path.relative(workingDir, specFilePath);
+      entry.description = await extractOutcomeSentence(specFilePath);
+    }
+
+    gapTracking.push(entry);
+  }
+
+  // Sort: unresolved first, then resolved_multi, then resolved
+  const statusOrder = { unresolved: 0, resolved_multi: 1, resolved: 2 };
+  gapTracking.sort((a, b) => statusOrder[a.status] - statusOrder[b.status]);
+
+  // ── Convergence analysis ──────────────────────────────────
+  const resolvedCount = gapTracking.filter(g => g.status === 'resolved' || g.status === 'resolved_multi').length;
+  const unresolvedCount = gapTracking.filter(g => g.status === 'unresolved').length;
+  const totalGaps = gapTracking.length;
+
+  let convergenceDiagnosis: string;
+  let nextStepHints: string[];
+
+  const relSpecDir = path.relative(workingDir, ctx.resolvedSpecDir) || ctx.resolvedSpecDir;
+  const quotedSpecDir = relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir;
+
+  if (converged) {
+    convergenceDiagnosis = `Converged after ${totalRoundsRan} round(s). All gaps resolved.`;
+    nextStepHints = [`${CMD}forge proof ${quotedSpecDir}${RESET}`];
+  } else if (stoppedNotConverging) {
+    convergenceDiagnosis = `Not converging: ${unresolvedCount} gap(s) reappear after fixes. May need manual intervention or spec revision.`;
+    nextStepHints = [
+      'The same gaps persist after fixes. Review the remediation specs --',
+      'they may need manual revision or the original specs may be too broad.',
+    ];
+  } else if (resolvedCount > 0 && unresolvedCount > 0) {
+    convergenceDiagnosis = `Partial progress: ${resolvedCount} of ${totalGaps} gaps resolved after ${totalRoundsRan} rounds. Remaining gaps may need more rounds (--fix-rounds) or manual review.`;
+    nextStepHints = [
+      `Progress is being made. Try:`,
+      `  ${CMD}forge audit ${quotedSpecDir} --fix --fix-rounds ${maxRounds + 2}${RESET}`,
+    ];
+  } else {
+    convergenceDiagnosis = `Max rounds (${maxRounds}) reached. ${unresolvedCount} gap(s) remain.`;
+    nextStepHints = [
+      `  ${CMD}forge audit ${quotedSpecDir} --fix --fix-rounds ${maxRounds + 2}${RESET}`,
+    ];
+  }
+
+  if (hasVerificationFailures) {
+    nextStepHints.push(`Fix attempts failed verification. Check build/test errors in session logs: ${CMD}forge watch${RESET}`);
+  }
+
+  // ── Save structured result with gap tracking ──────────────
+  const auditFixResult: ForgeResult = {
+    startedAt: new Date(Date.now() - totalDuration * 1000).toISOString(),
+    completedAt: new Date().toISOString(),
+    durationSeconds: totalDuration,
+    status: converged ? 'success' : 'error_execution',
+    costUsd: totalCost,
+    prompt: '(audit-fix)',
+    specPath: path.basename(resolvedSpecDir),
+    model: ctx.effectiveModel,
+    cwd: workingDir,
+    type: 'audit',
+    gapTracking,
+  };
+
+  await saveResult(persistBase, auditFixResult, `Audit-fix loop: ${totalRoundsRan} rounds, ${converged ? 'converged' : `${unresolvedCount} gaps remain`}`);
+
   // ── Final summary ──────────────────────────────────────────
   if (!quiet) {
-    const lastRound = roundSummaries[roundSummaries.length - 1];
-    const converged = lastRound && lastRound.gaps === 0;
-
     console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
     console.log(`${BOLD}AUDIT-FIX SUMMARY${RESET}`);
     console.log(`${DIM}${'─'.repeat(60)}${RESET}`);
 
+    // Per-gap timeline
+    if (gapTracking.length > 0) {
+      console.log(`  Gap Tracking:`);
+      for (const entry of gapTracking) {
+        const icon = entry.status === 'resolved' ? '\x1b[32m+\x1b[0m'
+          : entry.status === 'resolved_multi' ? '\x1b[32m>\x1b[0m'
+          : '\x1b[31mx\x1b[0m';
+        const timeline = formatGapTimeline(entry);
+        const name = entry.name.length > 38 ? entry.name.substring(0, 35) + '...' : entry.name;
+        console.log(`    ${icon} ${name.padEnd(40)} ${DIM}${timeline}${RESET}`);
+      }
+      console.log('');
+    }
+
+    // Per-round summary
     for (const rs of roundSummaries) {
       const icon = rs.gaps === 0 ? '\x1b[32m+\x1b[0m' : '\x1b[33m>\x1b[0m';
       const label = rs.gaps === 0
@@ -507,17 +766,37 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
     console.log(`  Duration: ${BOLD}${totalDuration.toFixed(1)}s${RESET}`);
     console.log(`  Cost:     ${BOLD}$${totalCost.toFixed(2)}${RESET}`);
 
-    if (converged) {
-      console.log(`\n  \x1b[32mAll specs fully implemented after ${roundSummaries.length} round(s).\x1b[0m`);
-      const relSpecDir = path.relative(workingDir, ctx.resolvedSpecDir) || ctx.resolvedSpecDir;
-      console.log(`\n  ${DIM}Next step:${RESET}\n    ${CMD}forge proof ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir}${RESET}`);
-    } else {
-      console.log(`\n  \x1b[33mMax rounds (${maxRounds}) reached. Some gaps may remain.\x1b[0m`);
-      const relRemDir = path.relative(workingDir, remediationDir) || remediationDir;
-      console.log(`  Remaining specs in: ${DIM}${relRemDir}${RESET}`);
-      console.log(`\n  ${DIM}Next step:${RESET}`);
-      console.log(`    ${CMD}forge audit ${path.relative(workingDir, ctx.resolvedSpecDir) || ctx.resolvedSpecDir} --fix${RESET}`);
+    // Convergence diagnosis
+    console.log(`\n  ${converged ? '\x1b[32m' : '\x1b[33m'}${convergenceDiagnosis}\x1b[0m`);
+
+    // Remaining gap details (for unresolved gaps)
+    const unresolvedGaps = gapTracking.filter(g => g.status === 'unresolved');
+    if (unresolvedGaps.length > 0) {
+      console.log(`\n  Remaining gaps:`);
+      for (const gap of unresolvedGaps) {
+        console.log(`    \x1b[31mx\x1b[0m ${gap.name}`);
+        if (gap.description) {
+          console.log(`      ${DIM}"${gap.description}"${RESET}`);
+        }
+        if (gap.latestSpecPath) {
+          console.log(`      ${DIM}-> ${gap.latestSpecPath}${RESET}`);
+        }
+      }
     }
+
+    // Next-step hints
+    console.log(`\n  ${DIM}Next step:${RESET}`);
+    for (const hint of nextStepHints) {
+      console.log(`    ${hint}`);
+    }
+
     console.log('');
+  }
+
+  // Exit code: throw if not converged so CLI exits with code 1
+  if (!converged) {
+    const err = new Error(`Audit-fix did not converge: ${unresolvedCount} gap(s) remain after ${totalRoundsRan} round(s)`);
+    err.name = 'AuditFixNotConverged';
+    throw err;
   }
 }

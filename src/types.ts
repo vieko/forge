@@ -46,6 +46,8 @@ export interface ForgeOptions {
   branch?: string;
   /** Directory for .forge/ persistence (session logs, results, manifest). Defaults to cwd. Used to route writes to the original repo when running in a worktree. */
   persistDir?: string;
+  /** Callback fired when a spec completes in a batch run. Used by the executor for per-spec logging. */
+  _onSpecResult?: (spec: string, status: 'success' | 'failed') => void;
 }
 
 /**
@@ -92,6 +94,40 @@ export interface ForgeResult {
   retryAttempts?: number;
   /** Path to stream.log for this session */
   logPath?: string;
+  /** Gap tracking data from audit-fix loop (only present for audit --fix results) */
+  gapTracking?: GapTrackingEntry[];
+}
+
+// ── Audit-Fix Gap Tracking ───────────────────────────────────
+
+/** Action taken on a gap in a specific round. */
+export type GapRoundAction = 'found' | 'found_and_fixed';
+
+/** Status of a fix attempt for a gap in a specific round. */
+export type GapFixStatus = 'success' | 'error_verification' | 'error_execution' | null;
+
+/** Per-round record for a tracked gap. */
+export interface GapRoundRecord {
+  round: number;
+  action: GapRoundAction;
+  fixStatus: GapFixStatus;
+}
+
+/** Overall resolution status of a gap across all rounds. */
+export type GapResolution = 'resolved' | 'resolved_multi' | 'unresolved';
+
+/** A single tracked gap across the audit-fix loop. */
+export interface GapTrackingEntry {
+  /** Base gap name (stripped of r{N}- prefix) */
+  name: string;
+  /** Overall resolution status */
+  status: GapResolution;
+  /** Per-round history */
+  rounds: GapRoundRecord[];
+  /** First sentence from the Outcome section of the remediation spec (for unresolved gaps) */
+  description?: string;
+  /** Path to the latest remediation spec file (for unresolved gaps) */
+  latestSpecPath?: string;
 }
 
 /**

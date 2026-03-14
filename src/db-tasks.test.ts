@@ -327,15 +327,28 @@ describe('markStaleTasks', () => {
     expect(result!.status).toBe('failed');
   });
 
-  test('does not affect recently-updated running tasks', () => {
+  test('does not affect recently-updated running tasks with live PID', () => {
     const task = makeTask({ id: 'task-fresh-001', status: 'pending' });
     insertTask(db, task);
-    claimTask(db, 'task-fresh-001', 99999);
+    // Use current process PID so PID liveness check passes
+    claimTask(db, 'task-fresh-001', process.pid);
     // updatedAt is current — should not be marked stale
 
     markStaleTasks(db, 60 * 60 * 1000);
     const result = getTaskById(db, 'task-fresh-001');
     expect(result!.status).toBe('running');
+  });
+
+  test('marks running tasks with dead PID as failed regardless of TTL', () => {
+    const task = makeTask({ id: 'task-dead-pid', status: 'pending' });
+    insertTask(db, task);
+    // Use a PID that is not alive
+    claimTask(db, 'task-dead-pid', 99999);
+    // updatedAt is current but PID is dead — should be marked failed
+
+    markStaleTasks(db, 60 * 60 * 1000);
+    const result = getTaskById(db, 'task-dead-pid');
+    expect(result!.status).toBe('failed');
   });
 
   test('does not affect completed or failed tasks', () => {

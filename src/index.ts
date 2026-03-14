@@ -521,11 +521,13 @@ program
   .option('--since <date>', 'Only include runs after this ISO date')
   .option('--by-spec', 'Show per-spec breakdown from manifest')
   .option('--by-model', 'Show per-model breakdown')
+  .option('--by-source', 'Show per-source breakdown (CLI vs MCP)')
   .action(async (options: {
     cwd?: string;
     since?: string;
     bySpec?: boolean;
     byModel?: boolean;
+    bySource?: boolean;
   }) => {
     try {
       await showStats({
@@ -533,6 +535,7 @@ program
         since: options.since,
         bySpec: options.bySpec,
         byModel: options.byModel,
+        bySource: options.bySource,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);

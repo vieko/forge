@@ -8,8 +8,9 @@ import {
   queryAggregateStats,
   querySpecStats,
   queryModelStats as queryModelStatsDb,
+  querySourceStats,
 } from './db.js';
-import type { AggregateRow, SpecStatsRow, ModelStatsRow } from './db.js';
+import type { AggregateRow, SpecStatsRow, ModelStatsRow, SourceStatsRow } from './db.js';
 
 // ── Options ──────────────────────────────────────────────────
 
@@ -22,6 +23,8 @@ export interface StatsOptions {
   bySpec?: boolean;
   /** Show per-model breakdown */
   byModel?: boolean;
+  /** Show per-source breakdown (CLI vs MCP) */
+  bySource?: boolean;
 }
 
 // ── Duration formatting ──────────────────────────────────────
@@ -261,6 +264,32 @@ function printModelBreakdown(modelStats: { model: string; runs: number; passed: 
   console.log('');
 }
 
+function printSourceBreakdown(sourceStats: SourceStatsRow[], since?: string): void {
+  if (sourceStats.length === 0) {
+    console.log('No task data found.');
+    return;
+  }
+
+  const nameWidth = Math.max(10, ...sourceStats.map(s => s.source.length));
+
+  console.log(`\n${BOLD}Per-Source Breakdown${RESET} ${DIM}(tasks)${RESET}`);
+  if (since) console.log(`${DIM}(since ${since})${RESET}`);
+  console.log();
+
+  console.log(
+    `  ${'Source'.padEnd(nameWidth)}  ${'Total'.padStart(6)}  ${'Done'.padStart(6)}  ${'Failed'.padStart(6)}  ${'Cancel'.padStart(6)}`,
+  );
+  console.log(`  ${DIM}${'─'.repeat(nameWidth + 30)}${RESET}`);
+
+  for (const s of sourceStats) {
+    console.log(
+      `  ${s.source.padEnd(nameWidth)}  ${String(s.total).padStart(6)}  ${String(s.completed).padStart(6)}  ${String(s.failed).padStart(6)}  ${String(s.cancelled).padStart(6)}`,
+    );
+  }
+
+  console.log('');
+}
+
 function printDashboard(stats: AggregatedStats, since?: string): void {
   console.log(`\n${BOLD}Forge Stats${RESET}`);
   if (since) console.log(`${DIM}(since ${since})${RESET}`);
@@ -299,6 +328,12 @@ async function showStatsFromDb(workingDir: string, options: StatsOptions): Promi
   if (!db) return false;
 
   try {
+    if (options.bySource) {
+      const rows = querySourceStats(db, options.since);
+      printSourceBreakdown(rows, options.since);
+      return true;
+    }
+
     if (options.bySpec) {
       const rows = querySpecStats(db, options.since);
       const specStats = rows.map(r => ({

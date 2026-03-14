@@ -18,6 +18,48 @@ export class ForgeError extends Error {
 
 export const execAsync = promisify(exec);
 
+// ── Package Manager Detection ────────────────────────────────
+
+/** Detected package manager for a Node.js project. */
+export type PackageManager = 'bun' | 'pnpm' | 'npm' | 'yarn';
+
+/**
+ * Detect the package manager for a project by checking lockfiles.
+ * Returns null if no package.json is found. Detection order (first match wins):
+ *   bun.lockb / bun.lock  ->  bun
+ *   pnpm-lock.yaml        ->  pnpm
+ *   yarn.lock              ->  yarn
+ *   package-lock.json      ->  npm
+ *   package.json (no lock) ->  npm (default)
+ *   no package.json        ->  null
+ */
+export async function detectPackageManager(workingDir: string): Promise<PackageManager | null> {
+  const lockfiles: Array<{ file: string; pm: PackageManager }> = [
+    { file: 'bun.lockb', pm: 'bun' },
+    { file: 'bun.lock', pm: 'bun' },
+    { file: 'pnpm-lock.yaml', pm: 'pnpm' },
+    { file: 'yarn.lock', pm: 'yarn' },
+    { file: 'package-lock.json', pm: 'npm' },
+  ];
+
+  for (const { file, pm } of lockfiles) {
+    try {
+      await fs.access(path.join(workingDir, file));
+      return pm;
+    } catch {
+      // Not found -- try next
+    }
+  }
+
+  // No lockfile found -- check for package.json (default to npm)
+  try {
+    await fs.access(path.join(workingDir, 'package.json'));
+    return 'npm';
+  } catch {
+    return null;
+  }
+}
+
 // ── .forge/ directory bootstrap ──────────────────────────────
 
 const FORGE_GITIGNORE = `# Ignore everything except the manifest and pipeline state

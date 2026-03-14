@@ -69,12 +69,12 @@ describe('verify MCP: command queue pattern', () => {
     expect(content).not.toContain('stripClaudeEnv');
   });
 
-  test('MCP checks executor liveness before queuing tasks', async () => {
+  test('MCP auto-spawns executor before queuing tasks', async () => {
     const mcpPath = path.join(import.meta.dirname, 'mcp.ts');
     const content = await fs.readFile(mcpPath, 'utf-8');
 
-    expect(content).toContain('isExecutorRunning');
-    expect(content).toContain('No executor running');
+    expect(content).toContain('ensureExecutorRunning');
+    expect(content).toContain('executor_spawned');
   });
 });
 

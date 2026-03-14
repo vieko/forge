@@ -226,6 +226,26 @@ export async function withManifestLock(
   }
 }
 
+// ── Manifest cleanup on cancel ───────────────────────────────
+
+/**
+ * Reset any specs with status 'running' back to 'pending'.
+ * Called when a CLI task is cancelled (Ctrl-C) to prevent stuck-running-specs.
+ */
+export async function resetRunningSpecs(workingDir: string): Promise<number> {
+  let resetCount = 0;
+  await withManifestLock(workingDir, (manifest) => {
+    for (const entry of manifest.specs) {
+      if (entry.status === 'running') {
+        entry.status = 'pending';
+        entry.updatedAt = new Date().toISOString();
+        resetCount++;
+      }
+    }
+  });
+  return resetCount;
+}
+
 // ── Reconcile from results history ───────────────────────────
 
 /** Scan .forge/results/ and backfill manifest entries from summary.json files. */

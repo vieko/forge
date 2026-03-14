@@ -11,6 +11,7 @@
 
 import path from 'path';
 import { promises as fs } from 'fs';
+import { spawn } from 'child_process';
 import {
   getDb,
   getTaskById,
@@ -32,6 +33,7 @@ import { runPipeline } from './pipeline.js';
 import { FileSystemStateProvider } from './pipeline-state.js';
 import { isInterrupted, triggerAbort } from './abort.js';
 import { DIM, RESET, BOLD } from './display.js';
+import { getConfig } from './config.js';
 import type { GateKey, GateType, StageName } from './pipeline-types.js';
 
 // ── Constants ────────────────────────────────────────────────
@@ -80,6 +82,62 @@ export async function isExecutorRunning(cwd: string): Promise<boolean> {
   }
 }
 
+/**
+ * Spawn a detached executor process that survives the parent exiting.
+ * Runs with --quiet since there's no terminal to print to.
+ * Returns true if the spawn succeeded (does not wait for startup).
+ */
+export function spawnDetachedExecutor(cwd: string): boolean {
+  try {
+    const resolvedCwd = path.resolve(cwd);
+    // Use process.argv[0] (bun/node) to run the forge CLI entry point.
+    // Resolve the dist/index.js path relative to this module.
+    const forgeBin = path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'dist', 'index.js'));
+    const child = spawn(process.argv[0], [forgeBin, 'executor', '--quiet', '-C', resolvedCwd], {
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env },
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ensure an executor is running for the given working directory.
+ * If none is running, spawn a detached one and wait briefly for the PID file.
+ * Returns { running: true, spawned: false } if already running,
+ * { running: true, spawned: true } if we just spawned one,
+ * { running: false, spawned: false } if spawn failed.
+ */
+export async function ensureExecutorRunning(cwd: string): Promise<{ running: boolean; spawned: boolean }> {
+  const resolvedCwd = path.resolve(cwd);
+
+  // Already running — nothing to do
+  if (await isExecutorRunning(resolvedCwd)) {
+    return { running: true, spawned: false };
+  }
+
+  // Spawn a detached executor
+  if (!spawnDetachedExecutor(resolvedCwd)) {
+    return { running: false, spawned: false };
+  }
+
+  // Wait briefly for the PID file to appear (handles race between spawn and PID write).
+  // Check every 100ms for up to 2 seconds.
+  for (let i = 0; i < 20; i++) {
+    await sleep(100);
+    if (await isExecutorRunning(resolvedCwd)) {
+      return { running: true, spawned: true };
+    }
+  }
+
+  // One final check — the executor may have started but PID check is flaky
+  return { running: await isExecutorRunning(resolvedCwd), spawned: true };
+}
+
 /** Get session directory contents for snapshot-based session ID capture. */
 async function getSessionDirs(cwd: string): Promise<Set<string>> {
   const sessionsDir = path.join(cwd, '.forge', 'sessions');
@@ -98,10 +156,11 @@ async function getSessionDirs(cwd: string): Promise<Set<string>> {
  * command name and stored parameters. All functions are called with
  * quiet: true to prevent console noise in the shared executor process.
  */
-async function dispatchTask(task: TaskRow, workingDir: string): Promise<void> {
+async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean): Promise<void> {
   const params: Record<string, unknown> = JSON.parse(task.params || '{}');
   const cmd = task.command.replace(/^forge\s+/, '');
   const extraArgs = (params.extraArgs || []) as string[];
+  const taskShortId = task.id.slice(0, 8);
 
   switch (cmd) {
     case 'run': {
@@ -118,14 +177,30 @@ async function dispatchTask(task: TaskRow, workingDir: string): Promise<void> {
         }
 
         if (isDir) {
+          // Count specs for the log line
+          let specCount = 0;
+          try {
+            const entries = await fs.readdir(resolvedSpec);
+            specCount = entries.filter(e => e.endsWith('.md')).length;
+          } catch { /* best effort */ }
+
+          const isSequential = extraArgs.includes('--sequential');
+          if (!quiet && specCount > 1) {
+            console.log(`${DIM}[executor]${RESET} > ${task.command} (${taskShortId}) ${specCount} specs [${isSequential ? 'sequential' : 'parallel'}]`);
+          }
+
           await runForge({
             prompt: task.description || 'implement',
             specDir: specPath,
             cwd: workingDir,
             model: params.model as string | undefined,
             quiet: true,
-            sequential: extraArgs.includes('--sequential'),
+            sequential: isSequential,
             force: extraArgs.includes('--force') || extraArgs.includes('-F'),
+            _onSpecResult: quiet ? undefined : (spec, status) => {
+              const icon = status === 'success' ? '+' : 'x';
+              console.log(`${DIM}[executor]${RESET}   ${icon} ${spec} (${taskShortId})`);
+            },
           });
         } else {
           await runSingleSpec({
@@ -247,6 +322,7 @@ async function dispatchTask(task: TaskRow, workingDir: string): Promise<void> {
 async function executeTask(
   task: TaskRow,
   workingDir: string,
+  quiet?: boolean,
 ): Promise<void> {
   const db = getDb(workingDir);
   if (!db) return;
@@ -261,7 +337,7 @@ async function executeTask(
   const beforeSessions = await getSessionDirs(workingDir);
 
   try {
-    await dispatchTask(task, workingDir);
+    await dispatchTask(task, workingDir, quiet);
 
     // Capture session ID: new session directories created during execution
     const afterSessions = await getSessionDirs(workingDir);
@@ -345,17 +421,25 @@ export async function startExecutor(options: ExecutorOptions): Promise<void> {
     if (!quiet) console.log('\nExecutor received SIGTERM, shutting down...');
   });
 
+  // Load idle timeout from config (default: 5 minutes / 300000ms)
+  const config = getConfig(workingDir);
+  const idleTimeoutMs = config.executorIdleTimeout;
+
   if (!quiet) {
     console.log(`${BOLD}forge executor${RESET}`);
     console.log(`${DIM}Working directory:${RESET} ${workingDir}`);
     console.log(`${DIM}Concurrency:${RESET}      ${concurrency}`);
     console.log(`${DIM}PID:${RESET}              ${process.pid}`);
-    console.log(`${DIM}Polling:${RESET}          ${POLL_INTERVAL_MS}ms\n`);
+    console.log(`${DIM}Polling:${RESET}          ${POLL_INTERVAL_MS}ms`);
+    console.log(`${DIM}Idle timeout:${RESET}     ${idleTimeoutMs > 0 ? `${Math.round(idleTimeoutMs / 1000)}s` : 'disabled'}\n`);
     console.log(`${DIM}Waiting for tasks...${RESET}\n`);
   }
 
   let runningCount = 0;
   const runningTaskIds = new Set<string>();
+
+  // Idle timeout tracking: reset whenever a task is claimed or completed
+  let lastActivityAt = Date.now();
 
   while (!isInterrupted()) {
     const db = getDb(workingDir);
@@ -381,15 +465,17 @@ export async function startExecutor(options: ExecutorOptions): Promise<void> {
 
         runningCount++;
         runningTaskIds.add(task.id);
+        lastActivityAt = Date.now();
 
         if (!quiet) {
           console.log(`${DIM}[executor]${RESET} > ${task.command} (${task.id.slice(0, 8)})`);
         }
 
         // Execute asynchronously — don't block the poll loop
-        executeTask(task, task.cwd || workingDir).finally(() => {
+        executeTask(task, task.cwd || workingDir, quiet).finally(() => {
           runningCount--;
           runningTaskIds.delete(task.id);
+          lastActivityAt = Date.now();
 
           if (!quiet) {
             const row = getTaskById(db, task.id);
@@ -398,6 +484,14 @@ export async function startExecutor(options: ExecutorOptions): Promise<void> {
           }
         });
       }
+    }
+
+    // Idle timeout: shut down if no tasks are running and no activity for the configured period
+    if (idleTimeoutMs > 0 && runningCount === 0 && (Date.now() - lastActivityAt) >= idleTimeoutMs) {
+      if (!quiet) {
+        console.log(`${DIM}[executor]${RESET} Idle timeout (${Math.round(idleTimeoutMs / 1000)}s). Shutting down.`);
+      }
+      break;
     }
 
     await sleep(POLL_INTERVAL_MS);

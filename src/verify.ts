@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
-import { execAsync } from './utils.js';
+import { execAsync, detectPackageManager } from './utils.js';
+import type { PackageManager } from './utils.js';
 import { DIM, RESET, createInlineSpinner } from './display.js';
 import type { MonorepoContext, MonorepoType } from './types.js';
 
@@ -195,18 +196,22 @@ export function scopedVerificationCommands(
   return commands;
 }
 
+/** Check if a command is a tsc --noEmit invocation (any package manager variant). */
+const TSC_NOEMIT_PATTERN = /^(?:npx|pnpm exec|bun run|yarn) tsc --noEmit$/;
+
 /** Scope a single command to the affected packages. */
 export function scopeCommand(cmd: string, monorepo: MonorepoContext, workingDir: string): string {
   const filters = monorepo.affected;
 
   // TypeScript: scope to package-level tsconfig if available
-  if (cmd === 'npx tsc --noEmit') {
+  if (TSC_NOEMIT_PATTERN.test(cmd)) {
     // Find first affected package directory with a tsconfig.json
     for (const [dir, name] of monorepo.packages) {
       if (filters.includes(name)) {
         const tsconfigPath = path.join(dir, 'tsconfig.json');
-        // Return scoped tsc for the first matching package
-        return `npx tsc --noEmit -p ${tsconfigPath}`;
+        // Preserve the original runner prefix when scoping
+        const prefix = cmd.replace(/ tsc --noEmit$/, '');
+        return `${prefix} tsc --noEmit -p ${tsconfigPath}`;
       }
     }
     // No package-level tsconfig — fall back to unscoped
@@ -221,23 +226,24 @@ export function scopeCommand(cmd: string, monorepo: MonorepoContext, workingDir:
   return scopePnpmCommand(cmd, filters);
 }
 
+/** Match any pm's "run <script>" command: npm run X, pnpm run X, bun run X, yarn run X. */
+const PM_RUN_PATTERN = /^(?:npm|pnpm|bun|yarn)\s+run\s+(.+)$/;
+
+/** Match any pm's "test" command: npm test, pnpm test, bun test, yarn test. */
+const PM_TEST_PATTERN = /^(?:npm|pnpm|bun|yarn)\s+test$/;
+
 /** Scope a command using pnpm --filter (works for pnpm and turborepo). */
 function scopePnpmCommand(cmd: string, filters: string[]): string {
   // Build filter flags: --filter=pkg1... --filter=pkg2...
   const filterFlags = filters.map(f => `--filter=${f}...`).join(' ');
 
-  // npm run build → pnpm run --filter=pkg... build
-  // npm test → pnpm run --filter=pkg... test
-  if (/^npm\s+run\s+(.+)$/.test(cmd)) {
-    const match = cmd.match(/^npm\s+run\s+(.+)$/);
-    if (match) return `pnpm run ${filterFlags} ${match[1]}`;
-  }
-  if (/^npm\s+test$/.test(cmd)) {
+  // <pm> run build → pnpm run --filter=pkg... build
+  const runMatch = cmd.match(PM_RUN_PATTERN);
+  if (runMatch) return `pnpm run ${filterFlags} ${runMatch[1]}`;
+
+  // <pm> test → pnpm run --filter=pkg... test
+  if (PM_TEST_PATTERN.test(cmd)) {
     return `pnpm run ${filterFlags} test`;
-  }
-  if (/^pnpm\s+(?:run\s+)?(\S+)$/.test(cmd)) {
-    const match = cmd.match(/^pnpm\s+(?:run\s+)?(\S+)$/);
-    if (match) return `pnpm run ${filterFlags} ${match[1]}`;
   }
 
   // Already has --filter — don't modify
@@ -248,15 +254,14 @@ function scopePnpmCommand(cmd: string, filters: string[]): string {
 
 /** Scope a command using nx project targeting. */
 function scopeNxCommand(cmd: string, projects: string[]): string {
-  // npm run build → npx nx run-many --target=build --projects=pkg1,pkg2
-  // npm test → npx nx run-many --target=test --projects=pkg1,pkg2
+  // <pm> run build → npx nx run-many --target=build --projects=pkg1,pkg2
+  // <pm> test → npx nx run-many --target=test --projects=pkg1,pkg2
   const projectList = projects.join(',');
 
-  if (/^npm\s+run\s+(.+)$/.test(cmd)) {
-    const match = cmd.match(/^npm\s+run\s+(.+)$/);
-    if (match) return `npx nx run-many --target=${match[1]} --projects=${projectList}`;
-  }
-  if (/^npm\s+test$/.test(cmd)) {
+  const runMatch = cmd.match(PM_RUN_PATTERN);
+  if (runMatch) return `npx nx run-many --target=${runMatch[1]} --projects=${projectList}`;
+
+  if (PM_TEST_PATTERN.test(cmd)) {
     return `npx nx run-many --target=test --projects=${projectList}`;
   }
 
@@ -268,8 +273,8 @@ function scopeNxCommand(cmd: string, projects: string[]): string {
 /** Patterns that match unscoped build/test commands the agent might run. */
 const UNSCOPED_BUILD_PATTERNS: Array<{ pattern: RegExp; rewrite: (match: RegExpMatchArray, filters: string[], type: MonorepoType) => string }> = [
   {
-    // pnpm build, pnpm run build
-    pattern: /^pnpm\s+(?:run\s+)?(\S+)$/,
+    // <pm> run build, <pm> run test (any package manager)
+    pattern: /^(?:npm|pnpm|bun|yarn)\s+run\s+(\S+)$/,
     rewrite: (match, filters, type) => {
       if (type === 'nx') {
         return `npx nx run-many --target=${match[1]} --projects=${filters.join(',')}`;
@@ -279,25 +284,25 @@ const UNSCOPED_BUILD_PATTERNS: Array<{ pattern: RegExp; rewrite: (match: RegExpM
     },
   },
   {
-    // npm run build, npm run test
-    pattern: /^npm\s+run\s+(\S+)$/,
-    rewrite: (match, filters, type) => {
-      if (type === 'nx') {
-        return `npx nx run-many --target=${match[1]} --projects=${filters.join(',')}`;
-      }
-      const filterFlags = filters.map(f => `--filter=${f}...`).join(' ');
-      return `pnpm run ${filterFlags} ${match[1]}`;
-    },
-  },
-  {
-    // npm test
-    pattern: /^npm\s+test$/,
+    // <pm> test (any package manager)
+    pattern: /^(?:npm|pnpm|bun|yarn)\s+test$/,
     rewrite: (_match, filters, type) => {
       if (type === 'nx') {
         return `npx nx run-many --target=test --projects=${filters.join(',')}`;
       }
       const filterFlags = filters.map(f => `--filter=${f}...`).join(' ');
       return `pnpm run ${filterFlags} test`;
+    },
+  },
+  {
+    // pnpm <script> (shorthand without "run")
+    pattern: /^pnpm\s+(?!run\s|test$|exec\s|install|add\s)(\S+)$/,
+    rewrite: (match, filters, type) => {
+      if (type === 'nx') {
+        return `npx nx run-many --target=${match[1]} --projects=${filters.join(',')}`;
+      }
+      const filterFlags = filters.map(f => `--filter=${f}...`).join(' ');
+      return `pnpm run ${filterFlags} ${match[1]}`;
     },
   },
   {
@@ -330,6 +335,26 @@ export function rewriteBuildCommand(command: string, monorepo: MonorepoContext):
 
 // ── Existing Verification Logic ─────────────────────────────
 
+/** Map package manager to its tsc invocation command. */
+function tscCommand(pm: PackageManager): string {
+  switch (pm) {
+    case 'bun': return 'bun run tsc --noEmit';
+    case 'pnpm': return 'pnpm exec tsc --noEmit';
+    case 'yarn': return 'yarn tsc --noEmit';
+    case 'npm': return 'npx tsc --noEmit';
+  }
+}
+
+/** Map package manager to its "run <script>" command prefix. */
+function runCommand(pm: PackageManager, script: string): string {
+  return `${pm} run ${script}`;
+}
+
+/** Map package manager to its test command. */
+function testCommand(pm: PackageManager): string {
+  return `${pm} test`;
+}
+
 // Detect project type and return verification commands
 export async function detectVerification(workingDir: string, configVerify?: string[]): Promise<string[]> {
   // If config specifies verify commands, use them (empty array = no verification)
@@ -338,28 +363,33 @@ export async function detectVerification(workingDir: string, configVerify?: stri
   }
 
   const commands: string[] = [];
+  const pm = await detectPackageManager(workingDir);
 
-  try {
-    const packageJsonPath = path.join(workingDir, 'package.json');
-    const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'));
-    const scripts = packageJson.scripts || {};
+  if (pm) {
+    try {
+      const packageJsonPath = path.join(workingDir, 'package.json');
+      const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'));
+      const scripts = packageJson.scripts || {};
 
-    // TypeScript check
-    if (packageJson.devDependencies?.typescript || packageJson.dependencies?.typescript) {
-      commands.push('npx tsc --noEmit');
+      // TypeScript check
+      if (packageJson.devDependencies?.typescript || packageJson.dependencies?.typescript) {
+        commands.push(tscCommand(pm));
+      }
+
+      // Build command
+      if (scripts.build) {
+        commands.push(runCommand(pm, 'build'));
+      }
+
+      // Test command (optional - don't fail if no tests)
+      if (scripts.test && !scripts.test.includes('no test specified')) {
+        commands.push(testCommand(pm));
+      }
+    } catch {
+      // package.json unreadable despite pm detection -- skip Node commands
     }
-
-    // Build command
-    if (scripts.build) {
-      commands.push('npm run build');
-    }
-
-    // Test command (optional - don't fail if no tests)
-    if (scripts.test && !scripts.test.includes('no test specified')) {
-      commands.push('npm test');
-    }
-  } catch {
-    // No package.json - try common patterns
+  } else {
+    // No Node.js project - try common patterns
     try {
       await fs.access(path.join(workingDir, 'Cargo.toml'));
       commands.push('cargo check');

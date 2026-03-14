@@ -17,8 +17,12 @@ import {
   getDbWithBackfill,
   ensureSessionsBackfill,
   queryAllSessions,
+  getActiveTasks,
+  getRecentCompletedTasks,
 } from './db.js';
+import type { TaskRow } from './db.js';
 import type { Database } from 'bun:sqlite';
+import { isExecutorRunning, spawnDetachedExecutor } from './executor.js';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -92,6 +96,61 @@ function pad(str: string, len: number): string {
 
 function padStart(str: string, len: number): string {
   return str.length >= len ? str : ' '.repeat(len - str.length) + str;
+}
+
+// ── Executor / Task Helpers ──────────────────────────────────
+
+type ExecutorState = 'running' | 'idle' | 'stopped';
+
+interface ExecutorInfo {
+  state: ExecutorState;
+  runningCount: number;
+  pendingCount: number;
+}
+
+function taskStatusIcon(status: string): string {
+  if (status === 'running') return '>';
+  if (status === 'completed') return '+';
+  if (status === 'failed') return 'x';
+  if (status === 'cancelled') return 'x';
+  return '-';
+}
+
+function taskStatusColor(status: string): string {
+  if (status === 'running') return '#36b5f0';
+  if (status === 'completed') return '#22c55e';
+  if (status === 'failed') return '#ef4444';
+  if (status === 'cancelled') return '#ef4444';
+  return '#bbbbbb';
+}
+
+function formatElapsedSince(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const secs = Math.floor(ms / 1000);
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+/**
+ * Check executor liveness and count active tasks. Cached per poll cycle
+ * by the caller (useEffect dependent on dbVersion).
+ */
+async function getExecutorInfo(db: Database | null, cwd: string): Promise<ExecutorInfo> {
+  const alive = await isExecutorRunning(cwd);
+  if (!alive) {
+    return { state: 'stopped', runningCount: 0, pendingCount: 0 };
+  }
+  if (!db) {
+    return { state: 'idle', runningCount: 0, pendingCount: 0 };
+  }
+  const active = getActiveTasks(db);
+  const runningCount = active.filter(t => t.status === 'running').length;
+  const pendingCount = active.filter(t => t.status === 'pending').length;
+  if (runningCount > 0 || pendingCount > 0) {
+    return { state: 'running', runningCount, pendingCount };
+  }
+  return { state: 'idle', runningCount: 0, pendingCount: 0 };
 }
 
 // ── Pipeline Helpers ─────────────────────────────────────────
@@ -871,17 +930,37 @@ function SessionRow({ session, selected, maxWidth }: { session: SessionInfo; sel
   );
 }
 
-function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
+function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db, onSelect, onSelectTask, onQuit, onTabSwitch }: {
   sessions: SessionInfo[];
   cwd: string;
   initialIndex?: number;
+  executor: ExecutorInfo;
+  tasks: TaskRow[];
+  db: Database | null;
   onSelect: (s: SessionInfo, index: number) => void;
+  onSelectTask: (task: TaskRow) => void;
   onQuit: () => void;
   onTabSwitch: () => void;
 }) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
+  const [showTasks, setShowTasks] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [taskSelectedIndex, setTaskSelectedIndex] = useState(0);
+  const [focusArea, setFocusArea] = useState<'sessions' | 'tasks'>('sessions');
   const { width } = useTerminalDimensions();
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const toast = useToast();
+  const dialog = useConfirmDialog();
+
+  // Build task list: active tasks + optionally history
+  const historyTasks = useMemo(() => {
+    if (!showHistory || !db) return [];
+    return getRecentCompletedTasks(db, 60 * 60 * 1000); // last hour
+  }, [showHistory, db, tasks]); // tasks dependency triggers refresh on DB changes
+
+  const visibleTasks = useMemo(() => {
+    return [...tasks, ...historyTasks];
+  }, [tasks, historyTasks]);
 
   // Clamp selected index when sessions change
   useEffect(() => {
@@ -889,6 +968,13 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
       setSelectedIndex(sessions.length - 1);
     }
   }, [sessions.length, selectedIndex]);
+
+  // Clamp task selected index
+  useEffect(() => {
+    if (taskSelectedIndex >= visibleTasks.length && visibleTasks.length > 0) {
+      setTaskSelectedIndex(visibleTasks.length - 1);
+    }
+  }, [visibleTasks.length, taskSelectedIndex]);
 
   // Scroll to keep selected row visible
   useEffect(() => {
@@ -908,7 +994,39 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
     }
   }, [selectedIndex]);
 
+  const handleExecutorToggle = async () => {
+    if (executor.state === 'stopped') {
+      const ok = spawnDetachedExecutor(cwd);
+      if (ok) {
+        toast.show('Executor starting...', '#36b5f0');
+      } else {
+        toast.show('Failed to start executor', '#ef4444');
+      }
+    } else {
+      // Executor is running or idle -- stop it
+      if (executor.runningCount > 0) {
+        const confirmed = await dialog.ask(`${executor.runningCount} task(s) running. Stop executor? (y/n)`);
+        if (!confirmed) return;
+      }
+      // Send SIGTERM to the executor PID
+      try {
+        const pidPath = join(cwd, '.forge', 'executor.pid');
+        const pidStr = await readFile(pidPath, 'utf-8');
+        const pid = parseInt(pidStr.trim(), 10);
+        if (!isNaN(pid)) {
+          process.kill(pid, 'SIGTERM');
+          toast.show('Executor stopping...', '#eab308');
+        }
+      } catch {
+        toast.show('Could not stop executor', '#ef4444');
+      }
+    }
+  };
+
   useKeyboard((key) => {
+    // Dialog captures all keys when visible
+    if (dialog.visible) return;
+
     if (key.name === 'q') {
       onQuit();
       return;
@@ -917,10 +1035,48 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
       onTabSwitch();
       return;
     }
+    if (key.name === 't') {
+      setShowTasks(v => !v);
+      if (!showTasks) setFocusArea('tasks');
+      else setFocusArea('sessions');
+      return;
+    }
+    if (key.name === 'e') {
+      handleExecutorToggle();
+      return;
+    }
+    if (key.name === 'h' && showTasks) {
+      setShowHistory(v => !v);
+      return;
+    }
+
+    if (focusArea === 'tasks' && showTasks) {
+      if (key.name === 'up' || key.name === 'k') {
+        setTaskSelectedIndex(i => {
+          if (i <= 0) { setFocusArea('sessions'); return 0; }
+          return i - 1;
+        });
+      } else if (key.name === 'down' || key.name === 'j') {
+        setTaskSelectedIndex(i => Math.min(visibleTasks.length - 1, i + 1));
+      } else if (key.name === 'return') {
+        if (visibleTasks.length > 0 && visibleTasks[taskSelectedIndex]) {
+          onSelectTask(visibleTasks[taskSelectedIndex]);
+        }
+      }
+      return;
+    }
+
+    // Sessions area navigation
     if (key.name === 'up' || key.name === 'k') {
       setSelectedIndex(i => Math.max(0, i - 1));
     } else if (key.name === 'down' || key.name === 'j') {
-      setSelectedIndex(i => Math.min(sessions.length - 1, i + 1));
+      if (showTasks && selectedIndex >= sessions.length - 1) {
+        // Move focus to tasks area
+        setFocusArea('tasks');
+        setTaskSelectedIndex(0);
+      } else {
+        setSelectedIndex(i => Math.min(sessions.length - 1, i + 1));
+      }
     } else if (key.name === 'return') {
       if (sessions.length > 0 && sessions[selectedIndex]) {
         onSelect(sessions[selectedIndex], selectedIndex);
@@ -928,14 +1084,15 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
     }
   });
 
-  if (sessions.length === 0) {
+  if (sessions.length === 0 && visibleTasks.length === 0) {
     return (
       <box flexDirection="column" style={{ padding: 1 }}>
         <text fg="#888888">No sessions found in {cwd}/.forge/</text>
         <text> </text>
         <text fg="#555555">Run a spec to create your first session.</text>
         <text> </text>
-        <text fg="#555555">[tab] next tab  [q] quit</text>
+        <text fg="#555555">[e] {executor.state === 'stopped' ? 'start' : 'stop'} executor  [tab] next tab  [q] quit</text>
+        <ExecutorStatusBar executor={executor} />
       </box>
     );
   }
@@ -955,15 +1112,48 @@ function SessionsList({ sessions, cwd, initialIndex, onSelect, onQuit, onTabSwit
           <box key={`${session.sessionId}-${session.isRunning ? 'r' : session.status}`} id={`s-${i}`}>
             <SessionRow
               session={session}
-              selected={i === selectedIndex}
+              selected={focusArea === 'sessions' && i === selectedIndex}
               maxWidth={width}
             />
           </box>
         ))}
       </scrollbox>
 
+      {showTasks ? (
+        <box flexDirection="column" style={{ flexShrink: 0 }}>
+          <box style={{ paddingLeft: 1, height: 1 }}>
+            <text fg="#555555">{'-- Tasks' + (showHistory ? ' (+ history)' : '') + ' --'}</text>
+          </box>
+          {visibleTasks.length === 0 ? (
+            <box style={{ paddingLeft: 1, height: 1 }}>
+              <text fg="#555555">No active tasks</text>
+            </box>
+          ) : (
+            visibleTasks.map((task, i) => (
+              <box key={task.id} id={`t-${i}`}>
+                <TaskRow_
+                  task={task}
+                  selected={focusArea === 'tasks' && i === taskSelectedIndex}
+                  maxWidth={width}
+                />
+              </box>
+            ))
+          )}
+        </box>
+      ) : null}
+
+      <ExecutorStatusBar executor={executor} />
+
+      <DialogConfirm
+        prompt={dialog.prompt}
+        visible={dialog.visible}
+        onRespond={dialog.respond}
+      />
+
+      <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
+
       <box style={{ paddingLeft: 1, flexShrink: 0 }}>
-        <text fg="#555555">[j/k] navigate  [enter] view  [tab] next tab  [q] quit</text>
+        <text fg="#555555">[j/k] navigate  [enter] view  [t] tasks  [e] executor  [h] history  [tab] next tab  [q] quit</text>
       </box>
     </box>
   );
@@ -1791,6 +1981,133 @@ function ToastOverlay({ toasts, onDismiss }: {
   );
 }
 
+// ── Executor Components ──────────────────────────────────────
+
+function ExecutorStatusBar({ executor }: { executor: ExecutorInfo }) {
+  const stateColor =
+    executor.state === 'running' ? '#22c55e'
+    : executor.state === 'idle' ? '#555555'
+    : '#eab308';
+
+  let label = `executor: ${executor.state}`;
+  if (executor.state === 'running') {
+    const total = executor.runningCount + executor.pendingCount;
+    label = `executor: running (${total} task${total !== 1 ? 's' : ''})`;
+  }
+
+  return (
+    <box style={{ paddingLeft: 1, height: 1, flexShrink: 0 }}>
+      <text>
+        <span fg={stateColor}>{label}</span>
+      </text>
+    </box>
+  );
+}
+
+function TaskRow_({ task, selected, maxWidth }: { task: TaskRow; selected: boolean; maxWidth: number }) {
+  const icon = taskStatusIcon(task.status);
+  const color = taskStatusColor(task.status);
+  const cmd = pad(truncate(task.command, 20), 20);
+  const shortId = task.id.slice(0, 8);
+  const elapsed = task.status === 'running' && task.updatedAt
+    ? formatElapsedSince(task.createdAt)
+    : task.status === 'completed' || task.status === 'failed'
+    ? formatRelativeTime(task.updatedAt)
+    : '--';
+  const desc = task.description ? truncate(task.description, 30) : '';
+  const line = truncate(`${icon} ${cmd} (${shortId}) -- ${task.status} -- ${elapsed}${desc ? '  ' + desc : ''}`, maxWidth - 2);
+
+  return (
+    <box
+      style={{
+        backgroundColor: selected ? '#334155' : undefined,
+        paddingLeft: 1,
+        paddingRight: 1,
+        height: 1,
+      }}
+    >
+      <text>
+        <span fg={color}>{line[0]}</span>
+        <span fg={selected ? '#ffffff' : '#bbbbbb'}>{line.substring(1)}</span>
+      </text>
+    </box>
+  );
+}
+
+function TaskDetail({ task, onBack }: { task: TaskRow; onBack: () => void }) {
+  const icon = taskStatusIcon(task.status);
+  const color = taskStatusColor(task.status);
+
+  let stdoutLines: string[] = [];
+  let stderrLines: string[] = [];
+  try { stdoutLines = JSON.parse(task.stdout || '[]'); } catch { /* */ }
+  try { stderrLines = JSON.parse(task.stderr || '[]'); } catch { /* */ }
+
+  // Show last 20 lines of output
+  const outputTail = [...stdoutLines, ...stderrLines].slice(-20);
+
+  useKeyboard((key) => {
+    if (key.name === 'escape' || key.name === 'backspace') { onBack(); return; }
+  });
+
+  return (
+    <box flexDirection="column" style={{ paddingLeft: 1, paddingTop: 1 }}>
+      <text>
+        <span fg="#888888">Task</span>
+        {'  '}
+        <span fg="#cccccc">{task.id.slice(0, 8)}</span>
+      </text>
+      <text> </text>
+      <text>
+        <span fg="#888888">Command     </span>
+        <span fg="#bbbbbb">{task.command}</span>
+      </text>
+      {task.description ? (
+        <text>
+          <span fg="#888888">Description </span>
+          <span fg="#bbbbbb">{task.description}</span>
+        </text>
+      ) : null}
+      {task.specPath ? (
+        <text>
+          <span fg="#888888">Spec        </span>
+          <span fg="#bbbbbb">{task.specPath}</span>
+        </text>
+      ) : null}
+      <text>
+        <span fg="#888888">Status      </span>
+        <span fg={color}>{icon} {task.status}</span>
+      </text>
+      <text>
+        <span fg="#888888">Created     </span>
+        <span fg="#bbbbbb">{task.createdAt}</span>
+      </text>
+      {task.status === 'running' ? (
+        <text>
+          <span fg="#888888">Elapsed     </span>
+          <span fg="#bbbbbb">{formatElapsedSince(task.createdAt)}</span>
+        </text>
+      ) : null}
+      {task.sessionId ? (
+        <text>
+          <span fg="#888888">Session     </span>
+          <span fg="#bbbbbb">{task.sessionId.slice(0, 8)}</span>
+        </text>
+      ) : null}
+      {outputTail.length > 0 ? (
+        <box flexDirection="column" style={{ paddingTop: 1 }}>
+          <text fg="#888888">Output (last {outputTail.length} lines):</text>
+          {outputTail.map((line, i) => (
+            <text key={i} fg="#aaaaaa">  {line}</text>
+          ))}
+        </box>
+      ) : null}
+      <text> </text>
+      <text fg="#555555">[esc] back</text>
+    </box>
+  );
+}
+
 // ── Pipeline Components ──────────────────────────────────────
 
 function PipelineRow({ pipeline, selected, maxWidth }: { pipeline: Pipeline; selected: boolean; maxWidth: number }) {
@@ -2374,6 +2691,11 @@ function App({ cwd }: { cwd: string }) {
   const [stageSessionIds, setStageSessionIds] = useState<string[]>([]);
   const [stageSessionInfo, setStageSessionInfo] = useState<SessionInfo | null>(null);
 
+  // Executor + task state
+  const [executor, setExecutor] = useState<ExecutorInfo>({ state: 'stopped', runningCount: 0, pendingCount: 0 });
+  const [activeTasks, setActiveTasks] = useState<TaskRow[]>([]);
+  const [selectedTask, setSelectedTask] = useState<TaskRow | null>(null);
+
   // Database instance — triggers re-render when ready so useDbPoll sees it
   const [db, setDb] = useState<Database | null>(null);
   const dbInitRef = useRef(false);
@@ -2407,6 +2729,19 @@ function App({ cwd }: { cwd: string }) {
     const loaded = loadSessionsFromDb(db, cwd);
     enrichSessionsWithRuns(loaded, db);
     setSessions(loaded);
+  }, [cwd, dbVersion, db]);
+
+  // Load executor info and active tasks on each DB poll cycle
+  useEffect(() => {
+    let mounted = true;
+    getExecutorInfo(db, cwd).then(info => {
+      if (mounted) setExecutor(info);
+    });
+    if (db) {
+      const tasks = getActiveTasks(db);
+      setActiveTasks(tasks);
+    }
+    return () => { mounted = false; };
   }, [cwd, dbVersion, db]);
 
   const handleQuit = () => {
@@ -2563,6 +2898,19 @@ function App({ cwd }: { cwd: string }) {
 
   // ── Sessions tab ──────────────────────────────────────────
 
+  // Task detail view
+  if (view === 'detail' && selectedTask && !selectedSession) {
+    return (
+      <box flexDirection="column">
+        <TabBar activeTab={activeTab} />
+        <TaskDetail
+          task={selectedTask}
+          onBack={() => { setSelectedTask(null); setView('list'); }}
+        />
+      </box>
+    );
+  }
+
   if (view === 'detail' && selectedSession) {
     return (
       <box flexDirection="column">
@@ -2584,9 +2932,18 @@ function App({ cwd }: { cwd: string }) {
         sessions={sessions}
         cwd={cwd}
         initialIndex={listIndex}
+        executor={executor}
+        tasks={activeTasks}
+        db={db}
         onSelect={(s, i) => {
           setListIndex(i);
           setSelectedSession(s);
+          setSelectedTask(null);
+          setView('detail');
+        }}
+        onSelectTask={(task) => {
+          setSelectedTask(task);
+          setSelectedSession(null);
           setView('detail');
         }}
         onQuit={handleQuit}

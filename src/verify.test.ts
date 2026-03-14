@@ -450,7 +450,7 @@ describe('rewriteBuildCommand', () => {
   });
 });
 
-// ── detectVerification (existing behavior unchanged) ────────
+// ── detectVerification (package-manager-aware) ──────────────
 
 describe('detectVerification', () => {
   test('returns empty for directory without recognizable project', async () => {
@@ -468,7 +468,7 @@ describe('detectVerification', () => {
     expect(commands).toEqual([]);
   });
 
-  test('detects Node.js project with build and test', async () => {
+  test('defaults to npm commands when only package.json exists (no lockfile)', async () => {
     await writeFile(tmpDir, 'package.json', JSON.stringify({
       devDependencies: { typescript: '^5.0.0' },
       scripts: { build: 'tsc', test: 'bun test' },
@@ -479,6 +479,62 @@ describe('detectVerification', () => {
     expect(commands).toContain('npm test');
   });
 
+  test('uses pnpm commands when pnpm-lock.yaml exists', async () => {
+    await writeFile(tmpDir, 'package.json', JSON.stringify({
+      devDependencies: { typescript: '^5.0.0' },
+      scripts: { build: 'tsc', test: 'vitest' },
+    }));
+    await writeFile(tmpDir, 'pnpm-lock.yaml', '');
+    const commands = await detectVerification(tmpDir);
+    expect(commands).toEqual([
+      'pnpm exec tsc --noEmit',
+      'pnpm run build',
+      'pnpm test',
+    ]);
+  });
+
+  test('uses bun commands when bun.lockb exists', async () => {
+    await writeFile(tmpDir, 'package.json', JSON.stringify({
+      devDependencies: { typescript: '^5.0.0' },
+      scripts: { build: 'tsc', test: 'bun test' },
+    }));
+    await writeFile(tmpDir, 'bun.lockb', '');
+    const commands = await detectVerification(tmpDir);
+    expect(commands).toEqual([
+      'bun run tsc --noEmit',
+      'bun run build',
+      'bun test',
+    ]);
+  });
+
+  test('uses yarn commands when yarn.lock exists', async () => {
+    await writeFile(tmpDir, 'package.json', JSON.stringify({
+      devDependencies: { typescript: '^5.0.0' },
+      scripts: { build: 'tsc', test: 'jest' },
+    }));
+    await writeFile(tmpDir, 'yarn.lock', '');
+    const commands = await detectVerification(tmpDir);
+    expect(commands).toEqual([
+      'yarn tsc --noEmit',
+      'yarn run build',
+      'yarn test',
+    ]);
+  });
+
+  test('uses npm commands when package-lock.json exists', async () => {
+    await writeFile(tmpDir, 'package.json', JSON.stringify({
+      devDependencies: { typescript: '^5.0.0' },
+      scripts: { build: 'tsc', test: 'jest' },
+    }));
+    await writeFile(tmpDir, 'package-lock.json', '{}');
+    const commands = await detectVerification(tmpDir);
+    expect(commands).toEqual([
+      'npx tsc --noEmit',
+      'npm run build',
+      'npm test',
+    ]);
+  });
+
   test('skips test when "no test specified"', async () => {
     await writeFile(tmpDir, 'package.json', JSON.stringify({
       scripts: { build: 'tsc', test: 'echo "Error: no test specified" && exit 1' },
@@ -486,6 +542,18 @@ describe('detectVerification', () => {
     const commands = await detectVerification(tmpDir);
     expect(commands).toContain('npm run build');
     expect(commands).not.toContain('npm test');
+  });
+
+  test('detects Cargo project when no package.json exists', async () => {
+    await writeFile(tmpDir, 'Cargo.toml', '[package]');
+    const commands = await detectVerification(tmpDir);
+    expect(commands).toEqual(['cargo check', 'cargo build']);
+  });
+
+  test('detects Go project when no package.json exists', async () => {
+    await writeFile(tmpDir, 'go.mod', 'module example.com');
+    const commands = await detectVerification(tmpDir);
+    expect(commands).toEqual(['go build ./...']);
   });
 });
 

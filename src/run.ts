@@ -1,6 +1,7 @@
 import type { ForgeOptions, ForgeResult, MonorepoContext } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
 import { ForgeError, resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
@@ -8,6 +9,8 @@ import { DIM, RESET, CMD, BOLD, printRunSummary } from './display.js';
 import { runVerification, detectMonorepo, determineAffectedPackages } from './verify.js';
 import { runQuery, streamLogAppend } from './core.js';
 import { withManifestLock, findOrCreateEntry, updateEntryStatus, specKey, pipeSpecId, resolveSpecSource } from './specs.js';
+import { getDb, insertCliTask, updateTaskStatus, updateTaskSessionId, cancelTask } from './db.js';
+import { isInterrupted } from './abort.js';
 
 /**
  * Count tool calls from audit.jsonl for a specific session.
@@ -87,8 +90,8 @@ export function isApiErrorResult(resultText: string): boolean {
   return false;
 }
 
-export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string; _resultDir?: string }): Promise<ForgeResult> {
-  const { prompt, specPath, specContent, cwd, model, planModel, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir } = options;
+export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string; _resultDir?: string; _taskId?: string; _parentTaskId?: string }): Promise<ForgeResult> {
+  const { prompt, specPath, specContent, cwd, model, planModel, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir, _taskId, _parentTaskId } = options;
   const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
 
   // Resolve and validate working directory
@@ -105,6 +108,26 @@ export async function runSingleSpec(options: ForgeOptions & { specContent?: stri
     defaultMaxBudgetUsd: dryRun || planOnly ? 5.00 : 50.00,
   });
   const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd, config } = resolved;
+
+  // ── CLI Task tracking ──────────────────────────────────────
+  // Insert a task record so CLI runs are visible in TUI, status, and stats.
+  // Use provided _taskId (from batch parent) or generate one.
+  const taskId = _taskId || crypto.randomUUID();
+  const db = getDb(resultDir);
+  if (db) {
+    try {
+      insertCliTask(db, {
+        id: taskId,
+        command: 'run',
+        description: prompt,
+        specPath: specPath ?? null,
+        cwd: workingDir,
+        parentTaskId: _parentTaskId ?? null,
+      });
+    } catch {
+      // Best effort — don't block execution if task insert fails
+    }
+  }
 
   // Read spec content if provided (and not already passed)
   let finalSpecContent: string | undefined = specContent;
@@ -268,6 +291,15 @@ Do not use emojis in your output.`;
     const endTime = new Date();
     const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
 
+    // Link session ID to task record
+    if (db && qr.sessionId) {
+      try {
+        updateTaskSessionId(db, taskId, qr.sessionId);
+      } catch {
+        // Best effort
+      }
+    }
+
     // Run verification (unless dry-run or plan-only)
     if (!dryRun && !planOnly) {
       if (!quiet) console.log(`${DIM}[forge]${RESET} Running verification...`);
@@ -374,6 +406,17 @@ forge run --resume ${qr.sessionId} "fix verification errors"
             });
           }
 
+          // Update task record on failure
+          if (db) {
+            try {
+              if (isInterrupted()) {
+                cancelTask(db, taskId);
+              } else {
+                updateTaskStatus(db, taskId, 'failed', 1);
+              }
+            } catch { /* best effort */ }
+          }
+
           throw new ForgeError(`Verification failed after ${maxVerifyAttempts} attempts`, forgeResult);
         }
       } else {
@@ -436,6 +479,13 @@ forge run --resume ${qr.sessionId} "fix verification errors"
           });
           updateEntryStatus(entry);
         });
+      }
+
+      // Update task record on API error override
+      if (db) {
+        try {
+          updateTaskStatus(db, taskId, 'failed', 1);
+        } catch { /* best effort */ }
       }
 
       throw new ForgeError(note, overrideResult);
@@ -558,9 +608,22 @@ ${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0,
       console.log('================================');
     }
 
+    // Update task record on success
+    if (db) {
+      try {
+        updateTaskStatus(db, taskId, 'completed', 0);
+      } catch { /* best effort */ }
+    }
+
     return forgeResult;
   }
 
   // All verification attempts exhausted — should not normally reach here
+  // Update task record
+  if (db) {
+    try {
+      updateTaskStatus(db, taskId, 'failed', 1);
+    } catch { /* best effort */ }
+  }
   throw new ForgeError('Verification failed after all attempts');
 }
