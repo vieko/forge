@@ -544,26 +544,72 @@ describe('detectVerification', () => {
     expect(commands).not.toContain('npm test');
   });
 
-  test('detects Cargo project when no package.json exists', async () => {
+  test('detects Cargo project with cargo test', async () => {
     await writeFile(tmpDir, 'Cargo.toml', '[package]');
     const commands = await detectVerification(tmpDir);
-    expect(commands).toEqual(['cargo check', 'cargo build']);
+    expect(commands).toEqual(['cargo check', 'cargo build', 'cargo test']);
   });
 
-  test('detects Go project when no package.json exists', async () => {
+  test('detects Go project with go test', async () => {
     await writeFile(tmpDir, 'go.mod', 'module example.com');
     const commands = await detectVerification(tmpDir);
-    expect(commands).toEqual(['go build ./...']);
+    expect(commands).toEqual(['go build ./...', 'go test ./...']);
+  });
+
+  test('detects hybrid Node + Rust project', async () => {
+    await writeFile(tmpDir, 'package.json', JSON.stringify({
+      scripts: { build: 'tsc', test: 'vitest' },
+    }));
+    await writeFile(tmpDir, 'Cargo.toml', '[package]');
+    const commands = await detectVerification(tmpDir);
+    expect(commands).toContain('npm run build');
+    expect(commands).toContain('npm test');
+    expect(commands).toContain('cargo check');
+    expect(commands).toContain('cargo build');
+    expect(commands).toContain('cargo test');
+  });
+
+  test('detects hybrid Node + Go project', async () => {
+    await writeFile(tmpDir, 'package.json', JSON.stringify({
+      scripts: { build: 'tsc', test: 'vitest' },
+    }));
+    await writeFile(tmpDir, 'go.mod', 'module example.com');
+    const commands = await detectVerification(tmpDir);
+    expect(commands).toContain('npm run build');
+    expect(commands).toContain('npm test');
+    expect(commands).toContain('go build ./...');
+    expect(commands).toContain('go test ./...');
+  });
+
+  test('Node commands come before Rust/Go commands in hybrid projects', async () => {
+    await writeFile(tmpDir, 'package.json', JSON.stringify({
+      scripts: { build: 'tsc' },
+    }));
+    await writeFile(tmpDir, 'Cargo.toml', '[package]');
+    await writeFile(tmpDir, 'go.mod', 'module example.com');
+    const commands = await detectVerification(tmpDir);
+    const nodeIdx = commands.indexOf('npm run build');
+    const cargoIdx = commands.indexOf('cargo check');
+    const goIdx = commands.indexOf('go build ./...');
+    expect(nodeIdx).toBeLessThan(cargoIdx);
+    expect(cargoIdx).toBeLessThan(goIdx);
   });
 });
 
 // ── runVerification with monorepo context ───────────────────
 
 describe('runVerification with monorepo', () => {
-  test('passes with no commands', async () => {
+  test('passes with no commands and sets skipped flag', async () => {
     const result = await runVerification(tmpDir, true);
     expect(result.passed).toBe(true);
     expect(result.errors).toBe('');
+    expect(result.skipped).toBe(true);
+  });
+
+  test('does not set skipped when commands exist', async () => {
+    const result = await runVerification(tmpDir, true, ['echo ok']);
+    expect(result.passed).toBe(true);
+    expect(result.skipped).toBeUndefined();
   });
 
   test('uses unscoped commands when monorepo has no affected packages', async () => {
@@ -572,9 +618,10 @@ describe('runVerification with monorepo', () => {
       packages: new Map([['packages/api', '@repo/api']]),
       affected: [],
     };
-    // No package.json in tmpDir → no commands detected → passes
+    // No package.json in tmpDir → no commands detected → passes with skipped
     const result = await runVerification(tmpDir, true, undefined, ctx);
     expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(true);
   });
 
   test('respects configVerify even with monorepo context', async () => {

@@ -1,8 +1,14 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
 import { execAsync, createWorktree, commitWorktree, cleanupWorktree } from './utils.js';
+import { setupHermeticGit, teardownHermeticGit } from './test-utils.js';
+
+// ── Hermetic Git ─────────────────────────────────────────────
+
+beforeAll(() => { setupHermeticGit(); });
+afterAll(() => { teardownHermeticGit(); });
 
 // ── Test Helpers ─────────────────────────────────────────────
 

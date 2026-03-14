@@ -149,6 +149,64 @@ async function getSessionDirs(cwd: string): Promise<Set<string>> {
   }
 }
 
+// ── Queued Option Contract ────────────────────────────────────
+//
+// Options supported by dispatchTask() for queued tasks (via MCP forge_start).
+// These are extracted from typed task `params` JSON and/or `extraArgs` string array.
+//
+// SUPPORTED (typed params — preferred for commonly used options):
+//   model         - Model shorthand or full ID (all commands)
+//   specPath      - Spec file or directory path (run, audit, proof, verify)
+//   outputDir     - Output directory (define, audit, proof, verify)
+//   maxTurns      - Maximum agent turns (all commands)
+//   maxBudgetUsd  - Maximum budget in USD (all commands)
+//   planOnly      - Plan-only mode, no implementation (run)
+//   planModel     - Model for plan-only runs (run)
+//   dryRun        - Preview without executing (run, verify)
+//
+// SUPPORTED (extraArgs — for less common or flag-style options):
+//   --force / -F         - Force re-run of passed specs (run)
+//   --sequential         - Run specs sequentially (run)
+//   --sequential-first N - Run first N specs sequentially (run)
+//   --concurrency N      - Max concurrent specs (run)
+//   --rerun-failed       - Rerun only failed specs (run)
+//   --pending            - Run only pending specs (run)
+//   --branch <name>      - Run in isolated git worktree (run)
+//   --fix                - Audit-fix convergence loop (audit)
+//   --fix-rounds N       - Max audit-fix rounds (audit)
+//
+// INTENTIONALLY EXCLUDED:
+//   verbose       - Executor is always quiet; no terminal to print to
+//   resume/fork   - Session management doesn't apply to queued tasks;
+//                   each task gets a fresh session
+//   _onSpecResult - Internal callback; executor handles its own per-spec logging
+//   _silent       - Internal display flag; executor controls its own output
+//   persistDir    - Set by pipeline orchestrator, not by individual tasks
+
+// ── Helpers: extraArgs parsing ───────────────────────────────
+
+/** Extract a string value following a flag in extraArgs, e.g. --branch <name> */
+function extractStringArg(extraArgs: string[], flag: string): string | undefined {
+  const idx = extraArgs.indexOf(flag);
+  if (idx >= 0 && idx + 1 < extraArgs.length) return extraArgs[idx + 1];
+  return undefined;
+}
+
+/** Extract a numeric value following a flag in extraArgs, e.g. --concurrency 5 */
+function extractNumberArg(extraArgs: string[], flag: string): number | undefined {
+  const val = extractStringArg(extraArgs, flag);
+  if (val !== undefined) {
+    const n = parseInt(val, 10);
+    if (!isNaN(n)) return n;
+  }
+  return undefined;
+}
+
+/** Check if a flag is present in extraArgs, e.g. --sequential */
+function hasFlag(extraArgs: string[], ...flags: string[]): boolean {
+  return flags.some(f => extraArgs.includes(f));
+}
+
 // ── Task dispatch ────────────────────────────────────────────
 
 /**
@@ -162,9 +220,26 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
   const extraArgs = (params.extraArgs || []) as string[];
   const taskShortId = task.id.slice(0, 8);
 
+  // Extract typed params (preferred over extraArgs for common options)
+  const model = params.model as string | undefined;
+  const maxTurns = params.maxTurns as number | undefined;
+  const maxBudgetUsd = params.maxBudgetUsd as number | undefined;
+  const planOnly = params.planOnly as boolean | undefined;
+  const planModel = params.planModel as string | undefined;
+  const dryRun = params.dryRun as boolean | undefined;
+
   switch (cmd) {
     case 'run': {
       const specPath = (params.specPath || task.specPath) as string | undefined;
+
+      // Extract run-specific options from extraArgs
+      const sequential = hasFlag(extraArgs, '--sequential');
+      const force = hasFlag(extraArgs, '--force', '-F');
+      const rerunFailed = hasFlag(extraArgs, '--rerun-failed');
+      const pendingOnly = hasFlag(extraArgs, '--pending');
+      const sequentialFirst = extractNumberArg(extraArgs, '--sequential-first');
+      const concurrency = extractNumberArg(extraArgs, '--concurrency');
+      const branch = extractStringArg(extraArgs, '--branch');
 
       if (specPath) {
         const resolvedSpec = path.resolve(workingDir, specPath);
@@ -184,19 +259,28 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
             specCount = entries.filter(e => e.endsWith('.md')).length;
           } catch { /* best effort */ }
 
-          const isSequential = extraArgs.includes('--sequential');
           if (!quiet && specCount > 1) {
-            console.log(`${DIM}[executor]${RESET} > ${task.command} (${taskShortId}) ${specCount} specs [${isSequential ? 'sequential' : 'parallel'}]`);
+            console.log(`${DIM}[executor]${RESET} > ${task.command} (${taskShortId}) ${specCount} specs [${sequential ? 'sequential' : 'parallel'}]`);
           }
 
           await runForge({
             prompt: task.description || 'implement',
             specDir: specPath,
             cwd: workingDir,
-            model: params.model as string | undefined,
+            model,
+            maxTurns,
+            maxBudgetUsd,
+            planOnly: planOnly ?? hasFlag(extraArgs, '--plan-only'),
+            planModel: planModel ?? extractStringArg(extraArgs, '--plan-model'),
+            dryRun: dryRun ?? hasFlag(extraArgs, '--dry-run'),
             quiet: true,
-            sequential: isSequential,
-            force: extraArgs.includes('--force') || extraArgs.includes('-F'),
+            sequential,
+            sequentialFirst,
+            concurrency,
+            rerunFailed,
+            pendingOnly,
+            force,
+            branch,
             _skipTaskTracking: true,
             _onSpecResult: quiet ? undefined : (spec, status) => {
               const icon = status === 'success' ? '+' : 'x';
@@ -208,7 +292,12 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
             prompt: task.description || 'implement',
             specPath,
             cwd: workingDir,
-            model: params.model as string | undefined,
+            model,
+            maxTurns,
+            maxBudgetUsd,
+            planOnly: planOnly ?? hasFlag(extraArgs, '--plan-only'),
+            planModel: planModel ?? extractStringArg(extraArgs, '--plan-model'),
+            dryRun: dryRun ?? hasFlag(extraArgs, '--dry-run'),
             quiet: true,
             _silent: true,
             _skipTaskTracking: true,
@@ -218,7 +307,12 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
         await runSingleSpec({
           prompt: task.description || '',
           cwd: workingDir,
-          model: params.model as string | undefined,
+          model,
+          maxTurns,
+          maxBudgetUsd,
+          planOnly: planOnly ?? hasFlag(extraArgs, '--plan-only'),
+          planModel: planModel ?? extractStringArg(extraArgs, '--plan-model'),
+          dryRun: dryRun ?? hasFlag(extraArgs, '--dry-run'),
           quiet: true,
           _silent: true,
           _skipTaskTracking: true,
@@ -234,12 +328,12 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
         prompt: task.description || undefined,
         outputDir: params.outputDir as string | undefined,
         cwd: workingDir,
-        model: params.model as string | undefined,
+        model,
+        maxTurns,
+        maxBudgetUsd,
         quiet: true,
-        fix: extraArgs.includes('--fix'),
-        fixRounds: extraArgs.includes('--fix-rounds')
-          ? parseInt(extraArgs[extraArgs.indexOf('--fix-rounds') + 1], 10)
-          : undefined,
+        fix: hasFlag(extraArgs, '--fix'),
+        fixRounds: extractNumberArg(extraArgs, '--fix-rounds'),
       });
       break;
     }
@@ -249,7 +343,9 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
         prompt: task.description || '',
         outputDir: params.outputDir as string | undefined,
         cwd: workingDir,
-        model: params.model as string | undefined,
+        model,
+        maxTurns,
+        maxBudgetUsd,
         quiet: true,
       });
       break;
@@ -263,7 +359,9 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
         specPaths,
         outputDir: params.outputDir as string | undefined,
         cwd: workingDir,
-        model: params.model as string | undefined,
+        model,
+        maxTurns,
+        maxBudgetUsd,
         quiet: true,
       });
       break;
@@ -275,7 +373,10 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
         proofDir: specPath,
         outputDir: params.outputDir as string | undefined,
         cwd: workingDir,
-        model: params.model as string | undefined,
+        model,
+        maxTurns,
+        maxBudgetUsd,
+        dryRun: dryRun ?? hasFlag(extraArgs, '--dry-run'),
         quiet: true,
       });
       break;
@@ -302,7 +403,7 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
           fromStage: params.fromStage as StageName | undefined,
           specDir: params.specPath as string | undefined,
           cwd: workingDir,
-          model: params.model as string | undefined,
+          model,
           resume: params.resume as string | undefined,
           quiet: true,
         },

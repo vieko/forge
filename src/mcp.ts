@@ -346,8 +346,11 @@ server.registerTool('forge_start', {
     model: z.string().optional().describe('Model to use (opus, sonnet, or full model ID)'),
     spec_path: z.string().optional().describe('Spec file or directory path (required for run, audit, proof)'),
     extra_args: z.array(z.string()).optional().describe('Additional CLI arguments (e.g. ["--fix", "--sequential"])'),
+    max_turns: z.number().optional().describe('Maximum agent turns (default varies by command)'),
+    max_budget: z.number().optional().describe('Maximum budget in USD (default varies by command)'),
+    plan_only: z.boolean().optional().describe('Plan only mode — create tasks without implementing (run command only)'),
   },
-}, async ({ command, description, cwd, output_dir, model, spec_path, extra_args }) => {
+}, async ({ command, description, cwd, output_dir, model, spec_path, extra_args, max_turns, max_budget, plan_only }) => {
   try {
     const workingDir = path.resolve(cwd);
     const db = getDb(workingDir);
@@ -378,12 +381,16 @@ server.registerTool('forge_start', {
 
     const taskId = crypto.randomBytes(8).toString('hex');
 
-    // Store structured parameters for the executor to dispatch
+    // Store structured parameters for the executor to dispatch.
+    // Typed params are preferred over extraArgs for commonly used options.
     const params: Record<string, unknown> = {
       specPath: spec_path || null,
       outputDir: output_dir || null,
       model: model || null,
       extraArgs: extra_args || [],
+      ...(max_turns !== undefined && { maxTurns: max_turns }),
+      ...(max_budget !== undefined && { maxBudgetUsd: max_budget }),
+      ...(plan_only !== undefined && { planOnly: plan_only }),
     };
 
     // Insert task with status 'pending' — executor picks it up

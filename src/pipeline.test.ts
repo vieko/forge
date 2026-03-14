@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { FileSystemStateProvider } from './pipeline-state.js';
 import { runPipeline, advanceGate, skipGate } from './pipeline.js';
 import { DEFAULT_GATES, STAGE_ORDER } from './pipeline-types.js';
@@ -18,8 +18,14 @@ import path from 'path';
 import os from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { setupHermeticGit, teardownHermeticGit } from './test-utils.js';
 
 const execAsync = promisify(exec);
+
+// ── Hermetic Git ─────────────────────────────────────────────
+
+beforeAll(() => { setupHermeticGit(); });
+afterAll(() => { teardownHermeticGit(); });
 
 // ── Test Helpers ─────────────────────────────────────────────
 

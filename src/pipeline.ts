@@ -526,9 +526,10 @@ export async function runPipeline(
       );
 
       if (!setupResult.success) {
-        // Setup failed -- mark pipeline as failed and clean up worktree
+        // Setup failed -- mark pipeline and first stage as failed, then clean up worktree
         const errorMsg = `Workspace setup failed: ${setupResult.failedCommand}\n${setupResult.output}`;
         pipeline.status = 'failed';
+        pipeline.stages[0].status = 'failed';
         pipeline.updatedAt = new Date().toISOString();
         await stateProvider.savePipeline(pipeline);
 
@@ -600,6 +601,7 @@ export async function runPipeline(
           if (!setupResult.success) {
             const errorMsg = `Workspace setup failed on resume: ${setupResult.failedCommand}\n${setupResult.output}`;
             pipeline.status = 'failed';
+            pipeline.stages[0].status = 'failed';
             pipeline.updatedAt = new Date().toISOString();
             await stateProvider.savePipeline(pipeline);
 
@@ -624,6 +626,19 @@ export async function runPipeline(
           if (!options.quiet) {
             console.log(`\x1b[2m[forge]\x1b[0m Workspace setup complete`);
           }
+
+          // Persist setup output for debugging (truncate to 10KB)
+          const MAX_HOOK_OUTPUT = 10 * 1024;
+          const setupOutput = setupResult.output.length > MAX_HOOK_OUTPUT
+            ? setupResult.output.slice(0, MAX_HOOK_OUTPUT) + '\n... (truncated)'
+            : setupResult.output;
+
+          await events.publish({
+            type: 'workspace_setup',
+            pipelineId: pipeline.id,
+            timestamp: new Date().toISOString(),
+            output: setupOutput,
+          });
         }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);

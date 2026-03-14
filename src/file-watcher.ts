@@ -1,7 +1,6 @@
 // ── file-watcher — debounced fs.watch with fallback polling ──
 
 import { watch as fsWatch, type FSWatcher } from 'fs';
-import { stat } from 'fs/promises';
 
 // ── Types ────────────────────────────────────────────────────
 
