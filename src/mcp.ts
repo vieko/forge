@@ -20,10 +20,8 @@ import crypto from 'crypto';
 import path from 'path';
 import { promises as fs } from 'fs';
 import { loadManifest, findUntrackedSpecs } from './specs.js';
-import { loadSummaries, aggregateRuns, computeSpecStats, computeModelStats, filterSince } from './stats.js';
 import {
   getDb,
-  getDbWithBackfill,
   queryStatusRuns,
   queryAggregateStats,
   querySpecStats,
@@ -33,7 +31,7 @@ import {
   markStaleTasks,
   getActiveTaskByCommandAndCwd,
 } from './db.js';
-import { FileSystemStateProvider } from './pipeline-state.js';
+import { SqliteStateProvider } from './db-pipeline-state.js';
 import type { Pipeline, GateKey } from './pipeline-types.js';
 import { isExecutorRunning, ensureExecutorRunning } from './executor.js';
 
@@ -192,39 +190,18 @@ server.registerTool('forge_status', {
   try {
     const workingDir = path.resolve(cwd);
 
-    // Try DB first
-    let dbRows: { specPath: string | null; status: string; costUsd: number | null; durationSeconds: number; model: string; numTurns: number | null; batchId: string | null; startedAt: string }[] | null = null;
-    try {
-      const db = await getDbWithBackfill(workingDir);
-      if (db) {
-        dbRows = queryStatusRuns(db);
-      }
-    } catch {
-      // Fall through to filesystem
+    // Read exclusively from DB
+    const db = getDb(workingDir);
+    if (!db) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ runs: [], message: 'No results found. (Database unavailable)' }) }] };
     }
 
-    if (dbRows && dbRows.length > 0) {
-      const result = groupStatusRows(dbRows, all, count);
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ runs: result }, null, 2) }] };
-    }
-
-    // Fallback: filesystem
-    const summaries = await loadSummaries(workingDir);
-    if (summaries.length === 0) {
+    const dbRows = queryStatusRuns(db);
+    if (dbRows.length === 0) {
       return { content: [{ type: 'text' as const, text: JSON.stringify({ runs: [], message: 'No results found.' }) }] };
     }
 
-    const fsRows = summaries.map(s => ({
-      specPath: s.specPath || null,
-      status: s.status,
-      costUsd: s.costUsd ?? null,
-      durationSeconds: s.durationSeconds,
-      model: s.model,
-      numTurns: s.numTurns ?? null,
-      batchId: s.runId || null,
-      startedAt: s.startedAt,
-    }));
-    const result = groupStatusRows(fsRows, all, count);
+    const result = groupStatusRows(dbRows, all, count);
     return { content: [{ type: 'text' as const, text: JSON.stringify({ runs: result }, null, 2) }] };
   } catch (err) {
     return {
@@ -266,66 +243,36 @@ server.registerTool('forge_stats', {
   try {
     const workingDir = path.resolve(cwd);
 
-    // Try DB first
-    try {
-      const db = await getDbWithBackfill(workingDir);
-      if (db) {
-        if (by_spec) {
-          const rows = querySpecStats(db, since);
-          const specStats = rows.map(r => ({
-            spec: r.specPath,
-            runs: r.runs,
-            passed: r.passed,
-            avgCost: r.avgCost,
-            avgDuration: r.avgDuration,
-          }));
-          return { content: [{ type: 'text' as const, text: JSON.stringify({ by_spec: specStats }, null, 2) }] };
-        }
-
-        if (by_model) {
-          const rows = queryModelStatsDb(db, since);
-          return { content: [{ type: 'text' as const, text: JSON.stringify({ by_model: rows }, null, 2) }] };
-        }
-
-        const row = queryAggregateStats(db, since);
-        if (row.total === 0) {
-          const msg = since ? `No runs found since ${since}.` : 'No runs found.';
-          return { content: [{ type: 'text' as const, text: JSON.stringify({ message: msg }) }] };
-        }
-
-        return { content: [{ type: 'text' as const, text: JSON.stringify(formatAggregateResponse(row), null, 2) }] };
-      }
-    } catch {
-      // Fall through to filesystem
-    }
-
-    // Fallback: filesystem
-    let summaries = await loadSummaries(workingDir);
-
-    if (summaries.length === 0) {
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ message: 'No runs found.' }) }] };
-    }
-
-    if (since) {
-      summaries = filterSince(summaries, since);
-      if (summaries.length === 0) {
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ message: `No runs found since ${since}.` }) }] };
-      }
+    // Read exclusively from DB
+    const db = getDb(workingDir);
+    if (!db) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ message: 'No runs found. (Database unavailable)' }) }] };
     }
 
     if (by_spec) {
-      const manifest = await loadManifest(workingDir);
-      const specStats = computeSpecStats(manifest);
+      const rows = querySpecStats(db, since);
+      const specStats = rows.map(r => ({
+        spec: r.specPath,
+        runs: r.runs,
+        passed: r.passed,
+        avgCost: r.avgCost,
+        avgDuration: r.avgDuration,
+      }));
       return { content: [{ type: 'text' as const, text: JSON.stringify({ by_spec: specStats }, null, 2) }] };
     }
 
     if (by_model) {
-      const modelStats = computeModelStats(summaries);
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ by_model: modelStats }, null, 2) }] };
+      const rows = queryModelStatsDb(db, since);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ by_model: rows }, null, 2) }] };
     }
 
-    const stats = aggregateRuns(summaries);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(formatAggregateResponse(stats), null, 2) }] };
+    const row = queryAggregateStats(db, since);
+    if (row.total === 0) {
+      const msg = since ? `No runs found since ${since}.` : 'No runs found.';
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ message: msg }) }] };
+    }
+
+    return { content: [{ type: 'text' as const, text: JSON.stringify(formatAggregateResponse(row), null, 2) }] };
   } catch (err) {
     return {
       content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
@@ -514,7 +461,9 @@ server.registerTool('forge_task', {
   // Enrich pipeline tasks with stage-level progress
   if (task.command === 'forge pipeline') {
     try {
-      const provider = new FileSystemStateProvider(task.cwd);
+      const pipelineDb = getDb(task.cwd);
+      if (!pipelineDb) throw new Error('Database unavailable');
+      const provider = new SqliteStateProvider(pipelineDb);
       const active = await provider.loadActivePipeline();
       if (active) {
         const currentStage = active.stages.find(s => s.status === 'running');
@@ -708,8 +657,21 @@ server.registerTool('forge_pipeline', {
 }, async ({ cwd }) => {
   try {
     const workingDir = cwd ? path.resolve(cwd) : process.cwd();
-    const provider = new FileSystemStateProvider(workingDir);
-    const pipeline = await provider.loadActivePipeline();
+    const pipelineDb = getDb(workingDir);
+    if (!pipelineDb) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Database unavailable' }) }],
+        isError: true,
+      };
+    }
+    const provider = new SqliteStateProvider(pipelineDb);
+    let pipeline = await provider.loadActivePipeline();
+
+    // Fall back to most recent pipeline (including completed/failed/cancelled)
+    if (!pipeline) {
+      const all = await provider.listPipelines();
+      if (all.length > 0) pipeline = all[0];
+    }
 
     if (!pipeline) {
       return {

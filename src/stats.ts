@@ -1,16 +1,13 @@
-import type { ForgeResult, SpecManifest } from './types.js';
-import { promises as fs } from 'fs';
 import path from 'path';
 import { DIM, RESET, BOLD } from './display.js';
-import { loadManifest } from './specs.js';
 import {
-  getDbWithBackfill,
+  getDb,
   queryAggregateStats,
   querySpecStats,
   queryModelStats as queryModelStatsDb,
   querySourceStats,
 } from './db.js';
-import type { AggregateRow, SpecStatsRow, ModelStatsRow, SourceStatsRow } from './db.js';
+import type { AggregateRow, SourceStatsRow } from './db.js';
 
 // ── Options ──────────────────────────────────────────────────
 
@@ -41,155 +38,7 @@ export function formatDuration(seconds: number): string {
   return `${h.toFixed(1)}h`;
 }
 
-// ── Load summaries ───────────────────────────────────────────
-
-/** Load all summary.json files from .forge/results/. */
-export async function loadSummaries(workingDir: string): Promise<ForgeResult[]> {
-  const resultsBase = path.join(workingDir, '.forge', 'results');
-
-  let dirs: string[];
-  try {
-    dirs = await fs.readdir(resultsBase);
-  } catch {
-    return [];
-  }
-
-  const summaries: ForgeResult[] = [];
-  for (const dir of dirs) {
-    try {
-      const content = await fs.readFile(
-        path.join(resultsBase, dir, 'summary.json'),
-        'utf-8',
-      );
-      summaries.push(JSON.parse(content) as ForgeResult);
-    } catch {
-      continue;
-    }
-  }
-
-  return summaries;
-}
-
-// ── Aggregation helpers ──────────────────────────────────────
-
-export interface AggregatedStats {
-  total: number;
-  passed: number;
-  failed: number;
-  totalCost: number;
-  totalDuration: number;
-  totalTurns: number;
-  runsWithTurns: number;
-}
-
-export function aggregateRuns(summaries: ForgeResult[]): AggregatedStats {
-  let passed = 0;
-  let failed = 0;
-  let totalCost = 0;
-  let totalDuration = 0;
-  let totalTurns = 0;
-  let runsWithTurns = 0;
-
-  for (const s of summaries) {
-    if (s.status === 'success') {
-      passed++;
-    } else {
-      failed++;
-    }
-    totalCost += s.costUsd ?? 0;
-    totalDuration += s.durationSeconds;
-    if (s.numTurns !== undefined) {
-      totalTurns += s.numTurns;
-      runsWithTurns++;
-    }
-  }
-
-  return {
-    total: summaries.length,
-    passed,
-    failed,
-    totalCost,
-    totalDuration,
-    totalTurns,
-    runsWithTurns,
-  };
-}
-
-// ── Per-spec stats ───────────────────────────────────────────
-
-export interface SpecStats {
-  spec: string;
-  runs: number;
-  passed: number;
-  avgCost: number;
-  avgDuration: number;
-}
-
-export function computeSpecStats(manifest: SpecManifest): SpecStats[] {
-  const results: SpecStats[] = [];
-
-  for (const entry of manifest.specs) {
-    if (entry.runs.length === 0) continue;
-
-    const passed = entry.runs.filter(r => r.status === 'passed').length;
-    const totalCost = entry.runs.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
-    const totalDuration = entry.runs.reduce((sum, r) => sum + r.durationSeconds, 0);
-
-    results.push({
-      spec: entry.spec,
-      runs: entry.runs.length,
-      passed,
-      avgCost: totalCost / entry.runs.length,
-      avgDuration: totalDuration / entry.runs.length,
-    });
-  }
-
-  // Sort by number of runs descending
-  results.sort((a, b) => b.runs - a.runs);
-  return results;
-}
-
-// ── Per-model stats ──────────────────────────────────────────
-
-export interface ModelStats {
-  model: string;
-  runs: number;
-  passed: number;
-  avgCost: number;
-  avgDuration: number;
-}
-
-export function computeModelStats(summaries: ForgeResult[]): ModelStats[] {
-  const groups = new Map<string, ForgeResult[]>();
-
-  for (const s of summaries) {
-    const model = s.model || 'unknown';
-    const arr = groups.get(model) || [];
-    arr.push(s);
-    groups.set(model, arr);
-  }
-
-  const results: ModelStats[] = [];
-  for (const [model, runs] of groups) {
-    const passed = runs.filter(r => r.status === 'success').length;
-    const totalCost = runs.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
-    const totalDuration = runs.reduce((sum, r) => sum + r.durationSeconds, 0);
-
-    results.push({
-      model,
-      runs: runs.length,
-      passed,
-      avgCost: totalCost / runs.length,
-      avgDuration: totalDuration / runs.length,
-    });
-  }
-
-  // Sort by number of runs descending
-  results.sort((a, b) => b.runs - a.runs);
-  return results;
-}
-
-// ── Date filter ──────────────────────────────────────────────
+// ── Date validation ─────────────────────────────────────────
 
 /** Validate an ISO date string. Returns true if parseable. */
 export function isValidDate(dateStr: string): boolean {
@@ -197,12 +46,7 @@ export function isValidDate(dateStr: string): boolean {
   return !isNaN(d.getTime());
 }
 
-/** Filter summaries to those started at or after the given ISO date. */
-export function filterSince(summaries: ForgeResult[], since: string): ForgeResult[] {
-  return summaries.filter(s => s.startedAt >= since);
-}
-
-// ── Display helpers (shared by DB and fallback paths) ────────
+// ── Display helpers ─────────────────────────────────────────
 
 function printSpecBreakdown(specStats: { spec: string; runs: number; passed: number; avgCost: number; avgDuration: number }[], since?: string): void {
   if (specStats.length === 0) {
@@ -290,7 +134,7 @@ function printSourceBreakdown(sourceStats: SourceStatsRow[], since?: string): vo
   console.log('');
 }
 
-function printDashboard(stats: AggregatedStats, since?: string): void {
+function printDashboard(stats: AggregateRow, since?: string): void {
   console.log(`\n${BOLD}Forge Stats${RESET}`);
   if (since) console.log(`${DIM}(since ${since})${RESET}`);
   console.log();
@@ -321,10 +165,10 @@ function printDashboard(stats: AggregatedStats, since?: string): void {
 
 /**
  * Try to serve stats from the DB. Returns true if successful,
- * false if DB is unavailable (caller should fall back to filesystem).
+ * false if DB is unavailable.
  */
-async function showStatsFromDb(workingDir: string, options: StatsOptions): Promise<boolean> {
-  const db = await getDbWithBackfill(workingDir);
+function showStatsFromDb(workingDir: string, options: StatsOptions): boolean {
+  const db = getDb(workingDir);
   if (!db) return false;
 
   try {
@@ -389,43 +233,10 @@ export async function showStats(options: StatsOptions): Promise<void> {
     process.exit(1);
   }
 
-  // Try DB-backed stats first
-  const served = await showStatsFromDb(workingDir, options);
+  // Read exclusively from DB
+  const served = showStatsFromDb(workingDir, options);
   if (served) return;
 
-  // Fallback: filesystem scanning
-  let summaries = await loadSummaries(workingDir);
-
-  if (summaries.length === 0) {
-    console.log('No runs found.');
-    return;
-  }
-
-  // Apply date filter
-  if (options.since) {
-    summaries = filterSince(summaries, options.since);
-    if (summaries.length === 0) {
-      console.log(`No runs found since ${options.since}.`);
-      return;
-    }
-  }
-
-  // Per-spec breakdown (fallback uses manifest)
-  if (options.bySpec) {
-    const manifest = await loadManifest(workingDir);
-    const specStats = computeSpecStats(manifest);
-    printSpecBreakdown(specStats, options.since);
-    return;
-  }
-
-  // Per-model breakdown
-  if (options.byModel) {
-    const modelStats = computeModelStats(summaries);
-    printModelBreakdown(modelStats, options.since);
-    return;
-  }
-
-  // Default dashboard
-  const stats = aggregateRuns(summaries);
-  printDashboard(stats, options.since);
+  // DB unavailable
+  console.log('No runs found. (Database unavailable)');
 }

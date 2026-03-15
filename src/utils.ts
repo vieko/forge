@@ -276,67 +276,34 @@ export async function cleanupWorktree(worktreePath: string, repoDir: string): Pr
 export async function saveResult(
   workingDir: string,
   result: ForgeResult,
-  resultText: string
+  _resultText: string
 ): Promise<string> {
-  // Create timestamp-based directory name (filesystem safe)
+  // Create timestamp-based ID (filesystem safe)
   const timestamp = result.startedAt.replace(/[:.]/g, '-');
-  const resultsDir = path.join(workingDir, '.forge', 'results', timestamp);
 
   await ensureForgeDir(workingDir);
-  await fs.mkdir(resultsDir, { recursive: true });
 
-  // Save structured summary
-  const summaryPath = path.join(resultsDir, 'summary.json');
-  await fs.writeFile(summaryPath, JSON.stringify(result, null, 2));
-
-  // Save full result text (no truncation)
-  const resultPath = path.join(resultsDir, 'result.md');
-  const resultContent = `# Forge Result
-
-**Started**: ${result.startedAt}
-**Completed**: ${result.completedAt}
-**Duration**: ${result.durationSeconds.toFixed(1)}s
-**Status**: ${result.status}
-**Cost**: ${result.costUsd !== undefined ? `$${result.costUsd.toFixed(4)}` : 'N/A'}
-**Model**: ${result.model}
-${result.sessionId ? `**Session**: ${result.sessionId}` : ''}
-${result.specPath ? `**Spec**: ${result.specPath}` : ''}
-
-## Prompt
-
-${result.prompt}
-
-## Result
-
-${resultText}
-`;
-  await fs.writeFile(resultPath, resultContent);
-
-  // Dual-write to SQLite (best-effort — filesystem is authoritative)
-  try {
-    const db = getDb(workingDir);
-    if (db) {
-      insertRun(db, {
-        id: timestamp,
-        specPath: result.specPath || null,
-        model: result.model || 'unknown',
-        status: result.status,
-        costUsd: result.costUsd ?? null,
-        durationSeconds: result.durationSeconds,
-        numTurns: result.numTurns ?? null,
-        toolCalls: result.toolCalls ?? null,
-        batchId: result.runId || null,
-        type: result.type || null,
-        prompt: result.prompt,
-        cwd: result.cwd,
-        sessionId: result.sessionId || null,
-        error: result.error || null,
-        createdAt: result.startedAt,
-      });
-    }
-  } catch {
-    // Best effort — don't fail the save if DB write fails
+  // Insert into SQLite database (sole store for run metadata)
+  const db = getDb(workingDir);
+  if (db) {
+    insertRun(db, {
+      id: timestamp,
+      specPath: result.specPath || null,
+      model: result.model || 'unknown',
+      status: result.status,
+      costUsd: result.costUsd ?? null,
+      durationSeconds: result.durationSeconds,
+      numTurns: result.numTurns ?? null,
+      toolCalls: result.toolCalls ?? null,
+      batchId: result.runId || null,
+      type: result.type || null,
+      prompt: result.prompt,
+      cwd: result.cwd,
+      sessionId: result.sessionId || null,
+      error: result.error || null,
+      createdAt: result.startedAt,
+    });
   }
 
-  return resultsDir;
+  return timestamp;
 }

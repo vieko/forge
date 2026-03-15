@@ -2,7 +2,7 @@
 //
 // Implements StateProvider using SQLite tables (pipelines, stages, gates).
 // Uses the shared database from db.ts with migration version 3.
-// FileSystemStateProvider remains available as fallback when DB is null.
+// Sole StateProvider implementation -- FileSystemStateProvider has been removed.
 
 import type { Database } from 'bun:sqlite';
 import type {

@@ -3,7 +3,8 @@
 // Lazy-initialized SQLite database using bun:sqlite with WAL mode.
 // Provides schema versioning with sequential migrations.
 // The database is local-only (.forge/forge.db) and gitignored.
-// All tables are derived indexes — filesystem state remains authoritative.
+// The sessions table is the primary store for session metadata.
+// The runs table is the primary store for run results.
 
 import { Database } from 'bun:sqlite';
 import path from 'path';
@@ -304,7 +305,7 @@ export function getDb(workingDir: string): Database | null {
   } catch (err) {
     // Graceful degradation: warn and return null
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[forge] SQLite unavailable, falling back to filesystem: ${message}`);
+    console.warn(`[forge] SQLite unavailable: ${message}`);
     return null;
   }
 }
@@ -396,7 +397,7 @@ export interface RunRow {
 
 /**
  * Insert a run into the runs table. Uses INSERT OR IGNORE so
- * backfill is idempotent (duplicate IDs are silently skipped).
+ * duplicate IDs are silently skipped (idempotent).
  */
 export function insertRun(db: Database, row: RunRow): void {
   db.run(
@@ -560,78 +561,6 @@ export function queryStatusRuns(db: Database): StatusRunRow[] {
   return rows;
 }
 
-/**
- * Backfill existing .forge/results/ summary.json files into the runs table.
- * Idempotent — uses INSERT OR IGNORE so duplicates are silently skipped.
- * Called on first DB access when the runs table is empty.
- */
-export async function backfillRuns(db: Database, workingDir: string): Promise<number> {
-  const resultsBase = path.join(workingDir, '.forge', 'results');
-
-  let dirs: string[];
-  try {
-    dirs = await fs.readdir(resultsBase);
-  } catch {
-    return 0;
-  }
-
-  let count = 0;
-  for (const dir of dirs) {
-    try {
-      const content = await fs.readFile(
-        path.join(resultsBase, dir, 'summary.json'),
-        'utf-8',
-      );
-      const summary = JSON.parse(content) as Record<string, unknown>;
-
-      insertRun(db, {
-        id: dir, // timestamp directory name
-        specPath: (summary.specPath as string) || null,
-        model: (summary.model as string) || 'unknown',
-        status: (summary.status as string) || 'error_execution',
-        costUsd: (summary.costUsd as number) ?? null,
-        durationSeconds: (summary.durationSeconds as number) || 0,
-        numTurns: (summary.numTurns as number) ?? null,
-        toolCalls: (summary.toolCalls as number) ?? null,
-        batchId: (summary.runId as string) || null,
-        type: (summary.type as string) || null,
-        prompt: (summary.prompt as string) || '',
-        cwd: (summary.cwd as string) || workingDir,
-        sessionId: (summary.sessionId as string) || null,
-        error: (summary.error as string) || null,
-        createdAt: (summary.startedAt as string) || new Date().toISOString(),
-      });
-      count++;
-    } catch {
-      continue;
-    }
-  }
-
-  return count;
-}
-
-/**
- * Ensure the runs table is populated. If the table is empty but
- * filesystem results exist, run the backfill migration.
- * Returns the database instance (or null if unavailable).
- */
-export async function getDbWithBackfill(workingDir: string): Promise<Database | null> {
-  const db = getDb(workingDir);
-  if (!db) return null;
-
-  try {
-    // Check if runs table exists and is empty
-    const row = db.query('SELECT COUNT(*) as count FROM runs').get() as { count: number };
-    if (row.count === 0) {
-      await backfillRuns(db, workingDir);
-    }
-  } catch {
-    // Table might not exist yet if migration hasn't run — that shouldn't happen
-    // since getDb runs migrations, but handle gracefully
-  }
-
-  return db;
-}
 
 // ── Sessions table helpers ────────────────────────────────────
 
@@ -650,7 +579,7 @@ export interface SessionRow {
 
 /**
  * Insert a session row when a session starts.
- * Uses INSERT OR IGNORE so backfill is idempotent.
+ * Uses INSERT OR IGNORE so duplicate IDs are silently skipped (idempotent).
  */
 export function insertSession(db: Database, row: {
   id: string;
@@ -730,144 +659,6 @@ export function queryAllSessions(db: Database, limit?: number): SessionRow[] {
   ).all() as SessionRow[];
 }
 
-/**
- * Backfill sessions from existing .forge/results/ and .forge/sessions/ data.
- * Reads summary.json for completed sessions and events.jsonl first lines
- * for richer metadata (commandType, specPath from session_start event).
- * Idempotent via INSERT OR IGNORE.
- */
-export async function backfillSessions(db: Database, workingDir: string): Promise<number> {
-  let count = 0;
-
-  // Phase 1: Backfill from .forge/results/*/summary.json (completed sessions)
-  const resultsBase = path.join(workingDir, '.forge', 'results');
-  try {
-    const dirs = await fs.readdir(resultsBase);
-    for (const dir of dirs) {
-      try {
-        const content = await fs.readFile(
-          path.join(resultsBase, dir, 'summary.json'),
-          'utf-8',
-        );
-        const summary = JSON.parse(content) as Record<string, unknown>;
-        const sessionId = summary.sessionId as string | undefined;
-        if (!sessionId) continue;
-
-        // Try to enrich from events.jsonl first line (has commandType, specPath)
-        let commandType: string | null = null;
-        let specPathFromEvent: string | null = null;
-        const eventsPath = path.join(workingDir, '.forge', 'sessions', sessionId, 'events.jsonl');
-        try {
-          const eventsRaw = await fs.readFile(eventsPath, 'utf-8');
-          const firstNewline = eventsRaw.indexOf('\n');
-          const firstLine = firstNewline > 0 ? eventsRaw.substring(0, firstNewline) : eventsRaw.trim();
-          if (firstLine) {
-            const startEvent = JSON.parse(firstLine) as Record<string, unknown>;
-            if (startEvent.type === 'session_start') {
-              commandType = (startEvent.commandType as string) || null;
-              specPathFromEvent = (startEvent.specPath as string) || null;
-            }
-          }
-        } catch {
-          // events.jsonl not available — use summary.json fields
-        }
-
-        insertSession(db, {
-          id: sessionId,
-          specPath: specPathFromEvent ?? (summary.specPath as string) ?? null,
-          pipelineId: null, // Not available in historical data
-          commandType: commandType ?? (summary.type as string) ?? null,
-          model: (summary.model as string) ?? null,
-          startedAt: (summary.startedAt as string) || new Date().toISOString(),
-        });
-
-        // Update with completion data
-        updateSession(db, sessionId, {
-          status: (summary.status as string) || 'error_execution',
-          costUsd: (summary.costUsd as number) ?? null,
-          endedAt: (summary.completedAt as string) || new Date().toISOString(),
-        });
-
-        count++;
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    // No results directory
-  }
-
-  // Phase 2: Backfill from .forge/sessions/ directories (may include sessions without results)
-  const sessionsBase = path.join(workingDir, '.forge', 'sessions');
-  try {
-    const sessionDirs = await fs.readdir(sessionsBase);
-    for (const sid of sessionDirs) {
-      const eventsPath = path.join(sessionsBase, sid, 'events.jsonl');
-      try {
-        const eventsRaw = await fs.readFile(eventsPath, 'utf-8');
-
-        // Parse first line for session_start metadata
-        const firstNewline = eventsRaw.indexOf('\n');
-        const firstLine = firstNewline > 0 ? eventsRaw.substring(0, firstNewline) : eventsRaw.trim();
-        if (!firstLine) continue;
-
-        const startEvent = JSON.parse(firstLine) as Record<string, unknown>;
-        if (startEvent.type !== 'session_start') continue;
-
-        insertSession(db, {
-          id: sid,
-          specPath: (startEvent.specPath as string) || null,
-          pipelineId: null,
-          commandType: (startEvent.commandType as string) || null,
-          model: (startEvent.model as string) || null,
-          startedAt: (startEvent.timestamp as string) || new Date().toISOString(),
-        });
-
-        // Parse last line for session_end
-        const trimmed = eventsRaw.trimEnd();
-        const lastNewline = trimmed.lastIndexOf('\n');
-        const lastLine = lastNewline >= 0 ? trimmed.substring(lastNewline + 1) : trimmed;
-        if (lastLine && lastLine !== firstLine) {
-          try {
-            const endEvent = JSON.parse(lastLine) as Record<string, unknown>;
-            if (endEvent.type === 'session_end') {
-              updateSession(db, sid, {
-                status: (endEvent.status as string) || 'error_execution',
-                costUsd: (endEvent.costUsd as number) ?? null,
-                endedAt: (endEvent.timestamp as string) || new Date().toISOString(),
-              });
-            }
-          } catch {
-            // Last line not valid JSON — session may still be running
-          }
-        }
-
-        count++;
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    // No sessions directory
-  }
-
-  return count;
-}
-
-/**
- * Ensure the sessions table is populated. If the table is empty but
- * filesystem data exists, run the backfill.
- */
-export async function ensureSessionsBackfill(db: Database, workingDir: string): Promise<void> {
-  try {
-    const row = db.query('SELECT COUNT(*) as count FROM sessions').get() as { count: number };
-    if (row.count === 0) {
-      await backfillSessions(db, workingDir);
-    }
-  } catch {
-    // Table might not exist — handle gracefully
-  }
-}
 
 // ── Gitignore helper ─────────────────────────────────────────
 

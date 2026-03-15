@@ -15,7 +15,8 @@ import { runProof } from './proof.js';
 import { runVerify } from './proof-runner.js';
 import { showStats } from './stats.js';
 import { runPipeline } from './pipeline.js';
-import { FileSystemStateProvider } from './pipeline-state.js';
+import { SqliteStateProvider } from './db-pipeline-state.js';
+import { getDb } from './db.js';
 import { showPipelineStatus } from './pipeline-status.js';
 import { STAGE_ORDER } from './pipeline-types.js';
 import type { StageName, GateKey, GateType } from './pipeline-types.js';
@@ -469,7 +470,7 @@ program
   .option('--passed', 'Show only passed specs')
   .option('--orphaned', 'Show specs in manifest but missing from filesystem')
   .option('--untracked', 'Show .md files in spec dirs not in manifest')
-  .option('--reconcile', 'Backfill manifest from .forge/results/ history')
+  .option('--reconcile', 'Backfill manifest from DB run history')
   .option('--prune', 'Remove orphaned entries (file missing) from manifest')
   .option('--add [path]', 'Register untracked specs, or specific path/glob')
   .option('--resolve <spec>', 'Mark a pending/failed spec as passed without running')
@@ -698,7 +699,9 @@ const pipelineCmd = program
 
     try {
       const workingDir = options.cwd ? resolve(options.cwd) : process.cwd();
-      const stateProvider = new FileSystemStateProvider(workingDir);
+      const db = getDb(workingDir);
+      if (!db) throw new Error('Database unavailable — cannot run pipeline');
+      const stateProvider = new SqliteStateProvider(db);
 
       await runPipeline(
         {

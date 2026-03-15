@@ -385,7 +385,7 @@ ${verification.errors}
 forge run --resume ${qr.sessionId} "fix verification errors"
 \`\`\``;
 
-          const errorResultsDir = await saveResult(resultDir, forgeResult, errorResultText);
+          await saveResult(resultDir, forgeResult, errorResultText);
 
           // Update spec manifest on failure
           const failSpecId = specPath ? specKey(specPath, resultDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
@@ -395,7 +395,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
               entry.runs.push({
                 runId: _runId || forgeResult.startedAt,
                 timestamp: forgeResult.startedAt,
-                resultPath: path.relative(resultDir, errorResultsDir),
+
                 status: 'failed',
                 costUsd: forgeResult.costUsd,
                 durationSeconds: forgeResult.durationSeconds,
@@ -460,7 +460,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       };
 
       const overriddenText = `${qr.resultText}\n\n${note}`;
-      const errorResultsDir = await saveResult(resultDir, overrideResult, overriddenText);
+      await saveResult(resultDir, overrideResult, overriddenText);
 
       // Update spec manifest as failed
       const failSpecId = specPath ? specKey(specPath, resultDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
@@ -470,7 +470,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
           entry.runs.push({
             runId: _runId || overrideResult.startedAt,
             timestamp: overrideResult.startedAt,
-            resultPath: path.relative(resultDir, errorResultsDir),
+            resultPath: '',
             status: 'failed',
             costUsd: overrideResult.costUsd,
             durationSeconds: overrideResult.durationSeconds,
@@ -517,7 +517,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       logPath: qr.logPath,
     };
 
-    const resultsDir = await saveResult(resultDir, forgeResult, qr.resultText);
+    await saveResult(resultDir, forgeResult, qr.resultText);
 
     // Save plan document to .forge/plans/ for plan-only runs
     if (planOnly) {
@@ -548,7 +548,7 @@ ${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0,
         entry.runs.push({
           runId: _runId || forgeResult.startedAt,
           timestamp: forgeResult.startedAt,
-          resultPath: path.relative(resultDir, resultsDir),
+          resultPath: '',
           status: 'passed',
           costUsd: forgeResult.costUsd,
           durationSeconds: forgeResult.durationSeconds,
@@ -562,8 +562,8 @@ ${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0,
     if (_silent) {
       // Silent: no output at all (parallel mode)
     } else if (quiet) {
-      // Quiet mode: just show results path
-      console.log(resultsDir);
+      // Quiet mode: just show session ID
+      console.log(qr.sessionId || forgeResult.startedAt);
     } else {
       // Display result (full, no truncation)
       console.log('\n---\nResult:\n');
@@ -571,7 +571,6 @@ ${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0,
 
       // Display summary
       printRunSummary({ durationSeconds, costUsd: qr.costUsd, sessionId: qr.sessionId });
-      console.log(`  Results:  ${DIM}${resultsDir}${RESET}`);
       if (qr.sessionId) {
         console.log(`  Resume:   ${CMD}forge run --resume ${qr.sessionId} "continue"${RESET}`);
         console.log(`  Fork:     ${CMD}forge run --fork ${qr.sessionId} "try different approach"${RESET}`);

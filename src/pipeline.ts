@@ -28,9 +28,10 @@ import { resolveWorkingDir, ForgeError, sleep, createWorktree, commitWorktree, c
 import { isInterrupted } from './abort.js';
 import { getConfig } from './config.js';
 import { resolveSetupCommands, resolveTeardownCommands, runWorkspaceHooks } from './workspace.js';
+import { getDb } from './db.js';
 import { promises as fs } from 'fs';
 import path from 'path';
-import type { ForgeResult, ProofManifest } from './types.js';
+import type { ProofManifest } from './types.js';
 
 // ── Constants ────────────────────────────────────────────────
 
@@ -133,33 +134,19 @@ function propagateArtifacts(pipeline: Pipeline, currentStage: StageName): void {
 }
 
 /**
- * Scan .forge/results/ for result summaries created after `sinceMs`
- * and return the total cost. Uses file modification time for filtering.
+ * Query the runs table for total cost of runs created after `sinceMs`.
+ * Falls back to 0 if the database is unavailable.
  */
-async function extractCostFromResults(cwd: string, sinceMs: number): Promise<number> {
-  const resultsBase = path.join(cwd, '.forge', 'results');
-  let dirs: string[];
-  try {
-    dirs = await fs.readdir(resultsBase);
-  } catch {
-    return 0;
-  }
+function extractCostFromRuns(cwd: string, sinceMs: number): number {
+  const db = getDb(cwd);
+  if (!db) return 0;
 
-  let total = 0;
-  for (const dir of dirs) {
-    try {
-      const summaryPath = path.join(resultsBase, dir, 'summary.json');
-      const stat = await fs.stat(summaryPath);
-      if (stat.mtimeMs < sinceMs) continue;
-      const summary: ForgeResult = JSON.parse(
-        await fs.readFile(summaryPath, 'utf-8'),
-      );
-      if (summary.costUsd) total += summary.costUsd;
-    } catch {
-      continue;
-    }
-  }
-  return total;
+  const sinceIso = new Date(sinceMs).toISOString();
+  const row = db.query(
+    'SELECT COALESCE(SUM(costUsd), 0) as totalCost FROM runs WHERE createdAt >= ?',
+  ).get(sinceIso) as { totalCost: number } | null;
+
+  return row?.totalCost ?? 0;
 }
 
 /** List .md files in a directory, sorted alphabetically. */
@@ -177,7 +164,7 @@ async function scanMdFiles(dir: string): Promise<string[]> {
 /**
  * Creates an ExecutionProvider that wraps the existing forge
  * functions (runDefine, runForge, runAudit, runProof, runVerify)
- * without modifying them. Extracts cost from .forge/results/ and
+ * without modifying them. Extracts cost from the DB runs table and
  * artifacts from the filesystem after each call.
  */
 export function createDefaultExecutionProvider(): ExecutionProvider {
@@ -201,7 +188,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
       });
 
       const persistBase = options.persistDir || cwd;
-      const cost = await extractCostFromResults(persistBase, before);
+      const cost = extractCostFromRuns(persistBase, before);
       const specs = await scanMdFiles(outputDir);
 
       return {
@@ -237,7 +224,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
         verbose: options.verbose,
       });
 
-      const cost = await extractCostFromResults(persistBase, before);
+      const cost = extractCostFromRuns(persistBase, before);
 
       return {
         cost,
@@ -268,7 +255,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
         fix: true,
       });
 
-      const cost = await extractCostFromResults(persistBase, before);
+      const cost = extractCostFromRuns(persistBase, before);
 
       // Check for remediation specs produced by the audit fix loop
       const remediationDir = path.join(resolvedSpecDir, 'remediation');
@@ -310,7 +297,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
         verbose: options.verbose,
       });
 
-      const cost = await extractCostFromResults(persistBase, before);
+      const cost = extractCostFromRuns(persistBase, before);
 
       // Read manifest to get accurate proof count
       let proofCount = 0;
@@ -352,7 +339,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
         quiet: options.quiet,
       });
 
-      const cost = await extractCostFromResults(persistBase, before);
+      const cost = extractCostFromRuns(persistBase, before);
 
       return {
         cost,

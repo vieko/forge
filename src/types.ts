@@ -53,7 +53,7 @@ export interface ForgeOptions {
 }
 
 /**
- * Result from a Forge run, saved to .forge/results/
+ * Result from a Forge run, persisted to the SQLite runs table.
  */
 export interface ForgeResult {
   /** ISO timestamp when the run started */
@@ -298,7 +298,7 @@ export interface ProofManifest {
 export interface SpecRun {
   runId: string;
   timestamp: string;         // ISO 8601
-  resultPath: string;        // relative to workingDir, e.g. ".forge/results/2026-02-14T..."
+  resultPath?: string;       // deprecated: was filesystem results path, now unused (DB is sole store)
   status: 'passed' | 'failed';
   costUsd?: number;
   durationSeconds: number;

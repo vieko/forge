@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
-import { FileSystemStateProvider } from './pipeline-state.js';
+import { SqliteStateProvider } from './db-pipeline-state.js';
+import { getTestDb } from './db.js';
 import { runPipeline, advanceGate, skipGate } from './pipeline.js';
 import { DEFAULT_GATES, STAGE_ORDER } from './pipeline-types.js';
 import type {
@@ -72,14 +73,14 @@ function createMockEvents(): EventProvider & { events: PipelineEvent[] } {
   };
 }
 
-// ── FileSystemStateProvider ──────────────────────────────────
+// ── SqliteStateProvider ──────────────────────────────────────
 
-describe('FileSystemStateProvider', () => {
+describe('SqliteStateProvider', () => {
   beforeEach(async () => { tmpDir = await makeTmpDir(); });
   afterEach(async () => { await fs.rm(tmpDir, { recursive: true, force: true }); });
 
   test('createPipeline writes and returns pipeline', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const pipeline = await provider.createPipeline({ goal: 'test' });
 
     expect(pipeline.id).toBeTruthy();
@@ -91,14 +92,14 @@ describe('FileSystemStateProvider', () => {
   });
 
   test('pipeline ID is sortable base36 timestamp', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const pipeline = await provider.createPipeline({ goal: 'test' });
     const decoded = parseInt(pipeline.id, 36);
     expect(Math.abs(Date.now() - decoded)).toBeLessThan(5000);
   });
 
-  test('loadActivePipeline reads pipeline.json', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+  test('loadActivePipeline returns created pipeline', async () => {
+    const provider = new SqliteStateProvider(getTestDb());
     const created = await provider.createPipeline({ goal: 'test' });
     const loaded = await provider.loadActivePipeline();
 
@@ -108,13 +109,13 @@ describe('FileSystemStateProvider', () => {
   });
 
   test('loadActivePipeline returns null when no pipeline exists', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const loaded = await provider.loadActivePipeline();
     expect(loaded).toBeNull();
   });
 
   test('savePipeline persists changes', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const pipeline = await provider.createPipeline({ goal: 'test' });
 
     pipeline.status = 'running';
@@ -126,21 +127,19 @@ describe('FileSystemStateProvider', () => {
     expect(loaded!.totalCost).toBe(5.5);
   });
 
-  test('savePipeline writes to both active and historical', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+  test('savePipeline persists to DB retrievable by both load methods', async () => {
+    const provider = new SqliteStateProvider(getTestDb());
     const pipeline = await provider.createPipeline({ goal: 'test' });
 
-    pipeline.status = 'completed';
+    pipeline.status = 'running';
     await provider.savePipeline(pipeline);
 
-    const active = await provider.loadActivePipeline();
-    const historical = await provider.loadPipeline(pipeline.id);
-    expect(active!.status).toBe('completed');
-    expect(historical!.status).toBe('completed');
+    const byId = await provider.loadPipeline(pipeline.id);
+    expect(byId!.status).toBe('running');
   });
 
   test('listPipelines returns sorted by createdAt descending', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const p1 = await provider.createPipeline({ goal: 'first' });
     // Ensure different timestamp
     await new Promise(r => setTimeout(r, 10));
@@ -153,17 +152,19 @@ describe('FileSystemStateProvider', () => {
   });
 
   test('listPipelines returns empty array when no pipelines', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const list = await provider.listPipelines();
     expect(list).toEqual([]);
   });
 
-  test('creates .forge/pipelines/ directory on first use', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
-    await provider.createPipeline({ goal: 'test' });
+  test('createPipeline stores pipeline retrievable by loadPipeline', async () => {
+    const provider = new SqliteStateProvider(getTestDb());
+    const pipeline = await provider.createPipeline({ goal: 'test' });
 
-    const exists = await fs.stat(path.join(tmpDir, '.forge', 'pipelines')).then(() => true).catch(() => false);
-    expect(exists).toBe(true);
+    const loaded = await provider.loadPipeline(pipeline.id);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.id).toBe(pipeline.id);
+    expect(loaded!.goal).toBe('test');
   });
 });
 
@@ -194,7 +195,7 @@ describe('gate configuration', () => {
   afterEach(async () => { await fs.rm(tmpDir, { recursive: true, force: true }); });
 
   test('gates use DEFAULT_GATES when no overrides', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const pipeline = await provider.createPipeline({ goal: 'test' });
 
     expect(pipeline.gates['define -> run'].type).toBe('auto');
@@ -204,7 +205,7 @@ describe('gate configuration', () => {
   });
 
   test('gate overrides apply correctly', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const pipeline = await provider.createPipeline({
       goal: 'test',
       gates: { 'define -> run': 'confirm', 'audit -> proof': 'auto' },
@@ -217,7 +218,7 @@ describe('gate configuration', () => {
   });
 
   test('all gates start with waiting status', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const pipeline = await provider.createPipeline({ goal: 'test' });
 
     for (const gate of Object.values(pipeline.gates)) {
@@ -233,7 +234,7 @@ describe('runPipeline', () => {
   afterEach(async () => { await fs.rm(tmpDir, { recursive: true, force: true }); });
 
   test('runs all stages with auto gates', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const executor = createMockExecutor();
 
     const result = await runPipeline(
@@ -247,7 +248,7 @@ describe('runPipeline', () => {
   });
 
   test('pauses at confirm gate then resumes when gate is approved', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const executor = createMockExecutor();
 
     // Poll for gate approval (worktree creation may take >500ms, so use interval)
@@ -273,7 +274,7 @@ describe('runPipeline', () => {
   }, 15000);
 
   test('--from skips earlier stages', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const executor = createMockExecutor({
       audit: { cost: 2.0, artifacts: {} },
     });
@@ -290,7 +291,7 @@ describe('runPipeline', () => {
   }, 15000);
 
   test('--spec-dir skips define and seeds run artifacts', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const specDir = path.join(tmpDir, 'specs');
     await fs.mkdir(specDir, { recursive: true });
     const executor = createMockExecutor();
@@ -305,7 +306,7 @@ describe('runPipeline', () => {
   });
 
   test('stage failure stops pipeline', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const executor = createMockExecutor({
       run: new Error('build failed'),
     });
@@ -323,7 +324,7 @@ describe('runPipeline', () => {
   });
 
   test('accumulates cost across stages', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const executor = createMockExecutor({
       define: { cost: 0.5, artifacts: {} },
       run: { cost: 3.0, artifacts: {} },
@@ -339,7 +340,7 @@ describe('runPipeline', () => {
   });
 
   test('publishes events for each stage', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const executor = createMockExecutor();
     const events = createMockEvents();
 
@@ -356,7 +357,7 @@ describe('runPipeline', () => {
   });
 
   test('publishes gate_pause event when pausing', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const executor = createMockExecutor();
     const events = createMockEvents();
 
@@ -388,7 +389,7 @@ describe('runPipeline', () => {
   });
 
   test('state is persisted after every transition', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const executor = createMockExecutor();
 
     await runPipeline(
@@ -396,10 +397,12 @@ describe('runPipeline', () => {
       provider, undefined, executor,
     );
 
-    // Final state should be persisted
-    const loaded = await provider.loadActivePipeline();
-    expect(loaded!.status).toBe('completed');
-    expect(loaded!.completedAt).toBeTruthy();
+    // Final state should be persisted — use listPipelines since completed
+    // pipelines are terminal and not returned by loadActivePipeline
+    const all = await provider.listPipelines();
+    expect(all).toHaveLength(1);
+    expect(all[0].status).toBe('completed');
+    expect(all[0].completedAt).toBeTruthy();
   });
 });
 
@@ -410,7 +413,7 @@ describe('pipeline resume', () => {
   afterEach(async () => { await fs.rm(tmpDir, { recursive: true, force: true }); });
 
   test('resume continues from where it left off', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const executor = createMockExecutor();
 
     // Run all stages with auto gates through audit, confirm at audit->proof
@@ -442,7 +445,7 @@ describe('pipeline resume', () => {
   });
 
   test('resume with invalid ID throws ForgeError', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const executor = createMockExecutor();
 
     await expect(
@@ -458,7 +461,7 @@ describe('advanceGate', () => {
   afterEach(async () => { await fs.rm(tmpDir, { recursive: true, force: true }); });
 
   test('sets gate status to approved', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
 
     // Create a pipeline manually in paused state
     const pipeline = await provider.createPipeline({ goal: 'test' });
@@ -475,7 +478,7 @@ describe('advanceGate', () => {
   });
 
   test('throws if gate is not waiting', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     const pipeline = await provider.createPipeline({ goal: 'test' });
 
     // Auto gate — not in waiting state after advance
@@ -493,7 +496,7 @@ describe('skipGate', () => {
   afterEach(async () => { await fs.rm(tmpDir, { recursive: true, force: true }); });
 
   test('sets gate status to skipped', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
 
     // Create a pipeline manually in paused state
     const pipeline = await provider.createPipeline({ goal: 'test' });
@@ -516,7 +519,7 @@ describe('artifact propagation', () => {
   afterEach(async () => { await fs.rm(tmpDir, { recursive: true, force: true }); });
 
   test('artifacts flow from define to run', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     let runArtifacts: Record<string, string> = {};
 
     const executor: ExecutionProvider = {
@@ -540,7 +543,7 @@ describe('artifact propagation', () => {
   });
 
   test('artifacts flow from proof to verify', async () => {
-    const provider = new FileSystemStateProvider(tmpDir);
+    const provider = new SqliteStateProvider(getTestDb());
     let verifyArtifacts: Record<string, string> = {};
 
     const executor: ExecutionProvider = {

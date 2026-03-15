@@ -7,6 +7,7 @@ import { runQuery } from './core.js';
 import { withManifestLock, findOrCreateEntry, specKey, resolveSpecDir, resolveSpecFile, resolveSpecSource } from './specs.js';
 import { runForge } from './parallel.js';
 import { isInterrupted } from './abort.js';
+import { getDb } from './db.js';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -370,40 +371,40 @@ async function extractOutcomeSentence(specFilePath: string): Promise<string | un
   return undefined;
 }
 
-/** Collect fix results for remediation specs from the results directory. */
-async function collectFixResults(
+/** Collect fix results for remediation specs from the runs DB table. */
+function collectFixResults(
   persistBase: string,
-  remediationDir: string,
+  _remediationDir: string,
   roundSpecs: string[],
-): Promise<Map<string, GapFixStatus>> {
+): Map<string, GapFixStatus> {
   const fixStatuses = new Map<string, GapFixStatus>();
-  try {
-    const resultsBase = path.join(persistBase, '.forge', 'results');
-    const dirs = (await fs.readdir(resultsBase)).sort().reverse();
+  const db = getDb(persistBase);
+  if (!db) return fixStatuses;
 
+  try {
     // Map base gap names to their spec filenames for matching
     const specBasenames = new Set(roundSpecs.map(f => stripRoundPrefix(f)));
 
-    for (const dir of dirs) {
+    // Query recent runs ordered by createdAt DESC (newest first)
+    const rows = db.query(
+      'SELECT specPath, status FROM runs ORDER BY createdAt DESC'
+    ).all() as Array<{ specPath: string | null; status: string }>;
+
+    for (const row of rows) {
       if (fixStatuses.size >= specBasenames.size) break;
-      try {
-        const summary: ForgeResult = JSON.parse(
-          await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
-        );
-        if (!summary.specPath) continue;
+      if (!row.specPath) continue;
 
-        const specBase = stripRoundPrefix(path.basename(summary.specPath));
-        if (!specBasenames.has(specBase)) continue;
-        if (fixStatuses.has(specBase)) continue;
+      const specBase = stripRoundPrefix(path.basename(row.specPath));
+      if (!specBasenames.has(specBase)) continue;
+      if (fixStatuses.has(specBase)) continue;
 
-        if (summary.status === 'success') {
-          fixStatuses.set(specBase, 'success');
-        } else if (summary.status === 'error_execution') {
-          fixStatuses.set(specBase, 'error_execution');
-        } else {
-          fixStatuses.set(specBase, 'error_verification');
-        }
-      } catch { continue; }
+      if (row.status === 'success') {
+        fixStatuses.set(specBase, 'success');
+      } else if (row.status === 'error_execution') {
+        fixStatuses.set(specBase, 'error_execution');
+      } else {
+        fixStatuses.set(specBase, 'error_verification');
+      }
     }
   } catch {}
   return fixStatuses;
@@ -577,23 +578,22 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
     }
     const fixDuration = (Date.now() - fixStartTime) / 1000;
 
-    // Collect per-spec fix results from the results directory
-    const fixStatuses = await collectFixResults(persistBase, remediationDir, auditResult.outputSpecs);
+    // Collect per-spec fix results from the runs DB table
+    const fixStatuses = collectFixResults(persistBase, remediationDir, auditResult.outputSpecs);
 
-    // Estimate fix cost from remediation results (best-effort)
+    // Estimate fix cost from remediation results in DB (best-effort)
     let fixCost = 0;
-    try {
-      const resultsBase = path.join(persistBase, '.forge', 'results');
-      const dirs = (await fs.readdir(resultsBase)).sort().reverse();
-      for (const dir of dirs.slice(0, auditResult.outputSpecs.length)) {
-        try {
-          const summary: ForgeResult = JSON.parse(
-            await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
-          );
-          if (summary.costUsd) fixCost += summary.costUsd;
-        } catch { continue; }
-      }
-    } catch {}
+    const fixDb = getDb(persistBase);
+    if (fixDb) {
+      try {
+        const costRows = fixDb.query(
+          'SELECT costUsd FROM runs ORDER BY createdAt DESC LIMIT ?'
+        ).all(auditResult.outputSpecs.length) as Array<{ costUsd: number | null }>;
+        for (const row of costRows) {
+          if (row.costUsd) fixCost += row.costUsd;
+        }
+      } catch {}
+    }
 
     // Record gap tracking for this round
     for (const gapName of currentGapBaseNames) {

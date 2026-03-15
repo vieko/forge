@@ -588,44 +588,32 @@ export async function runSpecBatch(
   return { results, hasTracker: !!tracker };
 }
 
-// Find failed specs from latest batch in .forge/results/
+// Find failed specs from latest batch in the runs DB table
 export async function findFailedSpecs(workingDir: string): Promise<{ runId: string; specPaths: string[] }> {
-  const resultsBase = path.join(workingDir, '.forge', 'results');
-
-  let dirs: string[];
-  try {
-    dirs = (await fs.readdir(resultsBase)).sort().reverse(); // newest first
-  } catch {
-    throw new Error('No results found in .forge/results/');
+  const db = getDb(workingDir);
+  if (!db) {
+    throw new Error('Database unavailable. Cannot query failed specs without the runs DB.');
   }
 
-  // Single pass: read all summaries, find latest runId, collect failures
-  const summaries: ForgeResult[] = [];
-  let latestRunId: string | undefined;
+  // Find the latest batchId (most recent createdAt with a non-null batchId)
+  const latestBatch = db.query(
+    `SELECT batchId FROM runs WHERE batchId IS NOT NULL ORDER BY createdAt DESC LIMIT 1`
+  ).get() as { batchId: string } | null;
 
-  for (const dir of dirs) {
-    try {
-      const summary: ForgeResult = JSON.parse(
-        await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
-      );
-      summaries.push(summary);
-      // First result with a runId is the latest (dirs sorted newest first)
-      if (!latestRunId && summary.runId) {
-        latestRunId = summary.runId;
-      }
-    } catch { continue; }
+  if (!latestBatch) {
+    throw new Error('No batch runs found in database. Run with --spec-dir first.');
   }
 
-  if (!latestRunId) {
-    throw new Error('No batch runs found (no runId in results). Run with --spec-dir first.');
-  }
+  const batchId = latestBatch.batchId;
 
-  // Filter failures from the same batch
-  const failedPaths = summaries
-    .filter(s => s.runId === latestRunId && s.status !== 'success' && s.specPath)
-    .map(s => s.specPath!);
+  // Get all failed specs from that batch
+  const failedRows = db.query(
+    `SELECT specPath FROM runs WHERE batchId = ? AND status != 'success' AND specPath IS NOT NULL`
+  ).all(batchId) as Array<{ specPath: string }>;
 
-  return { runId: latestRunId, specPaths: failedPaths };
+  const failedPaths = failedRows.map(r => r.specPath);
+
+  return { runId: batchId, specPaths: failedPaths };
 }
 
 // Find pending specs from the manifest

@@ -6,6 +6,7 @@ import { DIM, RESET, BOLD, CMD, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
 import { resolveConfig, ensureForgeDir } from './utils.js';
 import { parseSource } from './deps.js';
+import { getDb } from './db.js';
 
 // ── Spec complexity assessment ───────────────────────────────
 
@@ -248,60 +249,73 @@ export async function resetRunningSpecs(workingDir: string): Promise<number> {
 
 // ── Reconcile from results history ───────────────────────────
 
-/** Scan .forge/results/ and backfill manifest entries from summary.json files. */
+/** Query the runs DB table and reconcile manifest entries for spec-associated runs. */
 export async function reconcileSpecs(workingDir: string): Promise<number> {
-  const resultsDir = path.join(workingDir, '.forge', 'results');
-  let resultDirs: string[];
+  // Graceful degradation: if DB is unavailable, return 0 with no crash
+  const db = getDb(workingDir);
+  if (!db) return 0;
+
+  // Query all runs with a non-null specPath, ordered by createdAt
+  interface RunRecord {
+    id: string;
+    specPath: string;
+    status: string;
+    costUsd: number | null;
+    durationSeconds: number;
+    batchId: string | null;
+    createdAt: string;
+    cwd: string;
+  }
+
+  let rows: RunRecord[];
   try {
-    resultDirs = await fs.readdir(resultsDir);
+    rows = db.query(
+      `SELECT id, specPath, status, costUsd, durationSeconds, batchId, createdAt, cwd
+       FROM runs
+       WHERE specPath IS NOT NULL
+       ORDER BY createdAt ASC`,
+    ).all() as RunRecord[];
   } catch {
     return 0;
   }
 
-  // Collect all results with a specPath
+  if (rows.length === 0) return 0;
+
+  // Build records with normalized spec keys
   interface ResultRecord {
     specKey: string;
     runId: string;
     timestamp: string;
-    resultPath: string;
     status: 'passed' | 'failed';
     costUsd?: number;
     durationSeconds: number;
   }
 
   const records: ResultRecord[] = [];
-  for (const dir of resultDirs) {
-    const summaryPath = path.join(resultsDir, dir, 'summary.json');
-    try {
-      const content = await fs.readFile(summaryPath, 'utf-8');
-      const summary = JSON.parse(content);
-      if (!summary.specPath || summary.specPath.startsWith('/dev/fd/')) continue;
+  for (const row of rows) {
+    // Skip pipe-based specs
+    if (row.specPath.startsWith('/dev/fd/')) continue;
 
-      // Normalize specPath to relative key
-      let key: string;
-      if (path.isAbsolute(summary.specPath)) {
-        const rel = path.relative(summary.cwd || workingDir, summary.specPath);
-        key = rel.startsWith('..') || path.isAbsolute(rel) ? summary.specPath : rel;
-      } else {
-        key = summary.specPath;
-      }
+    // Normalize specPath to relative key
+    let key: string;
+    if (path.isAbsolute(row.specPath)) {
+      const rel = path.relative(row.cwd || workingDir, row.specPath);
+      key = rel.startsWith('..') || path.isAbsolute(rel) ? row.specPath : rel;
+    } else {
+      key = row.specPath;
+    }
 
-      records.push({
-        specKey: key,
-        runId: summary.runId || summary.startedAt,
-        timestamp: summary.startedAt,
-        resultPath: path.relative(workingDir, path.join(resultsDir, dir)),
-        status: summary.status === 'success' ? 'passed' : 'failed',
-        costUsd: summary.costUsd,
-        durationSeconds: summary.durationSeconds || 0,
-      });
-    } catch {}
+    records.push({
+      specKey: key,
+      runId: row.id,
+      timestamp: row.createdAt,
+      status: row.status === 'success' ? 'passed' : 'failed',
+      costUsd: row.costUsd ?? undefined,
+      durationSeconds: row.durationSeconds,
+    });
   }
 
   if (records.length === 0) return 0;
-
-  // Sort by timestamp so runs are appended in order
-  records.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
   let reconciled = 0;
   await withManifestLock(workingDir, (manifest) => {
@@ -321,7 +335,6 @@ export async function reconcileSpecs(workingDir: string): Promise<number> {
       entry.runs.push({
         runId: record.runId,
         timestamp: record.timestamp,
-        resultPath: record.resultPath,
         status: record.status,
         costUsd: record.costUsd,
         durationSeconds: record.durationSeconds,
@@ -505,7 +518,6 @@ export async function resolveSpecs(patterns: string[], workingDir: string): Prom
       entry.runs.push({
         runId: 'manual',
         timestamp: new Date().toISOString(),
-        resultPath: '',
         status: 'passed',
         durationSeconds: 0,
       });
@@ -765,7 +777,7 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
   if (options.reconcile) {
     const count = await reconcileSpecs(workingDir);
     if (count > 0) {
-      console.log(`${BOLD}Reconciled ${count} run(s) from .forge/results/${RESET}\n`);
+      console.log(`${BOLD}Reconciled ${count} run(s) from DB run history${RESET}\n`);
     } else {
       console.log(`${DIM}No new runs to reconcile.${RESET}\n`);
     }

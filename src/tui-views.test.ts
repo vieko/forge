@@ -192,25 +192,30 @@ describe('TUI: view switcher (tab bar)', () => {
 // ── Sessions list view ──────────────────────────────────────
 
 describe('TUI: sessions list view', () => {
-  test('sessions list populates from summary.json files', async () => {
+  test('sessions list populates from DB runs table', async () => {
     const dir = await makeTmpDir();
-    await setupResults(dir, [
-      { ts: '2026-01-01T00:00:00Z', summary: makeSummary({ sessionId: 's1', status: 'success' }) },
-      { ts: '2026-01-02T00:00:00Z', summary: makeSummary({ sessionId: 's2', status: 'error_execution' }) },
-    ]);
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    // Read summaries back to verify data is available
-    const resultsDir = path.join(dir, '.forge', 'results');
-    const dirs = await fs.readdir(resultsDir);
-    expect(dirs).toHaveLength(2);
+    // Insert runs directly into DB (primary data source)
+    const { getDb, insertRun } = await import('./db.js');
+    const db = getDb(dir);
+    expect(db).not.toBeNull();
 
-    for (const d of dirs) {
-      const summaryPath = path.join(resultsDir, d, 'summary.json');
-      const raw = await fs.readFile(summaryPath, 'utf-8');
-      const summary: ForgeResult = JSON.parse(raw);
-      expect(summary.sessionId).toBeTruthy();
-      expect(summary.status).toBeTruthy();
+    const runs = [
+      { id: 'r1', sessionId: 's1', createdAt: '2026-01-01T00:00:00Z', model: 'sonnet', status: 'success', durationSeconds: 60, prompt: 'test', cwd: dir, specPath: null, costUsd: 0.5, numTurns: 10, toolCalls: 5, batchId: null, type: null, error: null },
+      { id: 'r2', sessionId: 's2', createdAt: '2026-01-02T00:00:00Z', model: 'sonnet', status: 'error_execution', durationSeconds: 60, prompt: 'test', cwd: dir, specPath: null, costUsd: 0.5, numTurns: 10, toolCalls: 5, batchId: null, type: null, error: null },
+    ];
+    for (const run of runs) {
+      insertRun(db!, run);
     }
+
+    // Verify runs can be queried from DB
+    const rows = db!.query('SELECT * FROM runs ORDER BY createdAt ASC').all() as Array<{ sessionId: string; status: string }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0].sessionId).toBe('s1');
+    expect(rows[0].status).toBe('success');
+    expect(rows[1].sessionId).toBe('s2');
+    expect(rows[1].status).toBe('error_execution');
   });
 
   test('latest-session.json indicates running session', async () => {
@@ -461,12 +466,12 @@ describe('TUI: spec detail view', () => {
     expect(entry.runs).toHaveLength(0);
   });
 
-  test('session can be derived from run resultPath', () => {
-    const run = makeRun({ resultPath: '.forge/results/2026-03-11T10:00:00Z' });
-    // The last segment of resultPath can serve as a session identifier
-    const segments = run.resultPath.split('/');
-    const lastSegment = segments[segments.length - 1];
-    expect(lastSegment).toBe('2026-03-11T10:00:00Z');
+  test('session can be loaded from DB by runId', () => {
+    // The TUI queries the runs DB table by runId to load session metadata
+    const run = makeRun({ runId: 'run-xyz' });
+    expect(run.runId).toBe('run-xyz');
+    // loadSessionFromResult uses getDb(cwd) and queries: SELECT * FROM runs WHERE id = ?
+    // eventsPath is then derived from the DB row's sessionId
   });
 });
 

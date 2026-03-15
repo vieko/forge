@@ -1,8 +1,6 @@
-import type { ForgeResult } from './types.js';
-import { promises as fs } from 'fs';
 import path from 'path';
 import { DIM, RESET, BOLD, showBanner } from './display.js';
-import { getDbWithBackfill, queryStatusRuns, queryRecentTasks, getChildTasks } from './db.js';
+import { getDb, queryStatusRuns, queryRecentTasks, getChildTasks } from './db.js';
 import type { StatusRunRow, TaskRow } from './db.js';
 
 // ── Shared display logic ────────────────────────────────────
@@ -169,83 +167,25 @@ function showStatusFromDb(rows: StatusRunRow[], options: { all?: boolean; last?:
   printGroups(groupEntries, options);
 }
 
-// ── Filesystem fallback ─────────────────────────────────────
-
-async function showStatusFromFilesystem(
-  workingDir: string,
-  options: { all?: boolean; last?: number },
-): Promise<void> {
-  const resultsBase = path.join(workingDir, '.forge', 'results');
-
-  let dirs: string[];
-  try {
-    dirs = (await fs.readdir(resultsBase)).sort().reverse();
-  } catch {
-    console.log('No results found.');
-    return;
-  }
-
-  const summaries: ForgeResult[] = [];
-  for (const dir of dirs) {
-    try {
-      const summary: ForgeResult = JSON.parse(
-        await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
-      );
-      summaries.push(summary);
-    } catch { continue; }
-  }
-
-  if (summaries.length === 0) {
-    console.log('No results found.');
-    return;
-  }
-
-  // Group by runId
-  const groups = new Map<string, StatusSpec[]>();
-  for (const s of summaries) {
-    const key = s.runId || s.startedAt;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push({
-      specPath: s.specPath || null,
-      status: s.status,
-      costUsd: s.costUsd ?? null,
-      durationSeconds: s.durationSeconds,
-      startedAt: s.startedAt,
-      batchId: s.runId || null,
-    });
-  }
-
-  const groupEntries = Array.from(groups.entries()).sort((a, b) => {
-    return b[1][0].startedAt.localeCompare(a[1][0].startedAt);
-  });
-
-  printGroups(groupEntries, options);
-}
-
 // ── Main command ─────────────────────────────────────────────
 
 export async function showStatus(options: { cwd?: string; all?: boolean; last?: number }): Promise<void> {
   showBanner();
   const workingDir = options.cwd ? path.resolve(options.cwd) : process.cwd();
 
-  // Try DB-backed status first
-  try {
-    const db = await getDbWithBackfill(workingDir);
-    if (db) {
-      const rows = queryStatusRuns(db);
-      showStatusFromDb(rows, options);
-
-      // Show recent tasks (CLI + MCP)
-      const tasks = queryRecentTasks(db, options.all ? undefined : 20);
-      if (tasks.length > 0) {
-        printTasks(tasks, db, options);
-      }
-      return;
-    }
-  } catch {
-    // Fall through to filesystem
+  // Read exclusively from DB
+  const db = getDb(workingDir);
+  if (!db) {
+    console.log('No results found. (Database unavailable)');
+    return;
   }
 
-  // Fallback: filesystem scanning
-  await showStatusFromFilesystem(workingDir, options);
+  const rows = queryStatusRuns(db);
+  showStatusFromDb(rows, options);
+
+  // Show recent tasks (CLI + MCP)
+  const tasks = queryRecentTasks(db, options.all ? undefined : 20);
+  if (tasks.length > 0) {
+    printTasks(tasks, db, options);
+  }
 }

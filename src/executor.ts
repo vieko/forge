@@ -30,7 +30,7 @@ import { runProof } from './proof.js';
 import { runVerify as runVerifyFn } from './proof-runner.js';
 import { runForge } from './parallel.js';
 import { runPipeline } from './pipeline.js';
-import { FileSystemStateProvider } from './pipeline-state.js';
+import { SqliteStateProvider } from './db-pipeline-state.js';
 import { isInterrupted, triggerAbort } from './abort.js';
 import { DIM, RESET, BOLD } from './display.js';
 import { getConfig } from './config.js';
@@ -395,7 +395,9 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
         };
       }
 
-      const stateProvider = new FileSystemStateProvider(workingDir);
+      const db = getDb(workingDir);
+      if (!db) throw new Error('Database unavailable — cannot run pipeline');
+      const stateProvider = new SqliteStateProvider(db);
       await runPipeline(
         {
           goal: task.description || '',

@@ -4,6 +4,8 @@ import path from 'path';
 import os from 'os';
 import type { ForgeResult, SpecManifest } from './types.js';
 import { ForgeError } from './utils.js';
+import { getDb, insertRun, closeDb } from './db.js';
+import type { RunRow } from './db.js';
 
 // ── Mock boundary: runSingleSpec ─────────────────────────────
 // bun hoists mock.module before static imports, so parallel.ts
@@ -88,27 +90,6 @@ async function writeSpec(dir: string, relPath: string, content = '# Spec'): Prom
   return full;
 }
 
-async function writeResult(
-  dir: string,
-  timestamp: string,
-  overrides: Partial<ForgeResult> & { runId?: string },
-): Promise<void> {
-  const resultDir = path.join(dir, '.forge', 'results', timestamp);
-  await fs.mkdir(resultDir, { recursive: true });
-  const full: ForgeResult = {
-    startedAt: overrides.startedAt || timestamp,
-    completedAt: overrides.completedAt || timestamp,
-    durationSeconds: overrides.durationSeconds || 10,
-    status: overrides.status || 'success',
-    costUsd: overrides.costUsd ?? 0.5,
-    prompt: overrides.prompt || 'test',
-    model: overrides.model || 'sonnet',
-    cwd: overrides.cwd || dir,
-    ...overrides,
-  };
-  await fs.writeFile(path.join(resultDir, 'summary.json'), JSON.stringify(full));
-}
-
 function makeRun(overrides: any = {}) {
   return {
     runId: 'run-1',
@@ -121,8 +102,36 @@ function makeRun(overrides: any = {}) {
   };
 }
 
+function makeRunRow(overrides: Partial<RunRow> = {}): RunRow {
+  return {
+    id: `run-${Math.random().toString(36).slice(2, 10)}`,
+    specPath: null,
+    model: 'sonnet',
+    status: 'success',
+    costUsd: 0.5,
+    durationSeconds: 10,
+    numTurns: 5,
+    toolCalls: 3,
+    batchId: null,
+    type: 'run',
+    prompt: 'test',
+    cwd: '/tmp/test',
+    sessionId: null,
+    error: null,
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function insertRunInDir(dir: string, overrides: Partial<RunRow> = {}): void {
+  const db = getDb(dir);
+  if (!db) throw new Error('Failed to open DB for test');
+  insertRun(db, makeRunRow(overrides));
+}
+
 afterEach(async () => {
   for (const d of tmpDirs) {
+    closeDb(d);
     await fs.rm(d, { recursive: true, force: true }).catch(() => {});
   }
   tmpDirs = [];
@@ -297,25 +306,28 @@ describe('findFailedSpecs', () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
 
-    const runId = 'batch-001';
-    await writeResult(dir, '2026-03-01T10:00:00Z', {
-      runId,
+    const batchId = 'batch-001';
+    insertRunInDir(dir, {
+      batchId,
       status: 'error_execution',
       specPath: path.join(dir, 'specs/auth.md'),
+      createdAt: '2026-03-01T10:00:00Z',
     });
-    await writeResult(dir, '2026-03-01T10:01:00Z', {
-      runId,
+    insertRunInDir(dir, {
+      batchId,
       status: 'success',
       specPath: path.join(dir, 'specs/users.md'),
+      createdAt: '2026-03-01T10:01:00Z',
     });
-    await writeResult(dir, '2026-03-01T10:02:00Z', {
-      runId,
+    insertRunInDir(dir, {
+      batchId,
       status: 'error_execution',
       specPath: path.join(dir, 'specs/api.md'),
+      createdAt: '2026-03-01T10:02:00Z',
     });
 
     const result = await findFailedSpecs(dir);
-    expect(result.runId).toBe(runId);
+    expect(result.runId).toBe(batchId);
     expect(result.specPaths).toHaveLength(2);
     expect(result.specPaths).toContain(path.join(dir, 'specs/auth.md'));
     expect(result.specPaths).toContain(path.join(dir, 'specs/api.md'));
@@ -325,83 +337,73 @@ describe('findFailedSpecs', () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
 
-    const runId = 'batch-002';
-    await writeResult(dir, '2026-03-01T11:00:00Z', {
-      runId,
+    const batchId = 'batch-002';
+    insertRunInDir(dir, {
+      batchId,
       status: 'success',
       specPath: path.join(dir, 'specs/auth.md'),
+      createdAt: '2026-03-01T11:00:00Z',
     });
-    await writeResult(dir, '2026-03-01T11:01:00Z', {
-      runId,
+    insertRunInDir(dir, {
+      batchId,
       status: 'success',
       specPath: path.join(dir, 'specs/users.md'),
+      createdAt: '2026-03-01T11:01:00Z',
     });
 
     const result = await findFailedSpecs(dir);
-    expect(result.runId).toBe(runId);
+    expect(result.runId).toBe(batchId);
     expect(result.specPaths).toHaveLength(0);
   });
 
-  test('throws when .forge/results/ does not exist', async () => {
-    const dir = await makeTmpDir();
-    await expect(findFailedSpecs(dir)).rejects.toThrow('No results found');
-  });
-
-  test('throws when no runId found in any result', async () => {
+  test('throws when DB has no batch runs', async () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
 
-    // Result without a runId (single-spec run, not a batch)
-    await writeResult(dir, '2026-03-01T12:00:00Z', {
+    // Ensure DB exists but has no runs
+    const db = getDb(dir);
+    expect(db).not.toBeNull();
+
+    await expect(findFailedSpecs(dir)).rejects.toThrow('No batch runs found');
+  });
+
+  test('throws when only non-batch runs exist (no batchId)', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+
+    // Run without a batchId (single-spec run, not a batch)
+    insertRunInDir(dir, {
+      batchId: null,
       status: 'success',
-      runId: undefined,
+      createdAt: '2026-03-01T12:00:00Z',
     });
 
     await expect(findFailedSpecs(dir)).rejects.toThrow('No batch runs found');
   });
 
-  test('only returns failures from the latest batch runId', async () => {
+  test('only returns failures from the latest batch', async () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
 
     // Older batch
-    await writeResult(dir, '2026-03-01T08:00:00Z', {
-      runId: 'old-batch',
+    insertRunInDir(dir, {
+      batchId: 'old-batch',
       status: 'error_execution',
       specPath: path.join(dir, 'specs/old-fail.md'),
+      createdAt: '2026-03-01T08:00:00Z',
     });
 
     // Newer batch
-    await writeResult(dir, '2026-03-01T10:00:00Z', {
-      runId: 'new-batch',
+    insertRunInDir(dir, {
+      batchId: 'new-batch',
       status: 'error_execution',
       specPath: path.join(dir, 'specs/new-fail.md'),
+      createdAt: '2026-03-01T10:00:00Z',
     });
 
     const result = await findFailedSpecs(dir);
     expect(result.runId).toBe('new-batch');
     expect(result.specPaths).toEqual([path.join(dir, 'specs/new-fail.md')]);
-  });
-
-  test('ignores results with missing or corrupt summary.json', async () => {
-    const dir = await makeTmpDir();
-    await setupForge(dir);
-
-    // Valid result
-    await writeResult(dir, '2026-03-01T10:00:00Z', {
-      runId: 'batch-ok',
-      status: 'error_execution',
-      specPath: path.join(dir, 'specs/fail.md'),
-    });
-
-    // Corrupt result dir (no summary.json)
-    await fs.mkdir(path.join(dir, '.forge', 'results', '2026-03-01T10:05:00Z'), {
-      recursive: true,
-    });
-
-    const result = await findFailedSpecs(dir);
-    expect(result.runId).toBe('batch-ok');
-    expect(result.specPaths).toHaveLength(1);
   });
 });
 

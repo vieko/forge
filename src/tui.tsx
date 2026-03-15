@@ -10,18 +10,15 @@ import { join, basename, dirname } from 'path';
 import type { ForgeResult, SessionEvent, SpecManifest, SpecEntry, SpecRun } from './types.js';
 import type { Pipeline, Stage, GateKey, PipelineStatus, StageStatus, StageName } from './pipeline-types.js';
 import { loadManifest } from './specs.js';
-import { FileSystemStateProvider } from './pipeline-state.js';
 import { SqliteStateProvider } from './db-pipeline-state.js';
 import { createFileWatcher, type FileWatcherHandle } from './file-watcher.js';
 import {
   getDb,
-  getDbWithBackfill,
-  ensureSessionsBackfill,
   queryAllSessions,
   getActiveTasks,
   getRecentCompletedTasks,
 } from './db.js';
-import type { TaskRow } from './db.js';
+import type { TaskRow, RunRow } from './db.js';
 import type { Database } from 'bun:sqlite';
 import { isExecutorRunning, spawnDetachedExecutor } from './executor.js';
 
@@ -419,7 +416,7 @@ function useDbPoll(db: Database | null, intervalMs: number = 1000): number {
 /**
  * Load sessions from the sessions DB table, converting rows to SessionInfo[].
  * Running sessions (status = 'running' or null) are detected from the DB.
- * Falls back to the filesystem-based loadSessions() if DB is unavailable.
+ * The DB is the single source of truth for session metadata.
  */
 function loadSessionsFromDb(db: Database, cwd: string): SessionInfo[] {
   const rows = queryAllSessions(db, 200);
@@ -491,158 +488,6 @@ function enrichSessionsWithRuns(sessions: SessionInfo[], db: Database): void {
 }
 
 // ── Data Loading ─────────────────────────────────────────────
-
-async function loadSessions(cwd: string): Promise<SessionInfo[]> {
-  const sessions: SessionInfo[] = [];
-  const resultsDir = join(cwd, '.forge', 'results');
-  const sessionsDir = join(cwd, '.forge', 'sessions');
-  const completedSessionIds = new Set<string>();
-
-  // Load completed sessions from results
-  try {
-    const dirs = await readdir(resultsDir);
-    for (const dir of dirs) {
-      try {
-        const summaryPath = join(resultsDir, dir, 'summary.json');
-        const raw = await readFile(summaryPath, 'utf-8');
-        const result: ForgeResult = JSON.parse(raw);
-        const specName = result.specPath
-          ? basename(result.specPath, '.md')
-          : (result.type || 'run');
-
-        if (result.sessionId) {
-          completedSessionIds.add(result.sessionId);
-        }
-
-        sessions.push({
-          sessionId: result.sessionId || dir,
-          status: result.status,
-          specName,
-          specPath: result.specPath,
-          model: result.model || '--',
-          costUsd: result.costUsd,
-          durationSeconds: result.durationSeconds,
-          startedAt: result.startedAt,
-          eventsPath: deriveEventsPath(result.logPath, result.sessionId, cwd),
-          isRunning: false,
-          type: result.type,
-        });
-      } catch {
-        // Skip malformed results
-      }
-    }
-  } catch {
-    // No results directory
-  }
-
-  // Detect running sessions by scanning .forge/sessions/ directories
-  // A session is "running" if it has events.jsonl but no matching completed result
-  const detectedRunningIds = new Set<string>();
-  try {
-    const sessionDirs = await readdir(sessionsDir);
-    for (const sid of sessionDirs) {
-      if (completedSessionIds.has(sid)) continue;
-
-      // Check if events.jsonl exists and is fresh (modified within last 5 minutes)
-      const eventsPath = join(sessionsDir, sid, 'events.jsonl');
-      try {
-        const st = await stat(eventsPath);
-        const ageMs = Date.now() - st.mtimeMs;
-        if (ageMs > 5 * 60 * 1000) continue; // Stale — not actively running
-      } catch {
-        continue; // No events.jsonl — not a valid session dir
-      }
-
-      // Read first and last lines of events.jsonl for metadata + completion status
-      let specName = 'running';
-      let model = '--';
-      let startedAt = new Date().toISOString();
-      let specPath: string | undefined;
-      let commandType: string | undefined;
-      let endStatus: string | undefined;
-      try {
-        const raw = await readFile(eventsPath, 'utf-8');
-        const firstNewline = raw.indexOf('\n');
-        const firstLine = firstNewline > 0 ? raw.substring(0, firstNewline) : raw.trim();
-        if (firstLine) {
-          const startEvent = JSON.parse(firstLine) as SessionEvent;
-          if (startEvent.type === 'session_start') {
-            commandType = startEvent.commandType;
-            specName = startEvent.specPath
-              ? basename(startEvent.specPath, '.md')
-              : (commandType || 'running');
-            model = startEvent.model || '--';
-            startedAt = startEvent.timestamp;
-            specPath = startEvent.specPath;
-          }
-        }
-        // Check last line for session_end (completed but no result in .forge/results/)
-        const lastNewline = raw.trimEnd().lastIndexOf('\n');
-        const lastLine = lastNewline >= 0 ? raw.substring(lastNewline + 1).trim() : raw.trim();
-        if (lastLine && lastLine !== firstLine) {
-          try {
-            const endEvent = JSON.parse(lastLine) as SessionEvent;
-            if (endEvent.type === 'session_end') {
-              endStatus = endEvent.status === 'success' ? 'success' : 'error_execution';
-            }
-          } catch { /* not valid JSON — still running */ }
-        }
-      } catch {
-        // Could not read metadata — use defaults
-      }
-
-      const isRunning = !endStatus;
-      if (isRunning) detectedRunningIds.add(sid);
-
-      sessions.push({
-        sessionId: sid,
-        status: endStatus || 'running',
-        specName,
-        specPath,
-        model,
-        costUsd: undefined,
-        durationSeconds: undefined,
-        startedAt,
-        eventsPath,
-        isRunning,
-        type: commandType,
-      });
-    }
-  } catch {
-    // No sessions directory
-  }
-
-  // Fallback: check latest-session.json for running sessions not already detected
-  try {
-    const latestPath = join(cwd, '.forge', 'latest-session.json');
-    const raw = await readFile(latestPath, 'utf-8');
-    const latest = JSON.parse(raw);
-
-    if (latest.sessionId && !completedSessionIds.has(latest.sessionId) && !detectedRunningIds.has(latest.sessionId)) {
-      sessions.push({
-        sessionId: latest.sessionId,
-        status: 'running',
-        specName: latest.prompt ? truncate(latest.prompt, 30) : 'running',
-        model: latest.model || '--',
-        costUsd: undefined,
-        durationSeconds: undefined,
-        startedAt: latest.startedAt || new Date().toISOString(),
-        eventsPath: deriveEventsPath(latest.logPath, latest.sessionId, cwd),
-        isRunning: true,
-        type: latest.type,
-      });
-    }
-  } catch {
-    // No running session
-  }
-
-  // Sort: running sessions first, then by recency (newest first)
-  sessions.sort((a, b) => {
-    if (a.isRunning !== b.isRunning) return a.isRunning ? -1 : 1;
-    return b.startedAt.localeCompare(a.startedAt);
-  });
-  return sessions;
-}
 
 async function loadEvents(eventsPath: string): Promise<{ events: SessionEvent[]; legacy: boolean }> {
   // Try structured events.jsonl first
@@ -858,23 +703,26 @@ function useIncrementalEvents(
   return { events, isLegacy };
 }
 
-async function loadSessionFromResult(resultPath: string, cwd: string, entry: SpecEntry): Promise<SessionInfo | null> {
+function loadSessionFromResult(run: SpecRun, cwd: string, entry: SpecEntry): SessionInfo | null {
   try {
-    const fullPath = join(cwd, resultPath, 'summary.json');
-    const raw = await readFile(fullPath, 'utf-8');
-    const result: ForgeResult = JSON.parse(raw);
+    const db = getDb(cwd);
+    if (!db) return null;
+
+    const row = db.query('SELECT * FROM runs WHERE id = ?').get(run.runId) as RunRow | null;
+    if (!row) return null;
+
     return {
-      sessionId: result.sessionId || basename(resultPath),
-      status: result.status,
+      sessionId: row.sessionId || run.runId,
+      status: row.status,
       specName: basename(entry.spec, '.md'),
-      specPath: result.specPath,
-      model: result.model || '--',
-      costUsd: result.costUsd,
-      durationSeconds: result.durationSeconds,
-      startedAt: result.startedAt,
-      eventsPath: deriveEventsPath(result.logPath, result.sessionId, cwd),
+      specPath: row.specPath ?? undefined,
+      model: row.model || '--',
+      costUsd: row.costUsd ?? undefined,
+      durationSeconds: row.durationSeconds,
+      startedAt: row.createdAt,
+      eventsPath: deriveEventsPath(undefined, row.sessionId ?? undefined, cwd),
       isRunning: false,
-      type: result.type,
+      type: row.type ?? undefined,
     };
   } catch {
     return null;
@@ -2179,10 +2027,9 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const { width } = useTerminalDimensions();
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
-  const fsProviderRef = useRef(new FileSystemStateProvider(cwd));
   const toast = useToast();
 
-  // DB + provider: use state so changes trigger re-render
+  // DB + provider
   const pipelineDb = useMemo(() => getDb(cwd), [cwd]);
   const dbProvider = useMemo(
     () => pipelineDb ? new SqliteStateProvider(pipelineDb) : null,
@@ -2190,12 +2037,12 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
   );
   const pipelineDbVersion = useDbPoll(pipelineDb, 1000);
 
-  // Load pipelines from DB (or filesystem fallback) when data_version changes
+  // Load pipelines from DB when data_version changes
   useEffect(() => {
     let mounted = true;
     const load = async () => {
-      const provider = dbProvider || fsProviderRef.current;
-      const loaded = await provider.listPipelines();
+      if (!dbProvider) return;
+      const loaded = await dbProvider.listPipelines();
       if (mounted) setPipelines(loaded);
     };
     load();
@@ -2229,8 +2076,11 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
 
   const handleNewPipeline = async () => {
     // Guard: check for already-active pipeline
-    const provider = dbProvider || fsProviderRef.current;
-    const all = await provider.listPipelines();
+    if (!dbProvider) {
+      toast.show('Database unavailable', '#888888');
+      return;
+    }
+    const all = await dbProvider.listPipelines();
     const active = all.some(p => p.status === 'running' || p.status === 'paused_at_gate');
     if (active) {
       toast.show('Pipeline already active', '#888888');
@@ -2360,10 +2210,10 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
   const [pipeline, setPipeline] = useState(initialPipeline);
   const { width } = useTerminalDimensions();
 
-  // Provider: prefer SqliteStateProvider, fall back to FileSystemStateProvider
+  // Provider: SqliteStateProvider (sole provider)
   const detailDb = useMemo(() => getDb(cwd), [cwd]);
-  const provider = useMemo<SqliteStateProvider | FileSystemStateProvider>(
-    () => detailDb ? new SqliteStateProvider(detailDb) : new FileSystemStateProvider(cwd),
+  const provider = useMemo<SqliteStateProvider | null>(
+    () => detailDb ? new SqliteStateProvider(detailDb) : null,
     [detailDb, cwd]
   );
 
@@ -2385,6 +2235,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
     if (pipeline.status !== 'running' && pipeline.status !== 'paused_at_gate') return;
     let mounted = true;
     const reload = async () => {
+      if (!provider) return;
       const updated = await provider.loadPipeline(pipeline.id);
       if (mounted && updated) setPipeline(updated);
     };
@@ -2435,6 +2286,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
   // ── Pipeline mutation actions ──────────────────────────────
 
   const handleAdvanceGate = async () => {
+    if (!provider) return;
     const gk = findWaitingGateKey(pipeline);
     if (!gk) {
       toast.show('No gate waiting for approval', '#888888');
@@ -2451,6 +2303,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
   };
 
   const handleSkipGate = async () => {
+    if (!provider) return;
     const gk = findWaitingGateKey(pipeline);
     if (!gk) {
       toast.show('No gate waiting to skip', '#888888');
@@ -2469,6 +2322,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
   };
 
   const handlePause = async () => {
+    if (!provider) return;
     if (pipeline.status !== 'running') {
       toast.show('Pipeline is not running', '#888888');
       return;
@@ -2488,6 +2342,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
   };
 
   const handleCancel = async () => {
+    if (!provider) return;
     if (pipeline.status !== 'running' && pipeline.status !== 'paused_at_gate') {
       toast.show('Pipeline is not active', '#888888');
       return;
@@ -2509,6 +2364,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
   };
 
   const handleRetry = async () => {
+    if (!provider) return;
     const failedStage = pipeline.stages.find(s => s.status === 'failed');
     if (!failedStage || pipeline.status !== 'failed') {
       toast.show('No failed stage to retry', '#888888');
@@ -2698,31 +2554,23 @@ function App({ cwd }: { cwd: string }) {
   const [db, setDb] = useState<Database | null>(null);
   const dbInitRef = useRef(false);
 
-  // Initialize DB and run backfill on mount
+  // Initialize DB on mount
   useEffect(() => {
     if (dbInitRef.current) return;
     dbInitRef.current = true;
 
-    const init = async () => {
-      const instance = await getDbWithBackfill(cwd);
-      if (instance) {
-        await ensureSessionsBackfill(instance, cwd);
-        setDb(instance);
-      }
-    };
-    init();
+    const instance = getDb(cwd);
+    if (instance) {
+      setDb(instance);
+    }
   }, [cwd]);
 
   // Poll PRAGMA data_version for DB change detection (~1s interval)
   const dbVersion = useDbPoll(db, 1000);
 
-  // Load sessions from DB when data_version changes (replaces 3 file watchers)
+  // Load sessions from DB when data_version changes (replaces file watchers)
   useEffect(() => {
-    if (!db) {
-      // Fallback to filesystem if DB unavailable
-      loadSessions(cwd).then(loaded => setSessions(loaded));
-      return;
-    }
+    if (!db) return;
 
     const loaded = loadSessionsFromDb(db, cwd);
     enrichSessionsWithRuns(loaded, db);
@@ -2858,8 +2706,8 @@ function App({ cwd }: { cwd: string }) {
           <SpecDetail
             entry={selectedSpecEntry}
             cwd={cwd}
-            onSelectRun={async (run) => {
-              const session = await loadSessionFromResult(run.resultPath, cwd, selectedSpecEntry);
+            onSelectRun={(run) => {
+              const session = loadSessionFromResult(run, cwd, selectedSpecEntry);
               if (session) {
                 setSelectedRunSession(session);
                 setSpecsView('runDetail');

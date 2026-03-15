@@ -2,9 +2,13 @@ import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { SpecManifest, ForgeResult } from './types.js';
+import { getDb, insertRun, closeDb } from './db.js';
+import { SqliteStateProvider } from './db-pipeline-state.js';
+import type { Pipeline } from './pipeline-types.js';
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -46,6 +50,44 @@ function makeSummary(overrides: Partial<ForgeResult> = {}): ForgeResult {
     cwd: '/test',
     ...overrides,
   };
+}
+
+/** Insert runs into the SQLite DB so the MCP server (which reads from DB) can find them. */
+function setupRunsInDb(dir: string, results: Array<{ ts: string; summary: ForgeResult }>): void {
+  const db = getDb(dir);
+  if (!db) throw new Error('Failed to open DB for test setup');
+
+  for (const { ts, summary } of results) {
+    const createdAt = summary.startedAt || ts.replace(/T(\d{2})-(\d{2})-(\d{2})Z/, 'T$1:$2:$3Z');
+    insertRun(db, {
+      id: crypto.randomBytes(8).toString('hex'),
+      specPath: summary.specPath ?? null,
+      model: summary.model || 'opus',
+      status: summary.status || 'success',
+      costUsd: summary.costUsd ?? null,
+      durationSeconds: summary.durationSeconds || 60,
+      numTurns: summary.numTurns ?? null,
+      toolCalls: null,
+      batchId: summary.runId ?? null,
+      type: summary.type ?? 'run',
+      prompt: summary.prompt || 'test prompt',
+      cwd: summary.cwd || dir,
+      sessionId: summary.sessionId ?? null,
+      error: summary.error ?? null,
+      createdAt,
+    });
+  }
+
+  closeDb(dir);
+}
+
+/** Insert pipeline into SQLite DB so the MCP server (which reads from DB) can find it. */
+async function setupPipelineInDb(dir: string, pipelineData: Pipeline): Promise<void> {
+  const db = getDb(dir);
+  if (!db) throw new Error('Failed to open DB for pipeline setup');
+  const provider = new SqliteStateProvider(db);
+  await provider.savePipeline(pipelineData);
+  closeDb(dir);
 }
 
 function makeManifest(specs: SpecManifest['specs']): SpecManifest {
@@ -271,10 +313,12 @@ describe('forge_status', () => {
   test('returns latest run by default', async () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
-    await setupResults(dir, [
+    const results = [
       { ts: '2026-01-01T00-00-00Z', summary: makeSummary({ startedAt: '2026-01-01T00:00:00Z', runId: 'batch-1' }) },
       { ts: '2026-01-02T00-00-00Z', summary: makeSummary({ startedAt: '2026-01-02T00:00:00Z', runId: 'batch-2' }) },
-    ]);
+    ];
+    await setupResults(dir, results);
+    setupRunsInDb(dir, results);
 
     const { json } = await callTool('forge_status', { cwd: dir });
     expect(json.runs.length).toBe(1);
@@ -284,10 +328,12 @@ describe('forge_status', () => {
   test('returns all runs with all flag', async () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
-    await setupResults(dir, [
+    const results = [
       { ts: '2026-01-01T00-00-00Z', summary: makeSummary({ startedAt: '2026-01-01T00:00:00Z', runId: 'batch-1' }) },
       { ts: '2026-01-02T00-00-00Z', summary: makeSummary({ startedAt: '2026-01-02T00:00:00Z', runId: 'batch-2' }) },
-    ]);
+    ];
+    await setupResults(dir, results);
+    setupRunsInDb(dir, results);
 
     const { json } = await callTool('forge_status', { cwd: dir, all: true });
     expect(json.runs.length).toBe(2);
@@ -296,11 +342,13 @@ describe('forge_status', () => {
   test('respects count parameter', async () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
-    await setupResults(dir, [
+    const results = [
       { ts: '2026-01-01T00-00-00Z', summary: makeSummary({ startedAt: '2026-01-01T00:00:00Z', runId: 'b1' }) },
       { ts: '2026-01-02T00-00-00Z', summary: makeSummary({ startedAt: '2026-01-02T00:00:00Z', runId: 'b2' }) },
       { ts: '2026-01-03T00-00-00Z', summary: makeSummary({ startedAt: '2026-01-03T00:00:00Z', runId: 'b3' }) },
-    ]);
+    ];
+    await setupResults(dir, results);
+    setupRunsInDb(dir, results);
 
     const { json } = await callTool('forge_status', { cwd: dir, count: 2 });
     expect(json.runs.length).toBe(2);
@@ -312,10 +360,12 @@ describe('forge_status', () => {
   test('groups specs by runId', async () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
-    await setupResults(dir, [
+    const results = [
       { ts: '2026-01-01T00-00-00Z', summary: makeSummary({ startedAt: '2026-01-01T00:00:00Z', runId: 'batch-1', specPath: 'a.md', costUsd: 1.00 }) },
       { ts: '2026-01-01T00-00-01Z', summary: makeSummary({ startedAt: '2026-01-01T00:00:01Z', runId: 'batch-1', specPath: 'b.md', costUsd: 2.00 }) },
-    ]);
+    ];
+    await setupResults(dir, results);
+    setupRunsInDb(dir, results);
 
     const { json } = await callTool('forge_status', { cwd: dir });
     expect(json.runs.length).toBe(1);
@@ -326,7 +376,7 @@ describe('forge_status', () => {
   test('run entry includes spec metadata', async () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
-    await setupResults(dir, [
+    const results = [
       {
         ts: '2026-01-01T00-00-00Z',
         summary: makeSummary({
@@ -339,7 +389,9 @@ describe('forge_status', () => {
           durationSeconds: 120,
         }),
       },
-    ]);
+    ];
+    await setupResults(dir, results);
+    setupRunsInDb(dir, results);
 
     const { json } = await callTool('forge_status', { cwd: dir });
     const spec = json.runs[0].specs[0];
@@ -365,11 +417,13 @@ describe('forge_stats', () => {
   test('returns aggregate statistics', async () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
-    await setupResults(dir, [
-      { ts: '2026-01-01T00-00-00Z', summary: makeSummary({ status: 'success', costUsd: 1.00, durationSeconds: 60, numTurns: 10 }) },
-      { ts: '2026-01-01T00-00-01Z', summary: makeSummary({ status: 'success', costUsd: 2.00, durationSeconds: 120, numTurns: 20 }) },
-      { ts: '2026-01-01T00-00-02Z', summary: makeSummary({ status: 'error_execution', costUsd: 0.50, durationSeconds: 30 }) },
-    ]);
+    const results = [
+      { ts: '2026-01-01T00-00-00Z', summary: makeSummary({ status: 'success' as const, costUsd: 1.00, durationSeconds: 60, numTurns: 10 }) },
+      { ts: '2026-01-01T00-00-01Z', summary: makeSummary({ status: 'success' as const, costUsd: 2.00, durationSeconds: 120, numTurns: 20 }) },
+      { ts: '2026-01-01T00-00-02Z', summary: makeSummary({ status: 'error_execution' as const, costUsd: 0.50, durationSeconds: 30 }) },
+    ];
+    await setupResults(dir, results);
+    setupRunsInDb(dir, results);
 
     const { json } = await callTool('forge_stats', { cwd: dir });
     expect(json.total).toBe(3);
@@ -384,10 +438,12 @@ describe('forge_stats', () => {
   test('filters by since date', async () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
-    await setupResults(dir, [
+    const results = [
       { ts: '2026-01-01T00-00-00Z', summary: makeSummary({ startedAt: '2026-01-01T00:00:00Z', costUsd: 1.00 }) },
       { ts: '2026-02-01T00-00-00Z', summary: makeSummary({ startedAt: '2026-02-01T00:00:00Z', costUsd: 2.00 }) },
-    ]);
+    ];
+    await setupResults(dir, results);
+    setupRunsInDb(dir, results);
 
     const { json } = await callTool('forge_stats', { cwd: dir, since: '2026-01-15' });
     expect(json.total).toBe(1);
@@ -397,9 +453,11 @@ describe('forge_stats', () => {
   test('returns message when no runs match since filter', async () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
-    await setupResults(dir, [
+    const results = [
       { ts: '2026-01-01T00-00-00Z', summary: makeSummary({ startedAt: '2026-01-01T00:00:00Z' }) },
-    ]);
+    ];
+    await setupResults(dir, results);
+    setupRunsInDb(dir, results);
 
     const { json } = await callTool('forge_stats', { cwd: dir, since: '2026-12-01' });
     expect(json.message).toContain('No runs found since');
@@ -417,11 +475,12 @@ describe('forge_stats', () => {
         ],
       }),
     ]));
-    // Results dir needed for DB backfill — specPath must match manifest entry
-    await setupResults(dir, [
+    const results = [
       { ts: '2026-01-01T00-00-00Z', summary: makeSummary({ specPath: 'auth.md' }) },
       { ts: '2026-01-02T00-00-00Z', summary: makeSummary({ specPath: 'auth.md' }) },
-    ]);
+    ];
+    await setupResults(dir, results);
+    setupRunsInDb(dir, results);
 
     const { json } = await callTool('forge_stats', { cwd: dir, by_spec: true });
     expect(json.by_spec).toBeDefined();
@@ -433,11 +492,13 @@ describe('forge_stats', () => {
   test('by_model returns per-model breakdown', async () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
-    await setupResults(dir, [
+    const results = [
       { ts: '2026-01-01T00-00-00Z', summary: makeSummary({ model: 'opus', costUsd: 3.00 }) },
       { ts: '2026-01-01T00-00-01Z', summary: makeSummary({ model: 'sonnet', costUsd: 0.50 }) },
       { ts: '2026-01-01T00-00-02Z', summary: makeSummary({ model: 'opus', costUsd: 2.00 }) },
-    ]);
+    ];
+    await setupResults(dir, results);
+    setupRunsInDb(dir, results);
 
     const { json } = await callTool('forge_stats', { cwd: dir, by_model: true });
     expect(json.by_model).toBeDefined();
@@ -757,8 +818,8 @@ describe('forge_pipeline', () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
 
-    // Write a pipeline.json directly
-    const pipeline = {
+    // Insert pipeline into SQLite DB
+    const pipeline: Pipeline = {
       id: 'test-pipe',
       goal: 'build auth system',
       status: 'running',
@@ -779,10 +840,7 @@ describe('forge_pipeline', () => {
       createdAt: '2026-03-06T00:00:00Z',
       updatedAt: '2026-03-06T00:01:00Z',
     };
-    await fs.writeFile(
-      path.join(dir, '.forge', 'pipeline.json'),
-      JSON.stringify(pipeline),
-    );
+    await setupPipelineInDb(dir, pipeline);
 
     const { json } = await callTool('forge_pipeline', { cwd: dir });
     expect(json.id).toBe('test-pipe');
@@ -804,7 +862,7 @@ describe('forge_pipeline', () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
 
-    const pipeline = {
+    const pipeline: Pipeline = {
       id: 'paused-pipe',
       goal: 'test gates',
       status: 'paused_at_gate',
@@ -825,10 +883,7 @@ describe('forge_pipeline', () => {
       createdAt: '2026-03-06T00:00:00Z',
       updatedAt: '2026-03-06T00:02:00Z',
     };
-    await fs.writeFile(
-      path.join(dir, '.forge', 'pipeline.json'),
-      JSON.stringify(pipeline),
-    );
+    await setupPipelineInDb(dir, pipeline);
 
     const { json } = await callTool('forge_pipeline', { cwd: dir });
     expect(json.status).toBe('paused_at_gate');
@@ -840,7 +895,7 @@ describe('forge_pipeline', () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
 
-    const pipeline = {
+    const pipeline: Pipeline = {
       id: 'done-pipe',
       goal: 'done',
       status: 'completed',
@@ -861,10 +916,7 @@ describe('forge_pipeline', () => {
       createdAt: '2026-03-06T00:00:00Z',
       updatedAt: '2026-03-06T00:05:00Z',
     };
-    await fs.writeFile(
-      path.join(dir, '.forge', 'pipeline.json'),
-      JSON.stringify(pipeline),
-    );
+    await setupPipelineInDb(dir, pipeline);
 
     const { json } = await callTool('forge_pipeline', { cwd: dir });
     expect(json.status).toBe('completed');

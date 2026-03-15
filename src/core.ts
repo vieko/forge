@@ -259,7 +259,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
           if (!quiet && forkSession && resume) console.log(`${DIM}[forge]${RESET} Forked from: ${DIM}${resume}${RESET}`);
           persistSession().catch(() => {});
 
-          // Insert session row into DB (fire-and-forget, graceful degradation)
+          // Insert session row into DB — primary store for session metadata
           if (sessionId) {
             try {
               const db = getDb(persistBase);
@@ -274,7 +274,7 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
                 });
               }
             } catch {
-              // Never crash on DB failures — filesystem remains authoritative
+              // Never crash on DB failures
             }
           }
 

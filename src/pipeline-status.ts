@@ -1,12 +1,13 @@
 // ── Pipeline Status Display ──────────────────────────────────
 //
 // Renders pipeline state for the `forge pipeline status` command.
-// Reads persisted state via FileSystemStateProvider and displays
+// Reads persisted state via SqliteStateProvider and displays
 // stages, gates, cost, and duration using existing display conventions.
 
 import type { Pipeline, StageName, GateKey } from './pipeline-types.js';
 import { STAGE_ORDER } from './pipeline-types.js';
-import { FileSystemStateProvider } from './pipeline-state.js';
+import { SqliteStateProvider } from './db-pipeline-state.js';
+import { getDb } from './db.js';
 import { DIM, RESET, BOLD, CMD, showBanner } from './display.js';
 import { formatElapsed } from './display.js';
 import path from 'path';
@@ -141,7 +142,12 @@ export interface PipelineStatusOptions {
 export async function showPipelineStatus(options: PipelineStatusOptions): Promise<void> {
   showBanner();
   const workingDir = options.cwd ? path.resolve(options.cwd) : process.cwd();
-  const provider = new FileSystemStateProvider(workingDir);
+  const db = getDb(workingDir);
+  if (!db) {
+    console.log('Database unavailable -- cannot load pipeline state.');
+    return;
+  }
+  const provider = new SqliteStateProvider(db);
 
   if (options.id) {
     // Show a specific pipeline
