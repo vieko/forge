@@ -511,6 +511,61 @@ describe('validateDeps (manifest-aware)', () => {
     const warnings = validateDeps(specs, manifest);
     expect(warnings).toEqual([]);
   });
+
+  test('full key match distinguishes same basename in different directories', () => {
+    const specs: SpecDep[] = [
+      { name: 'child.md', path: '/child.md', depends: ['auth/login.md'] },
+    ];
+    // auth/login.md is passed, setup/login.md is failed — same basename
+    const manifest = makeManifest([
+      { spec: 'auth/login.md', status: 'passed' },
+      { spec: 'setup/login.md', status: 'failed' },
+    ]);
+    // Should match the full key auth/login.md (passed), not the basename fallback
+    expect(() => validateDeps(specs, manifest)).not.toThrow();
+    expect(validateDeps(specs, manifest)).toEqual([]);
+  });
+
+  test('full key match returns warning for non-passed dep even if basename is passed elsewhere', () => {
+    const specs: SpecDep[] = [
+      { name: 'child.md', path: '/child.md', depends: ['setup/login.md'] },
+    ];
+    const manifest = makeManifest([
+      { spec: 'auth/login.md', status: 'passed' },
+      { spec: 'setup/login.md', status: 'failed' },
+    ]);
+    // Should match full key setup/login.md (failed), not basename fallback login.md (passed)
+    const warnings = validateDeps(specs, manifest);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('setup/login.md');
+    expect(warnings[0]).toContain('status: failed');
+  });
+
+  test('bare filename falls back to basename when no full key matches', () => {
+    const specs: SpecDep[] = [
+      { name: 'child.md', path: '/child.md', depends: ['login.md'] },
+    ];
+    const manifest = makeManifest([
+      { spec: 'auth/login.md', status: 'passed' },
+    ]);
+    // login.md has no full key match, falls back to basename match -> passed
+    expect(() => validateDeps(specs, manifest)).not.toThrow();
+    expect(validateDeps(specs, manifest)).toEqual([]);
+  });
+
+  test('bare filename basename fallback warns when only non-passed entries exist', () => {
+    const specs: SpecDep[] = [
+      { name: 'child.md', path: '/child.md', depends: ['login.md'] },
+    ];
+    const manifest = makeManifest([
+      { spec: 'auth/login.md', status: 'failed' },
+    ]);
+    // login.md has no full key match, falls back to basename match -> failed
+    const warnings = validateDeps(specs, manifest);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('login.md');
+    expect(warnings[0]).toContain('status: failed');
+  });
 });
 
 // ── topoSort (manifest-aware) ───────────────────────────────

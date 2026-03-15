@@ -12,6 +12,7 @@
 import path from 'path';
 import { promises as fs } from 'fs';
 import { spawn } from 'child_process';
+import { getForgeEntryPoint } from './utils.js';
 import {
   getDb,
   getTaskById,
@@ -92,8 +93,7 @@ export function spawnDetachedExecutor(cwd: string): boolean {
   try {
     const resolvedCwd = path.resolve(cwd);
     // Use process.argv[0] (bun/node) to run the forge CLI entry point.
-    // Resolve the dist/index.js path relative to this module.
-    const forgeBin = path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'dist', 'index.js'));
+    const forgeBin = getForgeEntryPoint();
     const child = spawn(process.argv[0], [forgeBin, 'executor', '--quiet', '-C', resolvedCwd], {
       detached: true,
       stdio: 'ignore',

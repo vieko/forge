@@ -12,6 +12,7 @@ import type { Pipeline, Stage, GateKey, PipelineStatus, StageStatus, StageName }
 import { loadManifest } from './specs.js';
 import { SqliteStateProvider } from './db-pipeline-state.js';
 import { createFileWatcher, type FileWatcherHandle } from './file-watcher.js';
+import { getForgeEntryPoint } from './utils.js';
 import {
   getDb,
   queryAllSessions,
@@ -1480,7 +1481,7 @@ function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
         return;
       }
       try {
-        const forgeBin = join(dirname(require.resolve('./index.js')), 'index.js');
+        const forgeBin = getForgeEntryPoint();
         const env: Record<string, string> = {};
         for (const [k, v] of Object.entries(process.env)) {
           if (v !== undefined && k !== 'CLAUDECODE' && k !== 'CLAUDE_CODE_ENTRYPOINT') env[k] = v;
@@ -2088,7 +2089,7 @@ function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
     }
 
     try {
-      const forgeBin = join(dirname(require.resolve('./index.js')), 'index.js');
+      const forgeBin = getForgeEntryPoint();
       const env: Record<string, string> = {};
       for (const [k, v] of Object.entries(process.env)) {
         if (v !== undefined && k !== 'CLAUDECODE' && k !== 'CLAUDE_CODE_ENTRYPOINT') env[k] = v;
@@ -2388,7 +2389,7 @@ function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions,
 
     // Safe to spawn: pipeline was failed, no process is running
     try {
-      const forgeBin = join(dirname(require.resolve('./index.js')), 'index.js');
+      const forgeBin = getForgeEntryPoint();
       const env: Record<string, string> = {};
       for (const [k, v] of Object.entries(process.env)) {
         if (v !== undefined && k !== 'CLAUDECODE' && k !== 'CLAUDE_CODE_ENTRYPOINT') env[k] = v;

@@ -18,6 +18,16 @@ export class ForgeError extends Error {
 
 export const execAsync = promisify(exec);
 
+// ── Binary Resolution ────────────────────────────────────────
+
+/**
+ * Resolve the forge CLI entry point (dist/index.js) using import.meta.url.
+ * Shared helper so every call site resolves the binary the same way.
+ */
+export function getForgeEntryPoint(): string {
+  return path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'dist', 'index.js'));
+}
+
 // ── Package Manager Detection ────────────────────────────────
 
 /** Detected package manager for a Node.js project. */

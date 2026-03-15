@@ -155,17 +155,28 @@ export function validateDeps(specs: SpecDep[], manifest?: SpecManifest): string[
   const nameSet = new Set(specs.map(s => s.name));
   const warnings: string[] = [];
 
-  // Build manifest lookup by basename: track passed names and non-passed names with status
-  const manifestPassedNames = new Set<string>();
-  const manifestNonPassedNames = new Map<string, string>(); // basename -> status
+  // Build manifest lookup by full spec key (primary) and basename (backward-compatible fallback).
+  // Full keys distinguish specs like auth/login.md vs setup/login.md.
+  const manifestPassedKeys = new Set<string>();           // full spec key
+  const manifestPassedNames = new Set<string>();           // basename fallback
+  const manifestNonPassedKeys = new Map<string, string>(); // full key -> status
+  const manifestNonPassedNames = new Map<string, string>(); // basename -> status (fallback)
   if (manifest) {
     for (const entry of manifest.specs) {
+      const key = entry.spec;
       const basename = path.basename(entry.spec);
       if (entry.status === 'passed') {
+        manifestPassedKeys.add(key);
+        manifestNonPassedKeys.delete(key);
         manifestPassedNames.add(basename);
         manifestNonPassedNames.delete(basename); // passed takes precedence
-      } else if (!manifestPassedNames.has(basename)) {
-        manifestNonPassedNames.set(basename, entry.status);
+      } else {
+        if (!manifestPassedKeys.has(key)) {
+          manifestNonPassedKeys.set(key, entry.status);
+        }
+        if (!manifestPassedNames.has(basename)) {
+          manifestNonPassedNames.set(basename, entry.status);
+        }
       }
     }
   }
@@ -174,11 +185,23 @@ export function validateDeps(specs: SpecDep[], manifest?: SpecManifest): string[
   for (const spec of specs) {
     for (const dep of spec.depends) {
       if (nameSet.has(dep)) continue;
-      if (manifestPassedNames.has(dep)) continue;
 
-      const nonPassedStatus = manifestNonPassedNames.get(dep);
-      if (nonPassedStatus !== undefined) {
-        warnings.push(`${spec.name} depends on ${dep} (status: ${nonPassedStatus} in manifest) — may not be satisfied`);
+      // Primary: match dep against full spec keys
+      if (manifestPassedKeys.has(dep)) continue;
+
+      const nonPassedKeyStatus = manifestNonPassedKeys.get(dep);
+      if (nonPassedKeyStatus !== undefined) {
+        warnings.push(`${spec.name} depends on ${dep} (status: ${nonPassedKeyStatus} in manifest) — may not be satisfied`);
+        continue;
+      }
+
+      // Fallback: match dep basename against manifest basenames (backward compat)
+      const depBasename = path.basename(dep);
+      if (manifestPassedNames.has(depBasename)) continue;
+
+      const nonPassedNameStatus = manifestNonPassedNames.get(depBasename);
+      if (nonPassedNameStatus !== undefined) {
+        warnings.push(`${spec.name} depends on ${dep} (status: ${nonPassedNameStatus} in manifest) — may not be satisfied`);
         continue;
       }
 
