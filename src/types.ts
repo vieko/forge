@@ -48,8 +48,6 @@ export interface ForgeOptions {
   persistDir?: string;
   /** Callback fired when a spec completes in a batch run. Used by the executor for per-spec logging. */
   _onSpecResult?: (spec: string, status: 'success' | 'failed') => void;
-  /** Skip CLI task tracking (used by executor which tracks its own tasks). */
-  _skipTaskTracking?: boolean;
 }
 
 /**

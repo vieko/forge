@@ -10,7 +10,9 @@ import { loadSpecDeps, topoSort, hasDependencies, type SpecDep, type DepLevel } 
 import { withManifestLock, findOrCreateEntry, specKey, loadManifest, resolveSpecFile, resolveSpecDir, resolveSpecSource, assessSpecComplexity, resetRunningSpecs } from './specs.js';
 import { resolveWorkingDir } from './utils.js';
 import { isInterrupted } from './abort.js';
-import { getDb, insertCliTask, updateTaskStatus, cancelTask } from './db.js';
+import { getDb } from './db.js';
+import type { TaskContext } from './task-context.js';
+import { DbTaskContext, NoopTaskContext } from './task-context.js';
 
 // Worker pool: runs tasks with bounded concurrency
 // Checks isInterrupted() before picking up each new item.
@@ -290,8 +292,8 @@ export async function smartDispatch(
   return null;
 }
 
-// Internal options type: ForgeOptions + worktree result dir + batch task tracking
-type RunOptions = ForgeOptions & { _resultDir?: string; _parentTaskId?: string };
+// Internal options type: ForgeOptions + worktree result dir + batch task context
+type RunOptions = ForgeOptions & { _resultDir?: string; _parentTaskContext?: TaskContext; _batchTaskContext?: TaskContext };
 
 // Run specs sequentially
 async function runSpecsSequential(
@@ -329,7 +331,20 @@ async function runSpecsSequential(
     try {
       const specContent = await fs.readFile(specFilePath, 'utf-8');
 
-      const childTaskId = crypto.randomUUID();
+      // Create child TaskContext: inherits parent context for DB linking
+      const parentCtx = options._parentTaskContext;
+      const resultDir = options._resultDir || await resolveWorkingDir(options.cwd);
+      const db = getDb(resultDir);
+      const childContext = db && parentCtx
+        ? new DbTaskContext(db, {
+            command: 'run',
+            description: options.prompt,
+            specPath: specFilePath,
+            cwd: await resolveWorkingDir(options.cwd),
+            parentTaskId: parentCtx.taskId,
+          })
+        : new NoopTaskContext();
+
       const result = await runSingleSpec({
         ...options,
         specPath: specFilePath,
@@ -337,8 +352,7 @@ async function runSpecsSequential(
         specDir: undefined,
         _runId: runId,
         _specLabel: `${i + 1}/${specs.length}`,
-        _taskId: childTaskId,
-        _parentTaskId: options._parentTaskId,
+        taskContext: childContext,
       });
 
       const duration = (Date.now() - startTime) / 1000;
@@ -403,7 +417,20 @@ async function runSpecsParallel(
       try {
         const specContent = await fs.readFile(specFilePath, 'utf-8');
 
-        const childTaskId = crypto.randomUUID();
+        // Create child TaskContext for parallel spec
+        const parentCtx = options._parentTaskContext;
+        const resultDir = options._resultDir || await resolveWorkingDir(options.cwd);
+        const db = getDb(resultDir);
+        const childContext = db && parentCtx
+          ? new DbTaskContext(db, {
+              command: 'run',
+              description: options.prompt,
+              specPath: specFilePath,
+              cwd: await resolveWorkingDir(options.cwd),
+              parentTaskId: parentCtx.taskId,
+            })
+          : new NoopTaskContext();
+
         const result = await runSingleSpec({
           ...options,
           specPath: specFilePath,
@@ -413,8 +440,7 @@ async function runSpecsParallel(
           _silent: true,
           _onActivity: (detail) => display?.activity(i, detail),
           _runId: runId,
-          _taskId: childTaskId,
-          _parentTaskId: options._parentTaskId,
+          taskContext: childContext,
         });
 
         const duration = (Date.now() - startTime) / 1000;
@@ -735,7 +761,7 @@ export async function filterPassedSpecs(
 }
 
 // Main entry point - handles single spec or spec directory
-export async function runForge(options: ForgeOptions): Promise<void> {
+export async function runForge(options: ForgeOptions & { _batchTaskContext?: TaskContext }): Promise<void> {
   const { specDir, specPath, quiet, sequential, sequentialFirst = 0, rerunFailed, pendingOnly, force, branch } = options;
 
   if (!quiet) {
@@ -864,19 +890,16 @@ async function runForgeInner(
       }
     }
 
-    // Insert parent batch task for rerun-failed
-    const batchTaskId = crypto.randomUUID();
-    if (db && !options._skipTaskTracking) {
-      try {
-        insertCliTask(db, {
-          id: batchTaskId,
-          command: 'run',
-          description: `rerun-failed: ${failedPaths.length} spec(s)`,
-          cwd: effectiveWorkingDir,
-        });
-      } catch { /* best effort */ }
-    }
-    const batchOptions: RunOptions = { ...options, _parentTaskId: batchTaskId };
+    // Create parent batch task context for rerun-failed
+    const batchContext: TaskContext = options._batchTaskContext
+      ?? (db
+        ? new DbTaskContext(db, {
+            command: 'run',
+            description: `rerun-failed: ${failedPaths.length} spec(s)`,
+            cwd: effectiveWorkingDir,
+          })
+        : new NoopTaskContext());
+    const batchOptions: RunOptions = { ...options, _parentTaskContext: batchContext };
 
     const wallClockStart = Date.now();
     const { results, hasTracker } = await runSpecBatch(failedPaths, failedNames, batchOptions, concurrency, runId);
@@ -884,15 +907,11 @@ async function runForgeInner(
 
     // Update parent batch task status + manifest cleanup on cancel
     const anyCancelled = results.some(r => r.status === 'cancelled');
-    if (db && !options._skipTaskTracking) {
-      try {
-        const allPassed = results.every(r => r.status === 'success');
-        if (anyCancelled && isInterrupted()) {
-          cancelTask(db, batchTaskId);
-        } else {
-          updateTaskStatus(db, batchTaskId, allPassed ? 'completed' : 'failed', allPassed ? 0 : 1);
-        }
-      } catch { /* best effort */ }
+    const allPassed = results.every(r => r.status === 'success');
+    if (anyCancelled && isInterrupted()) {
+      batchContext.cancel();
+    } else {
+      batchContext.updateStatus(allPassed ? 'completed' : 'failed', allPassed ? 0 : 1);
     }
     if (anyCancelled) {
       await resetRunningSpecs(resultDir).catch(() => {});
@@ -921,19 +940,16 @@ async function runForgeInner(
       }
     }
 
-    // Insert parent batch task for pending specs
-    const pendingBatchTaskId = crypto.randomUUID();
-    if (db && !options._skipTaskTracking) {
-      try {
-        insertCliTask(db, {
-          id: pendingBatchTaskId,
-          command: 'run',
-          description: `pending: ${pendingPaths.length} spec(s)`,
-          cwd: effectiveWorkingDir,
-        });
-      } catch { /* best effort */ }
-    }
-    const pendingBatchOptions: RunOptions = { ...options, _parentTaskId: pendingBatchTaskId };
+    // Create parent batch task context for pending specs
+    const pendingBatchContext: TaskContext = options._batchTaskContext
+      ?? (db
+        ? new DbTaskContext(db, {
+            command: 'run',
+            description: `pending: ${pendingPaths.length} spec(s)`,
+            cwd: effectiveWorkingDir,
+          })
+        : new NoopTaskContext());
+    const pendingBatchOptions: RunOptions = { ...options, _parentTaskContext: pendingBatchContext };
 
     const wallClockStart = Date.now();
     const { results, hasTracker } = await runSpecBatch(pendingPaths, pendingNames, pendingBatchOptions, concurrency, runId);
@@ -941,15 +957,11 @@ async function runForgeInner(
 
     // Update parent batch task status + manifest cleanup on cancel
     const pendingAnyCancelled = results.some(r => r.status === 'cancelled');
-    if (db && !options._skipTaskTracking) {
-      try {
-        const allPassed = results.every(r => r.status === 'success');
-        if (pendingAnyCancelled && isInterrupted()) {
-          cancelTask(db, pendingBatchTaskId);
-        } else {
-          updateTaskStatus(db, pendingBatchTaskId, allPassed ? 'completed' : 'failed', allPassed ? 0 : 1);
-        }
-      } catch { /* best effort */ }
+    const pendingAllPassed = results.every(r => r.status === 'success');
+    if (pendingAnyCancelled && isInterrupted()) {
+      pendingBatchContext.cancel();
+    } else {
+      pendingBatchContext.updateStatus(pendingAllPassed ? 'completed' : 'failed', pendingAllPassed ? 0 : 1);
     }
     if (pendingAnyCancelled) {
       await resetRunningSpecs(resultDir).catch(() => {});
@@ -1049,20 +1061,17 @@ async function runForgeInner(
       }
     }
 
-    // Insert parent batch task for spec-dir
-    const specDirBatchTaskId = crypto.randomUUID();
-    if (db && !options._skipTaskTracking) {
-      try {
-        insertCliTask(db, {
-          id: specDirBatchTaskId,
-          command: 'run',
-          description: `spec-dir: ${specFiles.length} spec(s) in ${path.relative(resultDir, resolvedDir) || resolvedDir}`,
-          specPath: resolvedDir,
-          cwd: effectiveWorkingDir,
-        });
-      } catch { /* best effort */ }
-    }
-    const specDirOptions: RunOptions = { ...options, _parentTaskId: specDirBatchTaskId };
+    // Create parent batch task context for spec-dir
+    const specDirBatchContext: TaskContext = options._batchTaskContext
+      ?? (db
+        ? new DbTaskContext(db, {
+            command: 'run',
+            description: `spec-dir: ${specFiles.length} spec(s) in ${path.relative(resultDir, resolvedDir) || resolvedDir}`,
+            specPath: resolvedDir,
+            cwd: effectiveWorkingDir,
+          })
+        : new NoopTaskContext());
+    const specDirOptions: RunOptions = { ...options, _parentTaskContext: specDirBatchContext };
 
     const wallClockStart = Date.now();
     const { results, hasTracker } = await runSpecBatch(specFilePaths, specFiles, specDirOptions, concurrency, runId, skippedNames);
@@ -1070,15 +1079,11 @@ async function runForgeInner(
 
     // Update parent batch task status + manifest cleanup on cancel
     const specDirAnyCancelled = results.some(r => r.status === 'cancelled');
-    if (db && !options._skipTaskTracking) {
-      try {
-        const allPassed = results.every(r => r.status === 'success');
-        if (specDirAnyCancelled && isInterrupted()) {
-          cancelTask(db, specDirBatchTaskId);
-        } else {
-          updateTaskStatus(db, specDirBatchTaskId, allPassed ? 'completed' : 'failed', allPassed ? 0 : 1);
-        }
-      } catch { /* best effort */ }
+    const specDirAllPassed = results.every(r => r.status === 'success');
+    if (specDirAnyCancelled && isInterrupted()) {
+      specDirBatchContext.cancel();
+    } else {
+      specDirBatchContext.updateStatus(specDirAllPassed ? 'completed' : 'failed', specDirAllPassed ? 0 : 1);
     }
     if (specDirAnyCancelled) {
       await resetRunningSpecs(resultDir).catch(() => {});
@@ -1155,6 +1160,16 @@ async function runForgeInner(
   }
 
   // Single spec or no spec - run directly (throws on failure)
-  await runSingleSpec({ ...effectiveOptions, _runId: runId });
+  // Create a TaskContext for the single-spec run (CLI path tracks in DB)
+  const singleContext: TaskContext = options._batchTaskContext
+    ?? (db
+      ? new DbTaskContext(db, {
+          command: 'run',
+          description: effectiveOptions.prompt,
+          specPath: effectiveOptions.specPath ?? null,
+          cwd: effectiveWorkingDir,
+        })
+      : new NoopTaskContext());
+  await runSingleSpec({ ...effectiveOptions, _runId: runId, taskContext: singleContext });
   return { anyPassed: true };
 }

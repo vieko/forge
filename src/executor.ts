@@ -35,6 +35,7 @@ import { isInterrupted, triggerAbort } from './abort.js';
 import { DIM, RESET, BOLD } from './display.js';
 import { getConfig } from './config.js';
 import type { GateKey, GateType, StageName } from './pipeline-types.js';
+import { ExecutorTaskContext } from './task-context.js';
 
 // ── Constants ────────────────────────────────────────────────
 
@@ -281,7 +282,7 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
             pendingOnly,
             force,
             branch,
-            _skipTaskTracking: true,
+            _batchTaskContext: new ExecutorTaskContext(task.id),
             _onSpecResult: quiet ? undefined : (spec, status) => {
               const icon = status === 'success' ? '+' : 'x';
               console.log(`${DIM}[executor]${RESET}   ${icon} ${spec} (${taskShortId})`);
@@ -300,7 +301,7 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
             dryRun: dryRun ?? hasFlag(extraArgs, '--dry-run'),
             quiet: true,
             _silent: true,
-            _skipTaskTracking: true,
+            taskContext: new ExecutorTaskContext(task.id),
           });
         }
       } else {
@@ -315,7 +316,7 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
           dryRun: dryRun ?? hasFlag(extraArgs, '--dry-run'),
           quiet: true,
           _silent: true,
-          _skipTaskTracking: true,
+          taskContext: new ExecutorTaskContext(task.id),
         });
       }
       break;

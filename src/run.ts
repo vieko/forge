@@ -1,7 +1,6 @@
 import type { ForgeOptions, ForgeResult, MonorepoContext } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
 import { ForgeError, resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
@@ -9,8 +8,9 @@ import { DIM, RESET, CMD, BOLD, printRunSummary } from './display.js';
 import { runVerification, detectMonorepo, determineAffectedPackages } from './verify.js';
 import { runQuery, streamLogAppend } from './core.js';
 import { withManifestLock, findOrCreateEntry, updateEntryStatus, specKey, pipeSpecId, resolveSpecSource } from './specs.js';
-import { getDb, insertCliTask, updateTaskStatus, updateTaskSessionId, cancelTask } from './db.js';
 import { isInterrupted } from './abort.js';
+import type { TaskContext } from './task-context.js';
+import { NoopTaskContext } from './task-context.js';
 
 /**
  * Count tool calls from audit.jsonl for a specific session.
@@ -90,9 +90,13 @@ export function isApiErrorResult(resultText: string): boolean {
   return false;
 }
 
-export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string; _resultDir?: string; _taskId?: string; _parentTaskId?: string; _skipTaskTracking?: boolean }): Promise<ForgeResult> {
-  const { prompt, specPath, specContent, cwd, model, planModel, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir, _taskId, _parentTaskId, _skipTaskTracking = false } = options;
+export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string; _resultDir?: string; taskContext?: TaskContext }): Promise<ForgeResult> {
+  const { prompt, specPath, specContent, cwd, model, planModel, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir } = options;
   const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
+
+  // TaskContext: callers provide the appropriate implementation.
+  // Falls back to NoopTaskContext when none provided (e.g. bare CLI without DB).
+  const taskContext = options.taskContext ?? new NoopTaskContext();
 
   // Resolve and validate working directory
   const workingDir = await resolveWorkingDir(cwd);
@@ -108,26 +112,6 @@ export async function runSingleSpec(options: ForgeOptions & { specContent?: stri
     defaultMaxBudgetUsd: dryRun || planOnly ? 5.00 : 50.00,
   });
   const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd, config } = resolved;
-
-  // ── CLI Task tracking ──────────────────────────────────────
-  // Insert a task record so CLI runs are visible in TUI, status, and stats.
-  // Skip when called from the executor — the executor already tracks its own task.
-  const taskId = _taskId || crypto.randomUUID();
-  const db = getDb(resultDir);
-  if (db && !_skipTaskTracking) {
-    try {
-      insertCliTask(db, {
-        id: taskId,
-        command: 'run',
-        description: prompt,
-        specPath: specPath ?? null,
-        cwd: workingDir,
-        parentTaskId: _parentTaskId ?? null,
-      });
-    } catch {
-      // Best effort — don't block execution if task insert fails
-    }
-  }
 
   // Read spec content if provided (and not already passed)
   let finalSpecContent: string | undefined = specContent;
@@ -292,12 +276,8 @@ Do not use emojis in your output.`;
     const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
 
     // Link session ID to task record
-    if (db && !_skipTaskTracking && qr.sessionId) {
-      try {
-        updateTaskSessionId(db, taskId, qr.sessionId);
-      } catch {
-        // Best effort
-      }
+    if (qr.sessionId) {
+      taskContext.linkSession(qr.sessionId);
     }
 
     // Run verification (unless dry-run or plan-only)
@@ -407,14 +387,10 @@ forge run --resume ${qr.sessionId} "fix verification errors"
           }
 
           // Update task record on failure
-          if (db && !_skipTaskTracking) {
-            try {
-              if (isInterrupted()) {
-                cancelTask(db, taskId);
-              } else {
-                updateTaskStatus(db, taskId, 'failed', 1);
-              }
-            } catch { /* best effort */ }
+          if (isInterrupted()) {
+            taskContext.cancel();
+          } else {
+            taskContext.updateStatus('failed', 1);
           }
 
           throw new ForgeError(`Verification failed after ${maxVerifyAttempts} attempts`, forgeResult);
@@ -482,11 +458,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       }
 
       // Update task record on API error override
-      if (db && !_skipTaskTracking) {
-        try {
-          updateTaskStatus(db, taskId, 'failed', 1);
-        } catch { /* best effort */ }
-      }
+      taskContext.updateStatus('failed', 1);
 
       throw new ForgeError(note, overrideResult);
     }
@@ -608,21 +580,12 @@ ${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0,
     }
 
     // Update task record on success
-    if (db && !_skipTaskTracking) {
-      try {
-        updateTaskStatus(db, taskId, 'completed', 0);
-      } catch { /* best effort */ }
-    }
+    taskContext.updateStatus('completed', 0);
 
     return forgeResult;
   }
 
   // All verification attempts exhausted — should not normally reach here
-  // Update task record
-  if (db && !_skipTaskTracking) {
-    try {
-      updateTaskStatus(db, taskId, 'failed', 1);
-    } catch { /* best effort */ }
-  }
+  taskContext.updateStatus('failed', 1);
   throw new ForgeError('Verification failed after all attempts');
 }
