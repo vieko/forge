@@ -529,8 +529,9 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
     if (prevGapNames && currentGapNamesSet.size === prevGapNames.size && [...currentGapNamesSet].every(g => prevGapNames!.has(g))) {
       // Record these gaps as "found" with no fix (we're stopping)
       for (const gapName of currentGapBaseNames) {
-        if (!gapHistory.has(gapName)) gapHistory.set(gapName, []);
-        gapHistory.get(gapName)!.push({ round, action: 'found', fixStatus: null });
+        const hist = gapHistory.get(gapName) ?? [];
+        hist.push({ round, action: 'found', fixStatus: null });
+        gapHistory.set(gapName, hist);
       }
 
       roundSummaries.push({
@@ -597,13 +598,15 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
 
     // Record gap tracking for this round
     for (const gapName of currentGapBaseNames) {
-      if (!gapHistory.has(gapName)) gapHistory.set(gapName, []);
+      const hist = gapHistory.get(gapName) ?? [];
       const fixStatus = fixStatuses.get(gapName) ?? (fixFailed ? 'error_execution' : 'success');
-      gapHistory.get(gapName)!.push({ round, action: 'found_and_fixed', fixStatus });
+      hist.push({ round, action: 'found_and_fixed', fixStatus });
+      gapHistory.set(gapName, hist);
 
       // Store per-gap fix result
-      if (!gapFixResults.has(gapName)) gapFixResults.set(gapName, new Map());
-      gapFixResults.get(gapName)!.set(round, fixStatus);
+      const fixMap = gapFixResults.get(gapName) ?? new Map();
+      fixMap.set(round, fixStatus);
+      gapFixResults.set(gapName, fixMap);
 
       if (fixStatus === 'error_verification' || fixStatus === 'error_execution') {
         hasVerificationFailures = true;

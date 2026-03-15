@@ -5,6 +5,7 @@
 // Sole StateProvider implementation -- FileSystemStateProvider has been removed.
 
 import type { Database } from 'bun:sqlite';
+import { z } from 'zod';
 import type {
   Pipeline,
   PipelineOptions,
@@ -87,8 +88,8 @@ function rowToStage(row: StageRow): Stage {
     status: row.status as Stage['status'],
     cost: row.cost,
     duration: row.duration,
-    sessions: JSON.parse(row.sessions) as string[],
-    artifacts: JSON.parse(row.artifacts) as Record<string, string>,
+    sessions: z.array(z.string()).catch([]).parse(JSON.parse(row.sessions)),
+    artifacts: z.record(z.string(), z.string()).catch({}).parse(JSON.parse(row.artifacts)),
   };
   if (row.started_at) stage.startedAt = row.started_at;
   if (row.completed_at) stage.completedAt = row.completed_at;

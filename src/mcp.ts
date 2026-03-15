@@ -102,8 +102,9 @@ server.registerTool('forge_specs', {
       const groups = new Map<string, typeof entries>();
       for (const e of entries) {
         const dir = e.spec.includes('/') ? path.dirname(e.spec) : '.';
-        if (!groups.has(dir)) groups.set(dir, []);
-        groups.get(dir)!.push(e);
+        const group = groups.get(dir) ?? [];
+        group.push(e);
+        groups.set(dir, group);
       }
 
       const dirSummary = [...groups.entries()].map(([dir, items]) => ({
@@ -150,8 +151,9 @@ function groupStatusRows(rows: { specPath?: string | null; status: string; costU
   const groups = new Map<string, typeof rows>();
   for (const s of rows) {
     const key = s.batchId || s.startedAt;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(s);
+    const group = groups.get(key) ?? [];
+    group.push(s);
+    groups.set(key, group);
   }
 
   const sorted = [...groups.entries()].sort((a, b) => {

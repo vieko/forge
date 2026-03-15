@@ -2,6 +2,7 @@ import { query as sdkQuery, type HookCallback } from '@anthropic-ai/claude-agent
 import type { ForgeResult, MonorepoContext, SessionEvent } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { z } from 'zod';
 import { ForgeError, isTransientError, sleep, saveResult, ensureForgeDir } from './utils.js';
 import { DIM, RESET, CMD, AGENT_VERBS, createInlineSpinner, formatProgress } from './display.js';
 import { rewriteBuildCommand } from './verify.js';
@@ -376,7 +377,8 @@ export async function runQuery(config: QueryConfig): Promise<QueryResult> {
 
             if (!currentToolName) continue; // No tool to process
             try {
-              const input = JSON.parse(toolInputJson || '{}') as Record<string, unknown>;
+              const raw = JSON.parse(toolInputJson || '{}');
+              const input = z.record(z.string(), z.unknown()).catch({}).parse(raw);
 
               // Write tool_call_start event to JSONL log
               {

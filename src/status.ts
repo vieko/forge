@@ -148,8 +148,8 @@ function showStatusFromDb(rows: StatusRunRow[], options: { all?: boolean; last?:
   const groups = new Map<string, StatusSpec[]>();
   for (const r of rows) {
     const key = r.batchId || r.startedAt;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push({
+    const group = groups.get(key) ?? [];
+    group.push({
       specPath: r.specPath,
       status: r.status,
       costUsd: r.costUsd,
@@ -157,6 +157,7 @@ function showStatusFromDb(rows: StatusRunRow[], options: { all?: boolean; last?:
       startedAt: r.startedAt,
       batchId: r.batchId,
     });
+    groups.set(key, group);
   }
 
   // Sort newest first

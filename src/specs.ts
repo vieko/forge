@@ -2,6 +2,7 @@ import type { SpecManifest, SpecEntry, SpecRun } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { z } from 'zod';
 import { DIM, RESET, BOLD, CMD, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
 import { resolveConfig, ensureForgeDir } from './utils.js';
@@ -946,8 +947,9 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
   for (const item of allItems) {
     const stripped = commonPrefix ? item.spec.slice(commonPrefix.length) : item.spec;
     const dir = stripped.includes('/') ? stripped.split('/').slice(0, -1).join('/') : '.';
-    if (!groups.has(dir)) groups.set(dir, []);
-    groups.get(dir)!.push(item);
+    const group = groups.get(dir) ?? [];
+    group.push(item);
+    groups.set(dir, group);
   }
 
   // Compute dynamic column width for filenames
@@ -1087,10 +1089,16 @@ function parseCheckResults(
   if (!jsonMatch) return null;
 
   try {
-    const parsed = JSON.parse(jsonMatch[1] || jsonMatch[0]) as {
-      results: Array<{ spec: string; status: string; reason: string }>;
-    };
-    return parsed.results;
+    const raw = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+    const CheckResultsSchema = z.object({
+      results: z.array(z.object({
+        spec: z.string(),
+        status: z.string(),
+        reason: z.string(),
+      })),
+    });
+    const validated = CheckResultsSchema.safeParse(raw);
+    return validated.success ? validated.data.results : null;
   } catch {
     return null;
   }

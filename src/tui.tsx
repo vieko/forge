@@ -1401,8 +1401,9 @@ function SpecsList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
 
     const groups = new Map<string, SpecDisplayRow[]>();
     for (const row of rows) {
-      if (!groups.has(row.directory)) groups.set(row.directory, []);
-      groups.get(row.directory)!.push(row);
+      const group = groups.get(row.directory) ?? [];
+      group.push(row);
+      groups.set(row.directory, group);
     }
 
     const sortedDirs = [...groups.keys()].sort();
