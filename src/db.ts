@@ -205,6 +205,14 @@ export const migrations: Migration[] = [
       db.run('CREATE INDEX IF NOT EXISTS idx_tasks_source ON tasks(source)');
     },
   },
+
+  // Version 8: Add pid column to pipelines table for stale pipeline detection
+  {
+    version: 8,
+    up: (db: Database) => {
+      db.run(`ALTER TABLE pipelines ADD COLUMN pid INTEGER`);
+    },
+  },
 ];
 
 // ── Schema initialization ────────────────────────────────────

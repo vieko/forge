@@ -115,6 +115,8 @@ export interface Pipeline {
   worktreePath?: string;
   /** Git branch name created for the worktree (e.g. forge-<id>) */
   branch?: string;
+  /** PID of the process running this pipeline (for stale detection) */
+  pid?: number;
 }
 
 // ── Pipeline Events (discriminated union) ────────────────────

@@ -444,6 +444,11 @@ export async function runPipeline(
     pipeline = await stateProvider.createPipeline(options);
   }
 
+  // ── Record process PID for stale pipeline detection ────────
+  pipeline.pid = process.pid;
+  pipeline.updatedAt = new Date().toISOString();
+  await stateProvider.savePipeline(pipeline);
+
   // ── Apply user gate overrides ──────────────────────────────
   if (options.gates) {
     for (const [key, type] of Object.entries(options.gates)) {

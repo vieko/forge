@@ -31,7 +31,7 @@ import {
   markStaleTasks,
   getActiveTaskByCommandAndCwd,
 } from './db.js';
-import { SqliteStateProvider } from './db-pipeline-state.js';
+import { SqliteStateProvider, markStalePipelines } from './db-pipeline-state.js';
 import type { Pipeline, GateKey } from './pipeline-types.js';
 import { isExecutorRunning, ensureExecutorRunning } from './executor.js';
 
@@ -664,6 +664,10 @@ server.registerTool('forge_pipeline', {
         isError: true,
       };
     }
+
+    // Clean up stale pipelines before reading state
+    markStalePipelines(pipelineDb);
+
     const provider = new SqliteStateProvider(pipelineDb);
     let pipeline = await provider.loadActivePipeline();
 

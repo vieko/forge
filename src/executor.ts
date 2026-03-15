@@ -30,7 +30,7 @@ import { runProof } from './proof.js';
 import { runVerify as runVerifyFn } from './proof-runner.js';
 import { runForge } from './parallel.js';
 import { runPipeline } from './pipeline.js';
-import { SqliteStateProvider } from './db-pipeline-state.js';
+import { SqliteStateProvider, markStalePipelines } from './db-pipeline-state.js';
 import { isInterrupted, triggerAbort } from './abort.js';
 import { DIM, RESET, BOLD } from './display.js';
 import { getConfig } from './config.js';
@@ -554,8 +554,9 @@ export async function startExecutor(options: ExecutorOptions): Promise<void> {
       continue;
     }
 
-    // Mark stale tasks (abandoned by dead processes)
+    // Mark stale tasks and pipelines (abandoned by dead processes)
     markStaleTasks(db, STALE_TASK_TTL_MS);
+    markStalePipelines(db);
 
     // Pick up pending tasks up to concurrency limit
     const available = concurrency - runningCount;

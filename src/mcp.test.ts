@@ -837,8 +837,8 @@ describe('forge_pipeline', () => {
         'proof -> verify': { type: 'auto', status: 'waiting' },
       },
       totalCost: 2.30,
-      createdAt: '2026-03-06T00:00:00Z',
-      updatedAt: '2026-03-06T00:01:00Z',
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      updatedAt: new Date().toISOString(),
     };
     await setupPipelineInDb(dir, pipeline);
 
@@ -880,8 +880,8 @@ describe('forge_pipeline', () => {
         'proof -> verify': { type: 'auto', status: 'waiting' },
       },
       totalCost: 3.00,
-      createdAt: '2026-03-06T00:00:00Z',
-      updatedAt: '2026-03-06T00:02:00Z',
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      updatedAt: new Date().toISOString(),
     };
     await setupPipelineInDb(dir, pipeline);
 
