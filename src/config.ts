@@ -23,6 +23,9 @@ const StrictFieldSchemas = {
   dbProvider: z.enum(['sqlite', 'turso']),
   apiPort: z.number().int().positive(),
   apiToken: z.string().nullable(),
+  maxWorktrees: z.number().positive(),
+  maxWorktreeDiskMb: z.number().positive(),
+  worktreePruneTtlDays: z.number().positive(),
 } as const;
 
 /**
@@ -38,6 +41,9 @@ const ConfigSchema = z.object({
   dbProvider: z.enum(['sqlite', 'turso']).default('sqlite').catch('sqlite' as const),
   apiPort: z.number().int().positive().default(4926).catch(4926),
   apiToken: z.string().nullable().default(null).catch(null),
+  maxWorktrees: z.number().positive().default(10).catch(10),
+  maxWorktreeDiskMb: z.number().positive().default(5000).catch(5000),
+  worktreePruneTtlDays: z.number().positive().default(7).catch(7),
 }).passthrough();
 
 // ── Types ────────────────────────────────────────────────────
@@ -50,6 +56,9 @@ export interface ForgeLocalConfig {
   dbProvider: 'sqlite' | 'turso';
   apiPort: number;
   apiToken: string | null;
+  maxWorktrees: number;
+  maxWorktreeDiskMb: number;
+  worktreePruneTtlDays: number;
 }
 
 export const CONFIG_DEFAULTS: ForgeLocalConfig = {
@@ -60,6 +69,9 @@ export const CONFIG_DEFAULTS: ForgeLocalConfig = {
   dbProvider: 'sqlite',
   apiPort: 4926,
   apiToken: null,
+  maxWorktrees: 10,
+  maxWorktreeDiskMb: 5000,
+  worktreePruneTtlDays: 7,
 };
 
 // ── Cache ────────────────────────────────────────────────────
@@ -126,6 +138,27 @@ function applyEnvOverrides(config: ForgeLocalConfig): ForgeLocalConfig {
     }
   }
 
+  if (process.env.FORGE_MAX_WORKTREES !== undefined) {
+    const max = parseInt(process.env.FORGE_MAX_WORKTREES, 10);
+    if (!isNaN(max) && max > 0) {
+      result.maxWorktrees = max;
+    }
+  }
+
+  if (process.env.FORGE_MAX_WORKTREE_DISK_MB !== undefined) {
+    const max = parseInt(process.env.FORGE_MAX_WORKTREE_DISK_MB, 10);
+    if (!isNaN(max) && max > 0) {
+      result.maxWorktreeDiskMb = max;
+    }
+  }
+
+  if (process.env.FORGE_WORKTREE_PRUNE_TTL_DAYS !== undefined) {
+    const days = parseInt(process.env.FORGE_WORKTREE_PRUNE_TTL_DAYS, 10);
+    if (!isNaN(days) && days > 0) {
+      result.worktreePruneTtlDays = days;
+    }
+  }
+
   return result;
 }
 
@@ -176,6 +209,9 @@ export function getConfig(workingDir: string): ForgeLocalConfig {
     dbProvider: parsed.dbProvider,
     apiPort: parsed.apiPort,
     apiToken: parsed.apiToken,
+    maxWorktrees: parsed.maxWorktrees,
+    maxWorktreeDiskMb: parsed.maxWorktreeDiskMb,
+    worktreePruneTtlDays: parsed.worktreePruneTtlDays,
   };
 
   // Auto-create config file with defaults if it didn't exist
@@ -232,6 +268,9 @@ export function formatConfig(workingDir: string): string {
     { key: 'dbProvider', envVar: 'FORGE_DB_PROVIDER' },
     { key: 'apiPort', envVar: 'FORGE_API_PORT' },
     { key: 'apiToken', envVar: 'FORGE_API_TOKEN' },
+    { key: 'maxWorktrees', envVar: 'FORGE_MAX_WORKTREES' },
+    { key: 'maxWorktreeDiskMb', envVar: 'FORGE_MAX_WORKTREE_DISK_MB' },
+    { key: 'worktreePruneTtlDays', envVar: 'FORGE_WORKTREE_PRUNE_TTL_DAYS' },
   ];
 
   for (const { key, envVar } of fields) {

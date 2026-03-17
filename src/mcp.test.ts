@@ -162,7 +162,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<{ 
 // ── Tool Discovery ───────────────────────────────────────────
 
 describe('tool discovery', () => {
-  test('server exposes all 8 tools', async () => {
+  test('server exposes all 9 tools', async () => {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name).sort();
     expect(names).toEqual([
@@ -174,6 +174,7 @@ describe('tool discovery', () => {
       'forge_status',
       'forge_task',
       'forge_watch',
+      'forge_worktrees',
     ]);
   });
 

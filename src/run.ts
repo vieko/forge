@@ -7,7 +7,8 @@ import { ForgeError, resolveWorkingDir, resolveConfig, resolveSession, saveResul
 import { DIM, RESET, CMD, BOLD, printRunSummary } from './display.js';
 import { runVerification, detectMonorepo, determineAffectedPackages } from './verify.js';
 import { runQuery, streamLogAppend } from './core.js';
-import { withManifestLock, findOrCreateEntry, updateEntryStatus, specKey, pipeSpecId, resolveSpecSource } from './specs.js';
+import { parseScope } from './deps.js';
+import { withSpecTransaction, findOrCreateEntry, updateEntryStatus, specKey, pipeSpecId, resolveSpecSource } from './specs.js';
 import { isInterrupted } from './abort.js';
 import type { TaskContext } from './task-context.js';
 import { NoopTaskContext } from './task-context.js';
@@ -124,14 +125,18 @@ export async function runSingleSpec(options: ForgeOptions & { specContent?: stri
   }
 
   // Detect monorepo and determine affected packages
+  // Parse optional scope from spec frontmatter for explicit package targeting
+  const specScope = finalSpecContent ? parseScope(finalSpecContent) : undefined;
+
   let monorepoContext: MonorepoContext | null = null;
   try {
     monorepoContext = await detectMonorepo(workingDir);
     if (monorepoContext) {
-      const affected = determineAffectedPackages(monorepoContext, specPath, finalSpecContent, workingDir);
+      const affected = determineAffectedPackages(monorepoContext, specPath, finalSpecContent, workingDir, specScope);
       monorepoContext = { ...monorepoContext, affected };
       if (!quiet && affected.length > 0) {
-        console.log(`${DIM}[forge]${RESET} Monorepo (${monorepoContext.type}): scoping to ${affected.join(', ')}`);
+        const scopeNote = specScope ? ` (scope: ${specScope})` : '';
+        console.log(`${DIM}[forge]${RESET} Monorepo (${monorepoContext.type}): scoping to ${affected.join(', ')}${scopeNote}`);
       } else if (!quiet && monorepoContext) {
         console.log(`${DIM}[forge]${RESET} Monorepo (${monorepoContext.type}): no affected packages detected, using unscoped verification`);
       }
@@ -370,7 +375,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
           // Update spec manifest on failure
           const failSpecId = specPath ? specKey(specPath, resultDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
           if (failSpecId) {
-            await withManifestLock(resultDir, (manifest) => {
+            await withSpecTransaction(resultDir, (manifest) => {
               const entry = findOrCreateEntry(manifest, failSpecId, resolveSpecSource(finalSpecContent, specPath));
               entry.runs.push({
                 runId: _runId || forgeResult.startedAt,
@@ -441,7 +446,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       // Update spec manifest as failed
       const failSpecId = specPath ? specKey(specPath, resultDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
       if (failSpecId) {
-        await withManifestLock(resultDir, (manifest) => {
+        await withSpecTransaction(resultDir, (manifest) => {
           const entry = findOrCreateEntry(manifest, failSpecId, resolveSpecSource(finalSpecContent, specPath));
           entry.runs.push({
             runId: _runId || overrideResult.startedAt,
@@ -515,7 +520,7 @@ ${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0,
     // Update spec manifest on success
     const successSpecId = specPath ? specKey(specPath, resultDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
     if (successSpecId) {
-      await withManifestLock(resultDir, (manifest) => {
+      await withSpecTransaction(resultDir, (manifest) => {
         const entry = findOrCreateEntry(manifest, successSpecId, resolveSpecSource(finalSpecContent, specPath));
         entry.runs.push({
           runId: _runId || forgeResult.startedAt,

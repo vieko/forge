@@ -59,7 +59,7 @@ import {
 } from './parallel.js';
 
 import {
-  withManifestLock,
+  withSpecTransaction,
   findOrCreateEntry,
   updateEntryStatus,
   loadManifest,
@@ -160,7 +160,7 @@ describe('smartDispatch', () => {
     await writeSpec(dir, 'specs/auth.md');
 
     // Register in manifest so resolveSpecFile can find it
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/auth.md', 'file');
     });
 
@@ -241,7 +241,7 @@ describe('filterPassedSpecs', () => {
     await writeSpec(dir, 'specs/pending.md');
     await writeSpec(dir, 'specs/failed.md');
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const p = findOrCreateEntry(manifest, 'specs/passed.md', 'file');
       p.runs.push(makeRun({ status: 'passed' }));
       updateEntryStatus(p);
@@ -282,7 +282,7 @@ describe('filterPassedSpecs', () => {
     await writeSpec(dir, 'specs/b.md');
     await writeSpec(dir, 'specs/c.md');
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const a = findOrCreateEntry(manifest, 'specs/a.md', 'file');
       a.runs.push(makeRun({ status: 'passed' }));
       updateEntryStatus(a);
@@ -416,7 +416,7 @@ describe('findPendingSpecs', () => {
     await writeSpec(dir, 'specs/pending-a.md');
     await writeSpec(dir, 'specs/pending-b.md');
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/pending-a.md', 'file');
       findOrCreateEntry(manifest, 'specs/pending-b.md', 'file');
     });
@@ -432,7 +432,7 @@ describe('findPendingSpecs', () => {
     await setupForge(dir);
     await writeSpec(dir, 'specs/running.md');
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'specs/running.md', 'file');
       entry.status = 'running';
     });
@@ -449,7 +449,7 @@ describe('findPendingSpecs', () => {
     await writeSpec(dir, 'specs/failed.md');
     await writeSpec(dir, 'specs/pending.md');
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const p = findOrCreateEntry(manifest, 'specs/passed.md', 'file');
       p.runs.push(makeRun({ status: 'passed' }));
       updateEntryStatus(p);
@@ -470,7 +470,7 @@ describe('findPendingSpecs', () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'pipe:abc123', 'pipe');
     });
 
@@ -491,7 +491,7 @@ describe('findPendingSpecs', () => {
     await setupForge(dir);
 
     // Register a spec that was never created on disk
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/deleted.md', 'file');
     });
 

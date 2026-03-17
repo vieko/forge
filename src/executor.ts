@@ -12,16 +12,23 @@
 import path from 'path';
 import { promises as fs } from 'fs';
 import { spawn } from 'child_process';
-import { getForgeEntryPoint } from './utils.js';
+import { getForgeEntryPoint, createWorktree, generateWorkGroupId } from './utils.js';
 import {
   getDb,
   getTaskById,
   updateTaskStatus,
   updateTaskOutput,
   updateTaskSessionId,
+  updateTaskParams,
   markStaleTasks,
   getPendingTasks,
   claimTask,
+  getWorktreeByPath,
+  insertWorktree,
+  linkWorktreeTask,
+  linkWorktreeSession,
+  updateWorktreePid,
+  transitionWorktreeStatus,
 } from './db.js';
 import type { TaskRow } from './db.js';
 import { runSingleSpec } from './run.js';
@@ -41,7 +48,7 @@ import { ExecutorTaskContext } from './task-context.js';
 // ── Constants ────────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 1000;
-const DEFAULT_CONCURRENCY = 2;
+const DEFAULT_CONCURRENCY = 3;
 const MAX_BUFFER_LINES = 50;
 const STALE_TASK_TTL_MS = 60 * 60 * 1000; // 1 hour
 
@@ -241,6 +248,7 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
       const sequentialFirst = extractNumberArg(extraArgs, '--sequential-first');
       const concurrency = extractNumberArg(extraArgs, '--concurrency');
       const branch = extractStringArg(extraArgs, '--branch');
+      const isolate = (params.isolate as boolean | undefined) ?? hasFlag(extraArgs, '--isolate');
 
       if (specPath) {
         const resolvedSpec = path.resolve(workingDir, specPath);
@@ -261,7 +269,8 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
           } catch { /* best effort */ }
 
           if (!quiet && specCount > 1) {
-            console.log(`${DIM}[executor]${RESET} > ${task.command} (${taskShortId}) ${specCount} specs [${sequential ? 'sequential' : 'parallel'}]`);
+            const modeLabel = isolate ? 'isolate' : sequential ? 'sequential' : 'parallel';
+            console.log(`${DIM}[executor]${RESET} > ${task.command} (${taskShortId}) ${specCount} specs [${modeLabel}]`);
           }
 
           await runForge({
@@ -282,6 +291,7 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
             pendingOnly,
             force,
             branch,
+            isolate,
             _batchTaskContext: new ExecutorTaskContext(task.id),
             _onSpecResult: quiet ? undefined : (spec, status) => {
               const icon = status === 'success' ? '+' : 'x';
@@ -425,6 +435,10 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
 /**
  * Execute a single task: dispatch to the appropriate function,
  * capture session ID via directory snapshot, update DB on completion.
+ *
+ * When the task has a `worktree` intent in params, creates an isolated
+ * git worktree at claim time (before dispatch) and manages the worktree
+ * lifecycle alongside the task lifecycle.
  */
 async function executeTask(
   task: TaskRow,
@@ -436,41 +450,129 @@ async function executeTask(
 
   const stdoutBuf: string[] = [];
   const stderrBuf: string[] = [];
+  const params: Record<string, unknown> = JSON.parse(task.params || '{}');
+
+  // ── Worktree creation on task claim ────────────────────────
+  let effectiveWorkingDir = workingDir;
+  let worktreeId: string | null = null;
+
+  if (params.worktree) {
+    try {
+      const specPath = (params.specPath || task.specPath) as string | undefined;
+      const linearIssueId = params.linearIssueId as string | undefined;
+      const workGroupId = (params.workGroupId as string | undefined) ?? generateWorkGroupId();
+      const branchFallback = `forge/task-${task.id.slice(0, 8)}`;
+
+      const forceWorktree = !!params.force;
+      const registryOpts = specPath
+        ? { spec_path: specPath, linear_issue_id: linearIssueId, work_group_id: workGroupId, force: forceWorktree }
+        : forceWorktree ? { force: forceWorktree } : undefined;
+
+      const worktreePath = await createWorktree(workingDir, branchFallback, registryOpts);
+
+      // Look up worktree row (createWorktree registers when specPath is provided)
+      let worktreeRow = getWorktreeByPath(db, worktreePath);
+      if (!worktreeRow) {
+        // No specPath -- register manually so the worktree is always tracked
+        const wtId = `wt-${Date.now()}-${Math.random().toString(16).substring(2, 6)}`;
+        insertWorktree(db, {
+          id: wtId,
+          work_group_id: workGroupId,
+          spec_path: specPath || task.description || 'task',
+          branch: branchFallback,
+          worktree_path: worktreePath,
+          status: 'created',
+          linear_issue_id: linearIssueId,
+        });
+        worktreeRow = getWorktreeByPath(db, worktreePath);
+      }
+
+      if (worktreeRow) {
+        worktreeId = worktreeRow.id;
+        linkWorktreeTask(db, worktreeId, task.id);
+        updateWorktreePid(db, worktreeId, process.pid);
+        transitionWorktreeStatus(db, worktreeId, 'running');
+      }
+
+      // Store worktree path and ID in task params for downstream consumers
+      const updatedParams = { ...params, worktreePath, worktreeId };
+      updateTaskParams(db, task.id, updatedParams);
+
+      effectiveWorkingDir = worktreePath;
+      pushLine(stdoutBuf, `Worktree created at ${worktreePath}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      pushLine(stderrBuf, `Worktree creation failed: ${msg}`);
+      updateTaskStatus(db, task.id, 'failed', 1);
+      updateTaskOutput(db, task.id, stdoutBuf, stderrBuf);
+      return;
+    }
+  }
 
   pushLine(stdoutBuf, `Executing ${task.command}...`);
   updateTaskOutput(db, task.id, stdoutBuf, stderrBuf);
 
   // Snapshot sessions directory before execution for session ID capture
-  const beforeSessions = await getSessionDirs(workingDir);
+  const beforeSessions = await getSessionDirs(effectiveWorkingDir);
 
   try {
-    await dispatchTask(task, workingDir, quiet);
+    await dispatchTask(task, effectiveWorkingDir, quiet);
 
     // Capture session ID: new session directories created during execution
-    const afterSessions = await getSessionDirs(workingDir);
+    const afterSessions = await getSessionDirs(effectiveWorkingDir);
     const newSessions = [...afterSessions].filter(s => !beforeSessions.has(s));
     if (newSessions.length > 0) {
       // Use the latest new session (most recently created)
       const sorted = newSessions.sort();
-      updateTaskSessionId(db, task.id, sorted[sorted.length - 1]);
+      const sessionId = sorted[sorted.length - 1];
+      updateTaskSessionId(db, task.id, sessionId);
+
+      // Link session to worktree for session-based queries
+      if (worktreeId) {
+        linkWorktreeSession(db, worktreeId, sessionId);
+      }
     }
 
     updateTaskStatus(db, task.id, 'completed', 0);
     pushLine(stdoutBuf, 'Task completed successfully.');
     updateTaskOutput(db, task.id, stdoutBuf, stderrBuf);
+
+    // Transition worktree to complete on success
+    if (worktreeId) {
+      try {
+        transitionWorktreeStatus(db, worktreeId, 'complete');
+      } catch {
+        // Best effort -- don't fail the task if worktree transition fails
+      }
+    }
   } catch (err) {
     // Capture session ID even on failure
-    const afterSessions = await getSessionDirs(workingDir);
+    const afterSessions = await getSessionDirs(effectiveWorkingDir);
     const newSessions = [...afterSessions].filter(s => !beforeSessions.has(s));
     if (newSessions.length > 0) {
       const sorted = newSessions.sort();
-      updateTaskSessionId(db, task.id, sorted[sorted.length - 1]);
+      const sessionId = sorted[sorted.length - 1];
+      updateTaskSessionId(db, task.id, sessionId);
+
+      // Link session to worktree even on failure
+      if (worktreeId) {
+        linkWorktreeSession(db, worktreeId, sessionId);
+      }
     }
 
     const msg = err instanceof Error ? err.message : String(err);
     pushLine(stderrBuf, `Error: ${msg}`);
     updateTaskStatus(db, task.id, 'failed', 1);
     updateTaskOutput(db, task.id, stdoutBuf, stderrBuf);
+
+    // Transition worktree to failed with error message
+    if (worktreeId) {
+      try {
+        transitionWorktreeStatus(db, worktreeId, 'failed', msg);
+      } catch {
+        // Best effort -- don't fail the task if worktree transition fails
+      }
+    }
   }
 }
 

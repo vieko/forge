@@ -12,6 +12,8 @@ export interface SpecDep {
   path: string;
   /** Filenames this spec depends on (from `depends:` frontmatter) */
   depends: string[];
+  /** Monorepo package scope (from `scope:` frontmatter, e.g. "packages/api") */
+  scope?: string;
 }
 
 /**
@@ -114,6 +116,27 @@ export function parseSource(content: string): string | undefined {
   return sourceMatch[1].trim();
 }
 
+/**
+ * Parse YAML frontmatter `scope:` field from a spec file's content.
+ * Identifies the target package directory within a monorepo.
+ *
+ * Supports: scope: packages/api
+ *           scope: apps/web
+ *
+ * Returns undefined if no frontmatter or no scope field.
+ */
+export function parseScope(content: string): string | undefined {
+  const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fmMatch) return undefined;
+
+  const frontmatter = fmMatch[1];
+  const scopeMatch = frontmatter.match(/^scope:\s*(.+)$/m);
+  if (!scopeMatch) return undefined;
+
+  // Normalize: strip leading/trailing slashes and whitespace
+  return scopeMatch[1].trim().replace(/^\/+|\/+$/g, '');
+}
+
 // ── DAG construction ────────────────────────────────────────
 
 /**
@@ -128,10 +151,12 @@ export async function loadSpecDeps(
   for (let i = 0; i < specFileNames.length; i++) {
     const content = await fs.readFile(specFilePaths[i], 'utf-8');
     const depends = parseDependencies(content);
+    const scope = parseScope(content);
     specs.push({
       name: specFileNames[i],
       path: specFilePaths[i],
       depends,
+      ...(scope && { scope }),
     });
   }
 

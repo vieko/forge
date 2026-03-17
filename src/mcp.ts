@@ -30,7 +30,12 @@ import {
   getTaskById,
   markStaleTasks,
   getActiveTaskByCommandAndCwd,
+  listWorktrees,
+  getWorktreesByWorkGroup,
+  getWorktree,
+  querySessionsByWorktree,
 } from './db.js';
+import type { WorktreeRow, WorktreeStatus } from './db.js';
 import { SqliteStateProvider, markStalePipelines } from './db-pipeline-state.js';
 import type { Pipeline, GateKey } from './pipeline-types.js';
 import { isExecutorRunning, ensureExecutorRunning } from './executor.js';
@@ -283,6 +288,81 @@ server.registerTool('forge_stats', {
   }
 });
 
+// ── Fast tool: forge_worktrees ────────────────────────────────
+
+server.registerTool('forge_worktrees', {
+  description: 'List worktrees with status, spec, branch, and path. Returns structured JSON with worktree entries. Supports filtering by work_group_id and status. Fast — no SDK call.',
+  inputSchema: {
+    cwd: z.string().describe('Working directory (target repo)'),
+    work_group_id: z.string().optional().describe('Filter by work group ID'),
+    status: z.string().optional().describe('Filter by worktree status (e.g. created, running, complete, failed, merged, cleaned)'),
+  },
+}, async ({ cwd, work_group_id, status }) => {
+  try {
+    const workingDir = path.resolve(cwd);
+    const db = getDb(workingDir);
+    if (!db) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Database unavailable. Ensure .forge directory exists.' }) }],
+        isError: true,
+      };
+    }
+
+    let worktrees: WorktreeRow[];
+    if (work_group_id) {
+      worktrees = getWorktreesByWorkGroup(db, work_group_id);
+      // Apply status filter on top of work_group_id filter
+      if (status) {
+        worktrees = worktrees.filter(w => w.status === status);
+      }
+    } else if (status) {
+      worktrees = listWorktrees(db, status as WorktreeStatus);
+    } else {
+      worktrees = listWorktrees(db);
+    }
+
+    const entries = worktrees.map(w => ({
+      id: w.id,
+      work_group_id: w.work_group_id,
+      spec_path: w.spec_path,
+      spec_paths: JSON.parse(w.spec_paths),
+      branch: w.branch,
+      worktree_path: w.worktree_path,
+      status: w.status,
+      linear_issue_id: w.linear_issue_id,
+      task_id: w.task_id,
+      session_id: w.session_id,
+      error: w.error,
+      created_at: w.created_at,
+      updated_at: w.updated_at,
+    }));
+
+    // Summary counts
+    const allWorktrees = work_group_id ? worktrees : listWorktrees(db);
+    const summary = {
+      total: allWorktrees.length,
+      created: allWorktrees.filter(w => w.status === 'created').length,
+      running: allWorktrees.filter(w => w.status === 'running').length,
+      complete: allWorktrees.filter(w => w.status === 'complete').length,
+      failed: allWorktrees.filter(w => w.status === 'failed').length,
+      merged: allWorktrees.filter(w => w.status === 'merged').length,
+      cleaned: allWorktrees.filter(w => w.status === 'cleaned').length,
+    };
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify({ worktrees: entries, summary }, null, 2),
+      }],
+    };
+  } catch (err) {
+    return {
+      content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+      isError: true,
+    };
+  }
+});
+
 // ── Async tool: forge_start ──────────────────────────────────
 
 server.registerTool('forge_start', {
@@ -298,8 +378,11 @@ server.registerTool('forge_start', {
     max_turns: z.number().optional().describe('Maximum agent turns (default varies by command)'),
     max_budget: z.number().optional().describe('Maximum budget in USD (default varies by command)'),
     plan_only: z.boolean().optional().describe('Plan only mode — create tasks without implementing (run command only)'),
+    worktree: z.boolean().optional().describe('Create an isolated git worktree for this task'),
+    worktree_id: z.string().optional().describe('Run inside an existing worktree (by worktree ID from forge_worktrees)'),
+    isolate: z.boolean().optional().describe('Enable worktree-per-spec isolation mode — each spec runs in its own worktree'),
   },
-}, async ({ command, description, cwd, output_dir, model, spec_path, extra_args, max_turns, max_budget, plan_only }) => {
+}, async ({ command, description, cwd, output_dir, model, spec_path, extra_args, max_turns, max_budget, plan_only, worktree, worktree_id, isolate }) => {
   try {
     const workingDir = path.resolve(cwd);
     const db = getDb(workingDir);
@@ -340,6 +423,9 @@ server.registerTool('forge_start', {
       ...(max_turns !== undefined && { maxTurns: max_turns }),
       ...(max_budget !== undefined && { maxBudgetUsd: max_budget }),
       ...(plan_only !== undefined && { planOnly: plan_only }),
+      ...(worktree !== undefined && { worktree }),
+      ...(worktree_id !== undefined && { worktreeId: worktree_id }),
+      ...(isolate !== undefined && { isolate }),
     };
 
     // Insert task with status 'pending' — executor picks it up
@@ -492,6 +578,35 @@ server.registerTool('forge_task', {
     }
   }
 
+  // Enrich with worktree info when task is associated with a worktree
+  try {
+    const taskDb = getDb(task.cwd);
+    if (taskDb) {
+      // Check task params for worktreeId
+      const taskParams: Record<string, unknown> = JSON.parse(task.params || '{}');
+      const worktreeId = taskParams.worktreeId as string | undefined;
+
+      let worktreeRow: WorktreeRow | null = null;
+      if (worktreeId) {
+        worktreeRow = getWorktree(taskDb, worktreeId);
+      }
+      // Fallback: check if any worktree references this task_id
+      if (!worktreeRow) {
+        const rows = taskDb.query(
+          'SELECT * FROM worktrees WHERE task_id = ? LIMIT 1',
+        ).all(task_id) as WorktreeRow[];
+        worktreeRow = rows[0] ?? null;
+      }
+      if (worktreeRow) {
+        result.worktree_id = worktreeRow.id;
+        result.worktree_path = worktreeRow.worktree_path;
+        result.worktree_status = worktreeRow.status;
+      }
+    }
+  } catch {
+    // Worktree info unavailable — continue with basic task info
+  }
+
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
   };
@@ -505,8 +620,9 @@ server.registerTool('forge_watch', {
     cwd: z.string().describe('Working directory (target repo where forge is running)'),
     lines: z.number().optional().describe('Number of recent lines to return (default: 40, max: 200)'),
     task_id: z.string().optional().describe('Task ID from forge_start — uses its cwd to find the session log'),
+    worktree_id: z.string().optional().describe('Worktree ID — scope log following to sessions associated with this worktree'),
   },
-}, async ({ cwd, lines, task_id }) => {
+}, async ({ cwd, lines, task_id, worktree_id }) => {
   try {
     // If task_id provided, use the task's cwd and sessionId directly
     let workingDir = path.resolve(cwd);
@@ -525,7 +641,24 @@ server.registerTool('forge_watch', {
       }
     }
 
-    // If we have a sessionId (from task), construct path directly — skip latest-session.json
+    // If worktree_id provided, find the latest session associated with it
+    if (worktree_id && !sessionId) {
+      const wtDb = getDb(workingDir);
+      if (wtDb) {
+        const wtSessions = querySessionsByWorktree(wtDb, worktree_id);
+        // querySessionsByWorktree returns ASC order — pick the last (most recent)
+        if (wtSessions.length > 0) {
+          sessionId = wtSessions[wtSessions.length - 1].id;
+        }
+        // Also check if the worktree has a different working directory
+        const wtRow = getWorktree(wtDb, worktree_id);
+        if (wtRow) {
+          workingDir = wtRow.worktree_path;
+        }
+      }
+    }
+
+    // If we have a sessionId (from task or worktree), construct path directly — skip latest-session.json
     if (sessionId) {
       logPath = path.join(workingDir, '.forge', 'sessions', sessionId, 'stream.log');
     } else {

@@ -5,8 +5,8 @@ import type { ScrollBoxRenderable, ScrollBoxChild } from '@opentui/core';
 import { createRoot, useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { readdir, readFile, stat, open } from 'fs/promises';
-import { spawn } from 'child_process';
-import { join, basename, dirname } from 'path';
+import { spawn, execSync } from 'child_process';
+import { join, basename, dirname, isAbsolute } from 'path';
 import type { ForgeResult, SessionEvent, SpecManifest, SpecEntry, SpecRun } from './types.js';
 import type { Pipeline, Stage, GateKey, PipelineStatus, StageStatus, StageName } from './pipeline-types.js';
 import { loadManifest } from './specs.js';
@@ -18,8 +18,13 @@ import {
   queryAllSessions,
   getActiveTasks,
   getRecentCompletedTasks,
+  listWorktrees as dbListWorktrees,
+  transitionWorktreeStatus,
+  getValidTransitions,
+  getSpecEntryByPath,
+  getSpecRunsByEntry,
 } from './db.js';
-import type { TaskRow, RunRow } from './db.js';
+import type { TaskRow, RunRow, WorktreeRow, WorktreeStatus, SpecRunRow } from './db.js';
 import type { Database } from 'bun:sqlite';
 import { isExecutorRunning, spawnDetachedExecutor } from './executor.js';
 
@@ -43,7 +48,7 @@ interface SessionInfo {
   type?: string;
 }
 
-type Tab = 'sessions' | 'specs' | 'pipeline';
+type Tab = 'sessions' | 'specs' | 'pipeline' | 'worktrees';
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -415,6 +420,29 @@ function useDbPoll(db: Database | null, intervalMs: number = 1000): number {
 }
 
 /**
+ * Get session IDs linked to a worktree, via direct session_id or tasks.cwd join.
+ */
+function getWorktreeSessionIds(db: Database, worktree: WorktreeRow): Set<string> {
+  const ids = new Set<string>();
+  // Direct session reference
+  if (worktree.session_id) {
+    ids.add(worktree.session_id);
+  }
+  // Sessions linked via tasks whose cwd matches the worktree path
+  try {
+    const rows = db.query(
+      'SELECT DISTINCT sessionId FROM tasks WHERE cwd = ? AND sessionId IS NOT NULL'
+    ).all(worktree.worktree_path) as { sessionId: string }[];
+    for (const row of rows) {
+      ids.add(row.sessionId);
+    }
+  } catch {
+    // tasks table may not exist or query may fail
+  }
+  return ids;
+}
+
+/**
  * Load sessions from the sessions DB table, converting rows to SessionInfo[].
  * Running sessions (status = 'running' or null) are detected from the DB.
  * The DB is the single source of truth for session metadata.
@@ -741,6 +769,8 @@ function TabBar({ activeTab }: { activeTab: Tab }) {
         <span fg={activeTab === 'specs' ? '#36b5f0' : '#555555'}>[ Specs ]</span>
         {'  '}
         <span fg={activeTab === 'pipeline' ? '#36b5f0' : '#555555'}>[ Pipeline ]</span>
+        {'  '}
+        <span fg={activeTab === 'worktrees' ? '#36b5f0' : '#555555'}>[ Worktrees ]</span>
       </text>
     </box>
   );
@@ -749,6 +779,7 @@ function TabBar({ activeTab }: { activeTab: Tab }) {
 function nextTab(current: Tab): Tab {
   if (current === 'sessions') return 'specs';
   if (current === 'specs') return 'pipeline';
+  if (current === 'pipeline') return 'worktrees';
   return 'sessions';
 }
 
@@ -780,13 +811,15 @@ function SessionRow({ session, selected, maxWidth }: { session: SessionInfo; sel
   );
 }
 
-function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db, onSelect, onSelectTask, onQuit, onTabSwitch }: {
+function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db, worktreeFilter, onClearFilter, onSelect, onSelectTask, onQuit, onTabSwitch }: {
   sessions: SessionInfo[];
   cwd: string;
   initialIndex?: number;
   executor: ExecutorInfo;
   tasks: TaskRow[];
   db: Database | null;
+  worktreeFilter?: WorktreeRow | null;
+  onClearFilter?: () => void;
   onSelect: (s: SessionInfo, index: number) => void;
   onSelectTask: (task: TaskRow) => void;
   onQuit: () => void;
@@ -899,6 +932,11 @@ function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db, onSele
       setShowHistory(v => !v);
       return;
     }
+    if (key.name === 'x' && worktreeFilter && onClearFilter) {
+      onClearFilter();
+      toast.show('Filter cleared', '#888888');
+      return;
+    }
 
     if (focusArea === 'tasks' && showTasks) {
       if (key.name === 'up' || key.name === 'k') {
@@ -954,6 +992,14 @@ function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db, onSele
           <span fg="#888888">forge tui</span>
           {'  '}
           <span fg="#555555">{sessions.length} session{sessions.length !== 1 ? 's' : ''}</span>
+          {worktreeFilter ? (
+            <>
+              {'  '}
+              <span fg="#eab308">filtered: {basename(worktreeFilter.spec_path, '.md')}</span>
+              {'  '}
+              <span fg="#555555">[x] clear</span>
+            </>
+          ) : null}
         </text>
       </box>
 
@@ -2018,6 +2064,573 @@ function PipelineStageRow({ stage, pipeline, selected, maxWidth }: { stage: Stag
   );
 }
 
+// ── Worktree Helpers ─────────────────────────────────────────
+
+function isTmuxAvailable(): boolean {
+  try {
+    return !!process.env.TMUX;
+  } catch {
+    return false;
+  }
+}
+
+function openTmuxPane(worktreePath: string): boolean {
+  try {
+    execSync(`tmux split-window -h -c ${JSON.stringify(worktreePath)} claude`, {
+      stdio: 'ignore',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Statuses that allow the 'r' (rerun) action */
+const RERUN_STATUSES: WorktreeStatus[] = ['complete', 'failed'];
+
+/** Statuses that allow the 'm' (mark ready) action */
+const MARK_READY_STATUSES: WorktreeStatus[] = ['complete', 'audited', 'proofed', 'merge_failed'];
+
+function worktreeStatusIcon(status: WorktreeStatus): string {
+  switch (status) {
+    case 'complete':
+    case 'audited':
+    case 'proofed':
+    case 'ready':
+    case 'merged':
+      return '+';
+    case 'running':
+    case 'auditing':
+    case 'proofing':
+    case 'merging':
+      return '>';
+    case 'failed':
+    case 'merge_failed':
+    case 'paused':
+      return 'x';
+    case 'created':
+    case 'cleaned':
+    default:
+      return '-';
+  }
+}
+
+function worktreeStatusColor(status: WorktreeStatus): string {
+  switch (status) {
+    case 'complete':
+    case 'audited':
+    case 'proofed':
+    case 'ready':
+    case 'merged':
+      return '#22c55e';
+    case 'running':
+    case 'auditing':
+    case 'proofing':
+    case 'merging':
+      return '#eab308';
+    case 'failed':
+    case 'merge_failed':
+    case 'paused':
+      return '#ef4444';
+    case 'created':
+    case 'cleaned':
+    default:
+      return '#555555';
+  }
+}
+
+function WorktreeRowItem({ worktree, selected, maxWidth }: { worktree: WorktreeRow; selected: boolean; maxWidth: number }) {
+  const icon = worktreeStatusIcon(worktree.status);
+  const color = worktreeStatusColor(worktree.status);
+  const specName = pad(truncate(basename(worktree.spec_path, '.md'), 24), 24);
+  const st = pad(worktree.status, 14);
+  const branch = pad(truncate(worktree.branch, 20), 20);
+  const ago = padStart(formatRelativeTime(worktree.updated_at), 9);
+  const line = truncate(`${icon} ${specName}  ${st}${branch}${ago}`, maxWidth - 2);
+
+  return (
+    <box
+      style={{
+        backgroundColor: selected ? '#334155' : undefined,
+        paddingLeft: 1,
+        paddingRight: 1,
+        height: 1,
+      }}
+    >
+      <text>
+        <span fg={color}>{line[0]}</span>
+        <span fg={selected ? '#ffffff' : '#bbbbbb'}>{line.substring(1)}</span>
+      </text>
+    </box>
+  );
+}
+
+function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onFilterSessions, onQuit, onTabSwitch }: {
+  cwd: string;
+  db: Database | null;
+  dbVersion: number;
+  initialIndex?: number;
+  onSelect: (w: WorktreeRow, index: number) => void;
+  onFilterSessions: (w: WorktreeRow) => void;
+  onQuit: () => void;
+  onTabSwitch: (index: number) => void;
+}) {
+  const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
+  const [worktrees, setWorktrees] = useState<WorktreeRow[]>([]);
+  const { width } = useTerminalDimensions();
+  const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const toast = useToast();
+
+  // Load worktrees from DB when data_version changes
+  useEffect(() => {
+    if (!db) return;
+    try {
+      const rows = dbListWorktrees(db);
+      // Sort by updated_at descending (most recently active first)
+      rows.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+      setWorktrees(rows);
+    } catch {
+      // Table may not exist yet
+      setWorktrees([]);
+    }
+  }, [db, dbVersion]);
+
+  // Clamp selected index when worktrees change
+  useEffect(() => {
+    if (selectedIndex >= worktrees.length && worktrees.length > 0) {
+      setSelectedIndex(worktrees.length - 1);
+    }
+  }, [worktrees.length, selectedIndex]);
+
+  // Scroll to keep selected row visible
+  useEffect(() => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    if (selectedIndex === 0) {
+      scroll.scrollTo(0);
+      return;
+    }
+    const target = scroll.getChildren().find((child: ScrollBoxChild) => child.id === `wt-${selectedIndex}`);
+    if (!target) return;
+    const y = target.y - scroll.y;
+    if (y >= scroll.height) {
+      scroll.scrollBy(y - scroll.height + 1);
+    } else if (y < 0) {
+      scroll.scrollBy(y);
+    }
+  }, [selectedIndex]);
+
+  useKeyboard((key) => {
+    if (key.name === 'q') { onQuit(); return; }
+    if (key.name === 'tab') { onTabSwitch(selectedIndex); return; }
+    if (key.name === 'up' || key.name === 'k') {
+      setSelectedIndex(i => Math.max(0, i - 1));
+    } else if (key.name === 'down' || key.name === 'j') {
+      setSelectedIndex(i => Math.min(worktrees.length - 1, i + 1));
+    } else if (key.name === 'return') {
+      if (worktrees.length > 0 && worktrees[selectedIndex]) {
+        onSelect(worktrees[selectedIndex], selectedIndex);
+      }
+    } else if (key.name === 'o') {
+      // Open tmux pane cd'd into worktree
+      const wt = worktrees[selectedIndex];
+      if (!wt) return;
+      if (!isTmuxAvailable()) {
+        toast.show('tmux not detected -- run inside tmux to use [o]', '#888888');
+        return;
+      }
+      if (openTmuxPane(wt.worktree_path)) {
+        toast.show(`Opened pane: ${basename(wt.worktree_path)}`, '#36b5f0');
+      } else {
+        toast.show('Failed to open tmux pane', '#ef4444');
+      }
+    } else if (key.name === 'r') {
+      // Rerun spec in worktree, or open tmux pane for paused (conflict) worktree
+      const wt = worktrees[selectedIndex];
+      if (!wt) return;
+      if (wt.status === 'paused') {
+        // Paused means git conflict awaiting human -- open tmux for manual resolution
+        if (!isTmuxAvailable()) {
+          toast.show('tmux not detected -- run inside tmux to use [r]', '#888888');
+          return;
+        }
+        if (openTmuxPane(wt.worktree_path)) {
+          toast.show(`Opened pane for conflict resolution: ${basename(wt.worktree_path)}`, '#eab308');
+        } else {
+          toast.show('Failed to open tmux pane', '#ef4444');
+        }
+        return;
+      }
+      if (!RERUN_STATUSES.includes(wt.status)) {
+        toast.show(`Cannot rerun: status is ${wt.status}`, '#888888');
+        return;
+      }
+      try {
+        const forgeBin = getForgeEntryPoint();
+        const env: Record<string, string> = {};
+        for (const [k, v] of Object.entries(process.env)) {
+          if (v !== undefined && k !== 'CLAUDECODE' && k !== 'CLAUDE_CODE_ENTRYPOINT') env[k] = v;
+        }
+        const child = spawn('bun', [forgeBin, 'run', '--spec', wt.spec_path, '-C', wt.worktree_path, '--quiet'], {
+          cwd: wt.worktree_path,
+          env,
+          stdio: ['ignore', 'ignore', 'ignore'],
+          detached: true,
+        });
+        child.unref();
+        const specName = basename(wt.spec_path, '.md');
+        toast.show(`Running spec: ${specName}`, '#36b5f0');
+      } catch {
+        toast.show(`Spawn failed -- run: forge run --spec ${wt.spec_path} -C ${wt.worktree_path}`, '#ef4444');
+      }
+    } else if (key.name === 'm') {
+      // Mark worktree as ready
+      const wt = worktrees[selectedIndex];
+      if (!wt || !db) return;
+      if (!MARK_READY_STATUSES.includes(wt.status)) {
+        const valid = getValidTransitions(wt.status);
+        toast.show(`Cannot mark ready from ${wt.status} (allowed: ${valid.join(', ') || 'none'})`, '#888888');
+        return;
+      }
+      try {
+        transitionWorktreeStatus(db, wt.id, 'ready');
+        toast.show(`Marked ready: ${basename(wt.spec_path, '.md')}`, '#22c55e');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Unknown error';
+        toast.show(`Failed: ${msg}`, '#ef4444');
+      }
+    } else if (key.name === 's') {
+      // Filter sessions tab by this worktree
+      const wt = worktrees[selectedIndex];
+      if (!wt) return;
+      onFilterSessions(wt);
+    }
+  });
+
+  const activeCount = worktrees.filter(w =>
+    w.status === 'running' || w.status === 'auditing' || w.status === 'proofing' || w.status === 'merging'
+  ).length;
+
+  const hasTmux = isTmuxAvailable();
+
+  if (worktrees.length === 0) {
+    return (
+      <box flexDirection="column" style={{ padding: 1 }}>
+        <text fg="#888888">No worktrees found</text>
+        <text> </text>
+        <text fg="#555555">Worktrees are created when running specs with --branch or in pipeline mode.</text>
+        <text> </text>
+        <text fg="#555555">[tab] next tab  [q] quit</text>
+      </box>
+    );
+  }
+
+  return (
+    <box flexDirection="column" style={{ flexGrow: 1 }}>
+      <box style={{ paddingLeft: 1, paddingTop: 1, flexShrink: 0 }}>
+        <text>
+          <span fg="#888888">forge worktrees</span>
+          {'  '}
+          <span fg="#555555">{worktrees.length} worktree{worktrees.length !== 1 ? 's' : ''}</span>
+          {activeCount > 0 ? <span fg="#eab308">{'  '}({activeCount} active)</span> : null}
+        </text>
+      </box>
+
+      <scrollbox ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1 }}>
+        {worktrees.map((wt, i) => (
+          <box key={wt.id} id={`wt-${i}`}>
+            <WorktreeRowItem
+              worktree={wt}
+              selected={i === selectedIndex}
+              maxWidth={width}
+            />
+          </box>
+        ))}
+      </scrollbox>
+
+      <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
+
+      <box style={{ paddingLeft: 1, flexShrink: 0 }}>
+        <text fg="#555555">[j/k] navigate  [enter] view  {hasTmux ? '[o] open  ' : ''}[r] rerun  [m] ready  [s] sessions  [tab] next tab  [q] quit</text>
+      </box>
+    </box>
+  );
+}
+
+function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, onBack, onQuit, onTabSwitch }: {
+  worktree: WorktreeRow;
+  cwd: string;
+  db: Database | null;
+  dbVersion: number;
+  onBack: () => void;
+  onQuit: () => void;
+  onTabSwitch: () => void;
+}) {
+  const [worktree, setWorktree] = useState(initialWorktree);
+  const toast = useToast();
+
+  // Live-refresh worktree from DB
+  useEffect(() => {
+    if (!db) return;
+    try {
+      const rows = dbListWorktrees(db);
+      const updated = rows.find(r => r.id === initialWorktree.id);
+      if (updated) setWorktree(updated);
+    } catch {
+      // Ignore — keep showing stale data
+    }
+  }, [db, dbVersion, initialWorktree.id]);
+
+  // Run history from spec_runs joined through spec_entries
+  const [specRuns, setSpecRuns] = useState<SpecRunRow[]>([]);
+  useEffect(() => {
+    if (!db) return;
+    try {
+      const entry = getSpecEntryByPath(db, worktree.spec_path);
+      if (entry) {
+        setSpecRuns(getSpecRunsByEntry(db, entry.id));
+      } else {
+        setSpecRuns([]);
+      }
+    } catch {
+      setSpecRuns([]);
+    }
+  }, [db, dbVersion, worktree.spec_path]);
+
+  // Spec content preview (first 20 lines)
+  const [specContent, setSpecContent] = useState<string[] | null>(null);
+  const [specTotalLines, setSpecTotalLines] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    const specFullPath = isAbsolute(worktree.spec_path)
+      ? worktree.spec_path
+      : join(cwd, worktree.spec_path);
+    readFile(specFullPath, 'utf-8')
+      .then((content) => {
+        if (cancelled) return;
+        const lines = content.split('\n');
+        setSpecTotalLines(lines.length);
+        setSpecContent(lines.slice(0, 20));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSpecContent(null);
+          setSpecTotalLines(0);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [worktree.spec_path, cwd, dbVersion]);
+
+  // Aggregated totals for run history
+  const runTotals = useMemo(() => {
+    let totalCost = 0;
+    let totalDuration = 0;
+    for (const run of specRuns) {
+      totalCost += run.cost_usd ?? 0;
+      totalDuration += run.duration_seconds ?? 0;
+    }
+    return { totalCost, totalDuration };
+  }, [specRuns]);
+
+  useKeyboard((key) => {
+    if (key.name === 'q') { onQuit(); return; }
+    if (key.name === 'tab') { onTabSwitch(); return; }
+    if (key.name === 'escape' || key.name === 'backspace') { onBack(); return; }
+    if (key.name === 'o') {
+      if (!isTmuxAvailable()) {
+        toast.show('tmux not detected -- run inside tmux to use [o]', '#888888');
+        return;
+      }
+      if (openTmuxPane(worktree.worktree_path)) {
+        toast.show(`Opened pane: ${basename(worktree.worktree_path)}`, '#36b5f0');
+      } else {
+        toast.show('Failed to open tmux pane', '#ef4444');
+      }
+    } else if (key.name === 'r') {
+      if (worktree.status === 'paused') {
+        if (!isTmuxAvailable()) {
+          toast.show('tmux not detected -- run inside tmux to use [r]', '#888888');
+          return;
+        }
+        if (openTmuxPane(worktree.worktree_path)) {
+          toast.show(`Opened pane for conflict resolution: ${basename(worktree.worktree_path)}`, '#eab308');
+        } else {
+          toast.show('Failed to open tmux pane', '#ef4444');
+        }
+        return;
+      }
+      if (!RERUN_STATUSES.includes(worktree.status)) {
+        toast.show(`Cannot rerun: status is ${worktree.status}`, '#888888');
+        return;
+      }
+      try {
+        const forgeBin = getForgeEntryPoint();
+        const env: Record<string, string> = {};
+        for (const [k, v] of Object.entries(process.env)) {
+          if (v !== undefined && k !== 'CLAUDECODE' && k !== 'CLAUDE_CODE_ENTRYPOINT') env[k] = v;
+        }
+        const child = spawn('bun', [forgeBin, 'run', '--spec', worktree.spec_path, '-C', worktree.worktree_path, '--quiet'], {
+          cwd: worktree.worktree_path,
+          env,
+          stdio: ['ignore', 'ignore', 'ignore'],
+          detached: true,
+        });
+        child.unref();
+        const specName = basename(worktree.spec_path, '.md');
+        toast.show(`Running spec: ${specName}`, '#36b5f0');
+      } catch {
+        toast.show(`Spawn failed -- run: forge run --spec ${worktree.spec_path} -C ${worktree.worktree_path}`, '#ef4444');
+      }
+    } else if (key.name === 'm') {
+      if (!db) return;
+      if (!MARK_READY_STATUSES.includes(worktree.status)) {
+        const valid = getValidTransitions(worktree.status);
+        toast.show(`Cannot mark ready from ${worktree.status} (allowed: ${valid.join(', ') || 'none'})`, '#888888');
+        return;
+      }
+      try {
+        transitionWorktreeStatus(db, worktree.id, 'ready');
+        toast.show(`Marked ready: ${basename(worktree.spec_path, '.md')}`, '#22c55e');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Unknown error';
+        toast.show(`Failed: ${msg}`, '#ef4444');
+      }
+    }
+  });
+
+  const icon = worktreeStatusIcon(worktree.status);
+  const color = worktreeStatusColor(worktree.status);
+  const specPaths: string[] = (() => {
+    try { return JSON.parse(worktree.spec_paths); } catch { return []; }
+  })();
+
+  return (
+    <box flexDirection="column">
+      <box style={{ paddingLeft: 1, paddingTop: 1 }} flexDirection="column">
+        <text>
+          <span fg="#888888">forge worktree</span>
+          {'  '}
+          <span fg="#cccccc">{worktree.id.substring(0, 12)}</span>
+        </text>
+        <text> </text>
+        <text>
+          <span fg="#888888">Status    </span>
+          <span fg={color}>{icon} {worktree.status}</span>
+        </text>
+        <text>
+          <span fg="#888888">Spec      </span>
+          <span fg="#bbbbbb">{worktree.spec_path}</span>
+        </text>
+        <text>
+          <span fg="#888888">Branch    </span>
+          <span fg="#bbbbbb">{worktree.branch}</span>
+        </text>
+        <text>
+          <span fg="#888888">Path      </span>
+          <span fg="#bbbbbb">{worktree.worktree_path}</span>
+        </text>
+        <text>
+          <span fg="#888888">Created   </span>
+          <span fg="#bbbbbb">{formatRelativeTime(worktree.created_at)}</span>
+          {'  '}
+          <span fg="#888888">Updated   </span>
+          <span fg="#bbbbbb">{formatRelativeTime(worktree.updated_at)}</span>
+        </text>
+        {worktree.work_group_id ? (
+          <text>
+            <span fg="#888888">Group     </span>
+            <span fg="#bbbbbb">{worktree.work_group_id.substring(0, 12)}</span>
+          </text>
+        ) : null}
+        {worktree.task_id ? (
+          <text>
+            <span fg="#888888">Task      </span>
+            <span fg="#bbbbbb">{worktree.task_id.substring(0, 12)}</span>
+          </text>
+        ) : null}
+        {worktree.session_id ? (
+          <text>
+            <span fg="#888888">Session   </span>
+            <span fg="#bbbbbb">{worktree.session_id.substring(0, 12)}</span>
+          </text>
+        ) : null}
+        {worktree.error ? (
+          <>
+            <text> </text>
+            <text>
+              <span fg="#888888">Error     </span>
+              <span fg="#ef4444">{worktree.error}</span>
+            </text>
+          </>
+        ) : null}
+        {specPaths.length > 1 ? (
+          <>
+            <text> </text>
+            <text fg="#888888">Spec Files ({specPaths.length})</text>
+            {specPaths.map((sp, i) => (
+              <text key={i}>
+                <span fg="#555555">  </span>
+                <span fg="#bbbbbb">{sp}</span>
+              </text>
+            ))}
+          </>
+        ) : null}
+
+        {specRuns.length > 0 ? (
+          <>
+            <text> </text>
+            <text>
+              <span bold fg="#cccccc">Run History</span>
+              <span fg="#888888"> ({specRuns.length} runs)</span>
+            </text>
+            {specRuns.map((run) => {
+              const runIcon = run.status === 'passed' || run.status === 'success' ? '+' : 'x';
+              const runColor = run.status === 'passed' || run.status === 'success' ? '#22c55e' : '#ef4444';
+              const cost = run.cost_usd != null ? `$${run.cost_usd.toFixed(2)}` : '   -';
+              const dur = run.duration_seconds != null ? formatDuration(run.duration_seconds) : '-';
+              const turns = run.num_turns != null ? `${run.num_turns}t` : '';
+              return (
+                <text key={run.id}>
+                  <span fg={runColor}>{runIcon}</span>
+                  <span fg="#bbbbbb"> {run.timestamp.substring(0, 19)}</span>
+                  <span fg="#bbbbbb">{'  '}{padStart(cost, 7)}</span>
+                  <span fg="#bbbbbb">{'  '}{padStart(dur, 6)}</span>
+                  <span fg="#888888">{'  '}{turns}</span>
+                </text>
+              );
+            })}
+            <text>
+              <span fg="#888888">Total cost: </span>
+              <span bold fg="#cccccc">${runTotals.totalCost.toFixed(2)}</span>
+              <span fg="#888888">{'  '}Duration: </span>
+              <span bold fg="#cccccc">{formatDuration(runTotals.totalDuration)}</span>
+            </text>
+          </>
+        ) : null}
+
+        {specContent ? (
+          <>
+            <text> </text>
+            <text bold fg="#cccccc">Spec Content</text>
+            {specContent.map((line, i) => (
+              <text key={i} fg="#888888">{line}</text>
+            ))}
+            {specTotalLines > 20 ? (
+              <text fg="#555555">... ({specTotalLines - 20} more lines)</text>
+            ) : null}
+          </>
+        ) : null}
+      </box>
+
+      <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
+
+      <box style={{ paddingLeft: 1, paddingTop: 1, height: 2 }}>
+        <text fg="#555555">[esc] back  {isTmuxAvailable() ? '[o] open  ' : ''}[r] rerun  [m] ready  [tab] next tab  [q] quit</text>
+      </box>
+    </box>
+  );
+}
+
 function PipelinesList({ cwd, initialIndex, onSelect, onQuit, onTabSwitch }: {
   cwd: string;
   initialIndex?: number;
@@ -2547,6 +3160,12 @@ function App({ cwd }: { cwd: string }) {
   const [stageSessionIds, setStageSessionIds] = useState<string[]>([]);
   const [stageSessionInfo, setStageSessionInfo] = useState<SessionInfo | null>(null);
 
+  // Worktrees state
+  const [worktreesListIndex, setWorktreesListIndex] = useState(0);
+  const [worktreesView, setWorktreesView] = useState<'list' | 'detail'>('list');
+  const [selectedWorktree, setSelectedWorktree] = useState<WorktreeRow | null>(null);
+  const [worktreeFilter, setWorktreeFilter] = useState<WorktreeRow | null>(null);
+
   // Executor + task state
   const [executor, setExecutor] = useState<ExecutorInfo>({ state: 'stopped', runningCount: 0, pendingCount: 0 });
   const [activeTasks, setActiveTasks] = useState<TaskRow[]>([]);
@@ -2684,6 +3303,54 @@ function App({ cwd }: { cwd: string }) {
     );
   }
 
+  // ── Worktrees tab ────────────────────────────────────────
+
+  if (activeTab === 'worktrees') {
+    if (worktreesView === 'detail' && selectedWorktree) {
+      return (
+        <box flexDirection="column">
+          <TabBar activeTab={activeTab} />
+          <WorktreeDetail
+            worktree={selectedWorktree}
+            cwd={cwd}
+            db={db}
+            dbVersion={dbVersion}
+            onBack={() => setWorktreesView('list')}
+            onQuit={handleQuit}
+            onTabSwitch={handleTabSwitch}
+          />
+        </box>
+      );
+    }
+
+    return (
+      <box flexDirection="column">
+        <TabBar activeTab={activeTab} />
+        <WorktreesList
+          cwd={cwd}
+          db={db}
+          dbVersion={dbVersion}
+          initialIndex={worktreesListIndex}
+          onSelect={(w, index) => {
+            setWorktreesListIndex(index);
+            setSelectedWorktree(w);
+            setWorktreesView('detail');
+          }}
+          onFilterSessions={(w) => {
+            setWorktreeFilter(w);
+            setListIndex(0);
+            setActiveTab('sessions');
+          }}
+          onQuit={handleQuit}
+          onTabSwitch={(index) => {
+            setWorktreesListIndex(index);
+            setActiveTab(nextTab('worktrees'));
+          }}
+        />
+      </box>
+    );
+  }
+
   // ── Specs tab ─────────────────────────────────────────────
 
   if (activeTab === 'specs') {
@@ -2746,6 +3413,14 @@ function App({ cwd }: { cwd: string }) {
 
   // ── Sessions tab ──────────────────────────────────────────
 
+  // Compute filtered sessions when worktree filter is active
+  const filteredSessions = useMemo(() => {
+    if (!worktreeFilter || !db) return sessions;
+    const allowedIds = getWorktreeSessionIds(db, worktreeFilter);
+    if (allowedIds.size === 0) return [];
+    return sessions.filter(s => allowedIds.has(s.sessionId));
+  }, [sessions, worktreeFilter, db]);
+
   // Task detail view
   if (view === 'detail' && selectedTask && !selectedSession) {
     return (
@@ -2777,12 +3452,14 @@ function App({ cwd }: { cwd: string }) {
     <box flexDirection="column">
       <TabBar activeTab={activeTab} />
       <SessionsList
-        sessions={sessions}
+        sessions={filteredSessions}
         cwd={cwd}
         initialIndex={listIndex}
         executor={executor}
         tasks={activeTasks}
         db={db}
+        worktreeFilter={worktreeFilter}
+        onClearFilter={() => setWorktreeFilter(null)}
         onSelect={(s, i) => {
           setListIndex(i);
           setSelectedSession(s);

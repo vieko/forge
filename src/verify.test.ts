@@ -278,6 +278,66 @@ describe('determineAffectedPackages', () => {
     expect(affected).toContain('@repo/api');
     expect(affected).toContain('@repo/web');
   });
+
+  test('explicit scope overrides heuristic detection', () => {
+    // Content references packages/shared, but scope says packages/api
+    const content = 'This spec modifies `packages/shared/` types.';
+    const affected = determineAffectedPackages(
+      monorepo,
+      '/specs/auth.md',
+      content,
+      '/root',
+      'packages/api',
+    );
+    expect(affected).toEqual(['@repo/api']);
+  });
+
+  test('explicit scope resolves to matching package', () => {
+    const affected = determineAffectedPackages(
+      monorepo,
+      undefined,
+      undefined,
+      undefined,
+      'apps/web',
+    );
+    expect(affected).toEqual(['@repo/web']);
+  });
+
+  test('explicit scope with no match falls through to heuristics', () => {
+    const content = 'Working on `packages/api/` endpoints.';
+    const affected = determineAffectedPackages(
+      monorepo,
+      undefined,
+      content,
+      undefined,
+      'packages/nonexistent',
+    );
+    // Scope didn't match, so heuristics kick in and find packages/api from content
+    expect(affected).toEqual(['@repo/api']);
+  });
+
+  test('explicit scope with trailing slash is normalized', () => {
+    const affected = determineAffectedPackages(
+      monorepo,
+      undefined,
+      undefined,
+      undefined,
+      'packages/api/',
+    );
+    expect(affected).toEqual(['@repo/api']);
+  });
+
+  test('explicit scope matches without heuristic content scanning', () => {
+    // No content, no spec path -- only scope
+    const affected = determineAffectedPackages(
+      monorepo,
+      undefined,
+      undefined,
+      undefined,
+      'packages/shared',
+    );
+    expect(affected).toEqual(['@repo/shared']);
+  });
 });
 
 // ── scopeCommand ────────────────────────────────────────────

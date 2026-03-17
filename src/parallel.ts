@@ -3,14 +3,14 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { ForgeError, execAsync, createWorktree, commitWorktree, cleanupWorktree } from './utils.js';
+import { ForgeError, execAsync, createWorktree, commitWorktree, consolidateLevelBranches, generateWorkGroupId } from './utils.js';
 import { DIM, RESET, BOLD, CMD, AGENT_VERBS, SPINNER_FRAMES, formatElapsed, showBanner } from './display.js';
 import { runSingleSpec, type BatchResult } from './run.js';
-import { loadSpecDeps, topoSort, hasDependencies, type SpecDep, type DepLevel } from './deps.js';
-import { withManifestLock, findOrCreateEntry, specKey, loadManifest, resolveSpecFile, resolveSpecDir, resolveSpecSource, assessSpecComplexity, resetRunningSpecs } from './specs.js';
+import { loadSpecDeps, topoSort, hasDependencies, parseScope, type SpecDep, type DepLevel } from './deps.js';
+import { withSpecTransaction, findOrCreateEntry, specKey, loadManifest, resolveSpecFile, resolveSpecDir, resolveSpecSource, assessSpecComplexity, resetRunningSpecs } from './specs.js';
 import { resolveWorkingDir } from './utils.js';
 import { isInterrupted } from './abort.js';
-import { getDb } from './db.js';
+import { getDb, getWorktreeByPath, transitionWorktreeStatus, updateWorktreeSpecPaths, insertWorktree } from './db.js';
 import type { TaskContext } from './task-context.js';
 import { DbTaskContext, NoopTaskContext } from './task-context.js';
 
@@ -292,8 +292,8 @@ export async function smartDispatch(
   return null;
 }
 
-// Internal options type: ForgeOptions + worktree result dir + batch task context
-type RunOptions = ForgeOptions & { _resultDir?: string; _parentTaskContext?: TaskContext; _batchTaskContext?: TaskContext };
+// Internal options type: ForgeOptions + worktree result dir + batch task context + worktree tracking
+type RunOptions = ForgeOptions & { _resultDir?: string; _parentTaskContext?: TaskContext; _batchTaskContext?: TaskContext; _worktreeId?: string; _worktreePath?: string };
 
 // Run specs sequentially
 async function runSpecsSequential(
@@ -476,6 +476,402 @@ async function runSpecsParallel(
   return results;
 }
 
+// Run specs in isolated worktrees (one worktree per spec) with parallel execution
+async function runSpecsIsolated(
+  specs: Array<{ name: string; path: string }>,
+  options: RunOptions,
+  concurrency: number,
+  runId: string,
+  workGroupId: string,
+  originalRepoDir: string,
+): Promise<BatchResult[]> {
+  const results: BatchResult[] = [];
+  const names = specs.map(s => s.name);
+  const { quiet } = options;
+
+  const display = quiet ? null : createSpecDisplay(names);
+
+  try {
+    await workerPool(names, concurrency, async (specFile, i) => {
+      const specFilePath = specs[i].path;
+      display?.start(i);
+
+      const startTime = Date.now();
+      let specWorktreePath: string | undefined;
+      let specWorktreeId: string | undefined;
+
+      try {
+        // Read spec content to parse scope for monorepo-aware worktree setup
+        const specContent = await fs.readFile(specFilePath, 'utf-8');
+        const specScope = parseScope(specContent);
+
+        // Create a dedicated worktree for this spec
+        specWorktreePath = await createWorktree(originalRepoDir, 'auto', {
+          spec_path: specFilePath,
+          work_group_id: workGroupId,
+          force: options.force,
+          noAutoPrune: options.noAutoPrune,
+          ...(specScope && { scope: specScope }),
+        });
+
+        // Look up worktree entry for lifecycle tracking
+        const db = getDb(originalRepoDir);
+        if (db && specWorktreePath) {
+          const wtRow = getWorktreeByPath(db, specWorktreePath);
+          if (wtRow) {
+            specWorktreeId = wtRow.id;
+            transitionWorktreeStatus(db, wtRow.id, 'running');
+          }
+        }
+
+        // Create child TaskContext
+        const parentCtx = options._parentTaskContext;
+        const resultDb = getDb(originalRepoDir);
+        const childContext = resultDb && parentCtx
+          ? new DbTaskContext(resultDb, {
+              command: 'run',
+              description: options.prompt,
+              specPath: specFilePath,
+              cwd: originalRepoDir,
+              parentTaskId: parentCtx.taskId,
+            })
+          : new NoopTaskContext();
+
+        const result = await runSingleSpec({
+          ...options,
+          specPath: specFilePath,
+          specContent,
+          specDir: undefined,
+          cwd: specWorktreePath,
+          quiet: true,
+          _silent: true,
+          _onActivity: (detail) => display?.activity(i, detail),
+          _runId: runId,
+          _resultDir: originalRepoDir,
+          taskContext: childContext,
+        });
+
+        const duration = (Date.now() - startTime) / 1000;
+        display?.done(i, duration);
+        results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration });
+        options._onSpecResult?.(specFile, 'success');
+
+        // Auto-commit on success
+        try {
+          await commitWorktree(specWorktreePath, `forge/isolate-${specFile.replace(/\.md$/, '')}`);
+        } catch {
+          // Best effort -- don't fail the spec run on commit error
+        }
+
+        // Transition worktree to complete
+        if (specWorktreeId) {
+          const wtDb = getDb(originalRepoDir);
+          if (wtDb) {
+            try { transitionWorktreeStatus(wtDb, specWorktreeId, 'complete'); } catch {}
+          }
+        }
+      } catch (err) {
+        const duration = (Date.now() - startTime) / 1000;
+        const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
+        const errMsg = isInterrupted() ? 'cancelled' : (err instanceof Error ? err.message : 'Unknown error');
+        display?.fail(i, errMsg);
+        results.push({
+          spec: specFile,
+          status: isInterrupted() ? 'cancelled' : `failed: ${errMsg}`,
+          cost,
+          duration,
+        });
+        if (!isInterrupted()) options._onSpecResult?.(specFile, 'failed');
+
+        // Transition worktree to failed
+        if (specWorktreeId) {
+          const wtDb = getDb(originalRepoDir);
+          if (wtDb) {
+            try { transitionWorktreeStatus(wtDb, specWorktreeId, 'failed', errMsg); } catch {}
+          }
+        }
+      }
+    });
+  } finally {
+    display?.stop();
+  }
+
+  // Mark specs never started as cancelled
+  const started = new Set(results.map(r => r.spec));
+  for (const specFile of names) {
+    if (!started.has(specFile)) {
+      results.push({ spec: specFile, status: 'cancelled', duration: 0 });
+    }
+  }
+
+  return results;
+}
+
+// Run specs in isolated worktrees with dependency-level consolidation gates.
+// Specs are grouped into topological levels. Each level runs in parallel (one worktree per spec).
+// Between levels, successful worktree branches are consolidated into a merged branch.
+// The next level's worktrees are created from this consolidated state.
+async function runSpecsIsolatedWithLevels(
+  levels: DepLevel[],
+  options: RunOptions,
+  concurrency: number,
+  runId: string,
+  workGroupId: string,
+  originalRepoDir: string,
+): Promise<BatchResult[]> {
+  const results: BatchResult[] = [];
+  const { quiet } = options;
+
+  // Flatten all spec names across levels for the progress tracker
+  const allSpecNames: string[] = [];
+  const specIndexMap = new Map<string, number>();
+  for (const level of levels) {
+    for (const s of level.specs) {
+      specIndexMap.set(s.name, allSpecNames.length);
+      allSpecNames.push(s.name);
+    }
+  }
+
+  const tracker = createProgressTracker(allSpecNames, quiet ?? false);
+
+  if (!quiet) {
+    console.log(`${DIM}[dependency graph: ${levels.length} level(s), isolate mode]${RESET}`);
+  }
+
+  let consolidationBranch: string | undefined;
+
+  for (let levelIdx = 0; levelIdx < levels.length; levelIdx++) {
+    // Skip remaining levels if interrupted
+    if (isInterrupted()) {
+      for (let j = levelIdx; j < levels.length; j++) {
+        for (const s of levels[j].specs) {
+          results.push({ spec: s.name, status: 'cancelled', duration: 0 });
+        }
+      }
+      break;
+    }
+
+    const level = levels[levelIdx];
+    const levelSpecs = level.specs.map(s => ({ name: s.name, path: s.path }));
+    const levelIndices = levelSpecs.map(s => specIndexMap.get(s.name)!);
+
+    if (!quiet) {
+      console.log(`\n${DIM}${'─'.repeat(60)}${RESET}`);
+      console.log(`Level ${levelIdx + 1}/${levels.length}: ${BOLD}${levelSpecs.length} spec(s)${RESET} ${DIM}(isolate)${RESET}`);
+      console.log(`${DIM}${'─'.repeat(60)}${RESET}\n`);
+    }
+
+    tracker.markRunning(levelIndices);
+
+    // Run this level's specs in isolated worktrees, branching from the consolidation point
+    const levelResults = await runSpecsIsolatedForLevel(
+      levelSpecs,
+      options,
+      concurrency,
+      runId,
+      workGroupId,
+      originalRepoDir,
+      consolidationBranch, // undefined for level 0 (uses HEAD)
+    );
+
+    tracker.applyResults(levelResults, specIndexMap);
+    results.push(...levelResults);
+
+    // Check for failures in this level
+    const levelFailures = levelResults.filter(r => !r.status.startsWith('success') && r.status !== 'cancelled');
+
+    if (levelFailures.length > 0 && levelIdx < levels.length - 1) {
+      if (!quiet) {
+        console.log(`\n\x1b[33m[forge]\x1b[0m ${levelFailures.length} spec(s) failed in level ${levelIdx + 1} -- skipping dependent levels ${levelIdx + 2}-${levels.length}`);
+      }
+
+      // Mark all specs in remaining levels as cancelled
+      for (let j = levelIdx + 1; j < levels.length; j++) {
+        for (const s of levels[j].specs) {
+          results.push({ spec: s.name, status: 'cancelled', duration: 0 });
+        }
+      }
+      break;
+    }
+
+    // Consolidate successful branches for the next level
+    const successfulBranches = levelResults
+      .filter(r => r.status === 'success' && r._branch)
+      .map(r => r._branch!);
+
+    if (successfulBranches.length > 0 && levelIdx < levels.length - 1) {
+      try {
+        consolidationBranch = await consolidateLevelBranches(
+          originalRepoDir,
+          successfulBranches,
+          levelIdx,
+          workGroupId,
+          consolidationBranch, // chain from previous consolidation (or HEAD for level 0)
+        );
+
+        if (!quiet) {
+          console.log(`${DIM}[consolidated ${successfulBranches.length} branch(es) into ${consolidationBranch}]${RESET}`);
+        }
+      } catch (err) {
+        if (!quiet) {
+          console.log(`\n\x1b[31m[forge]\x1b[0m Consolidation failed after level ${levelIdx + 1}: ${err instanceof Error ? err.message : err}`);
+          console.log(`\x1b[33m[forge]\x1b[0m Skipping dependent levels ${levelIdx + 2}-${levels.length}`);
+        }
+
+        // Mark all specs in remaining levels as cancelled
+        for (let j = levelIdx + 1; j < levels.length; j++) {
+          for (const s of levels[j].specs) {
+            results.push({ spec: s.name, status: 'cancelled', duration: 0 });
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  // Final checkpoint after all levels
+  tracker.printFinal();
+
+  return results;
+}
+
+// Run a single level of specs in isolated worktrees, optionally from a consolidated start point.
+// Similar to runSpecsIsolated but supports a startPoint for the worktree branches.
+// Returns BatchResult with an extra _branch field for consolidation tracking.
+async function runSpecsIsolatedForLevel(
+  specs: Array<{ name: string; path: string }>,
+  options: RunOptions,
+  concurrency: number,
+  runId: string,
+  workGroupId: string,
+  originalRepoDir: string,
+  startPoint?: string,
+): Promise<(BatchResult & { _branch?: string })[]> {
+  const results: (BatchResult & { _branch?: string })[] = [];
+  const names = specs.map(s => s.name);
+  const { quiet } = options;
+
+  const display = quiet ? null : createSpecDisplay(names);
+
+  try {
+    await workerPool(names, concurrency, async (specFile, i) => {
+      const specFilePath = specs[i].path;
+      display?.start(i);
+
+      const startTime = Date.now();
+      let specWorktreePath: string | undefined;
+      let specWorktreeId: string | undefined;
+      let specBranch: string | undefined;
+
+      try {
+        // Read spec content to parse scope for monorepo-aware worktree setup
+        const specContent = await fs.readFile(specFilePath, 'utf-8');
+        const specScope = parseScope(specContent);
+
+        // Create a dedicated worktree for this spec, from the consolidation point if available
+        specWorktreePath = await createWorktree(originalRepoDir, 'auto', {
+          spec_path: specFilePath,
+          work_group_id: workGroupId,
+          force: options.force,
+          noAutoPrune: options.noAutoPrune,
+          startPoint,
+          ...(specScope && { scope: specScope }),
+        });
+
+        // Look up worktree entry for lifecycle tracking
+        const db = getDb(originalRepoDir);
+        if (db && specWorktreePath) {
+          const wtRow = getWorktreeByPath(db, specWorktreePath);
+          if (wtRow) {
+            specWorktreeId = wtRow.id;
+            specBranch = wtRow.branch;
+            transitionWorktreeStatus(db, wtRow.id, 'running');
+          }
+        }
+
+        // Create child TaskContext
+        const parentCtx = options._parentTaskContext;
+        const resultDb = getDb(originalRepoDir);
+        const childContext = resultDb && parentCtx
+          ? new DbTaskContext(resultDb, {
+              command: 'run',
+              description: options.prompt,
+              specPath: specFilePath,
+              cwd: originalRepoDir,
+              parentTaskId: parentCtx.taskId,
+            })
+          : new NoopTaskContext();
+
+        const result = await runSingleSpec({
+          ...options,
+          specPath: specFilePath,
+          specContent,
+          specDir: undefined,
+          cwd: specWorktreePath,
+          quiet: true,
+          _silent: true,
+          _onActivity: (detail) => display?.activity(i, detail),
+          _runId: runId,
+          _resultDir: originalRepoDir,
+          taskContext: childContext,
+        });
+
+        const duration = (Date.now() - startTime) / 1000;
+        display?.done(i, duration);
+        results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration, _branch: specBranch });
+        options._onSpecResult?.(specFile, 'success');
+
+        // Auto-commit on success
+        try {
+          await commitWorktree(specWorktreePath, specBranch || `forge/isolate-${specFile.replace(/\.md$/, '')}`);
+        } catch {
+          // Best effort
+        }
+
+        // Transition worktree to complete
+        if (specWorktreeId) {
+          const wtDb = getDb(originalRepoDir);
+          if (wtDb) {
+            try { transitionWorktreeStatus(wtDb, specWorktreeId, 'complete'); } catch {}
+          }
+        }
+      } catch (err) {
+        const duration = (Date.now() - startTime) / 1000;
+        const cost = err instanceof ForgeError ? err.result?.costUsd : undefined;
+        const errMsg = isInterrupted() ? 'cancelled' : (err instanceof Error ? err.message : 'Unknown error');
+        display?.fail(i, errMsg);
+        results.push({
+          spec: specFile,
+          status: isInterrupted() ? 'cancelled' : `failed: ${errMsg}`,
+          cost,
+          duration,
+        });
+        if (!isInterrupted()) options._onSpecResult?.(specFile, 'failed');
+
+        // Transition worktree to failed
+        if (specWorktreeId) {
+          const wtDb = getDb(originalRepoDir);
+          if (wtDb) {
+            try { transitionWorktreeStatus(wtDb, specWorktreeId, 'failed', errMsg); } catch {}
+          }
+        }
+      }
+    });
+  } finally {
+    display?.stop();
+  }
+
+  // Mark specs never started as cancelled
+  const started = new Set(results.map(r => r.spec));
+  for (const specFile of names) {
+    if (!started.has(specFile)) {
+      results.push({ spec: specFile, status: 'cancelled', duration: 0 });
+    }
+  }
+
+  return results;
+}
+
 // Run a batch of spec files with dependency-aware execution
 export async function runSpecBatch(
   specFilePaths: string[],
@@ -504,10 +900,11 @@ export async function runSpecBatch(
   // Register all specs in the manifest as 'running' before execution
   // Use _resultDir (original repo) for manifest when running in a worktree
   const batchWorkingDir = options._resultDir || await resolveWorkingDir(options.cwd);
-  await withManifestLock(batchWorkingDir, (manifest) => {
+  const batchWorkGroupId = options.workGroupId;
+  await withSpecTransaction(batchWorkingDir, (manifest) => {
     for (const specFilePath of specFilePaths) {
       const key = specKey(specFilePath, batchWorkingDir);
-      const entry = findOrCreateEntry(manifest, key, 'file');
+      const entry = findOrCreateEntry(manifest, key, 'file', batchWorkGroupId);
       entry.status = 'running';
       entry.updatedAt = new Date().toISOString();
     }
@@ -674,6 +1071,7 @@ export function printBatchSummary(
   quiet: boolean,
   specDir?: string,
   hasTracker?: boolean,
+  worktreePath?: string,
 ): void {
   const totalSpecDuration = results.reduce((sum, r) => sum + r.duration, 0);
   const totalCost = results.reduce((sum, r) => sum + (r.cost || 0), 0);
@@ -719,6 +1117,11 @@ export function printBatchSummary(
       console.log(`  Result:     ${allPassed ? '\x1b[32m' : '\x1b[33m'}${successCount}/${results.length} successful\x1b[0m`);
     }
 
+    // Worktree location for user reference
+    if (worktreePath) {
+      console.log(`  Worktree: ${DIM}${worktreePath}${RESET}`);
+    }
+
     // Next-step hint
     if (allPassed && specDir) {
       console.log(`\n  ${DIM}Next step:${RESET}`);
@@ -762,7 +1165,7 @@ export async function filterPassedSpecs(
 
 // Main entry point - handles single spec or spec directory
 export async function runForge(options: ForgeOptions & { _batchTaskContext?: TaskContext }): Promise<void> {
-  const { specDir, specPath, quiet, sequential, sequentialFirst = 0, rerunFailed, pendingOnly, force, branch } = options;
+  const { specDir, specPath, quiet, sequential, sequentialFirst = 0, rerunFailed, pendingOnly, force, branch, isolate, workGroupId, noAutoPrune } = options;
 
   if (!quiet) {
     showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS');
@@ -771,59 +1174,111 @@ export async function runForge(options: ForgeOptions & { _batchTaskContext?: Tas
   // Resolve working directory early — used by multiple code paths
   const workingDir = await resolveWorkingDir(options.cwd);
 
-  // ── Branch isolation via git worktree ──────────────────────
+  // ── Worktree isolation (auto for spec runs, explicit via --branch) ──
   let worktreePath: string | undefined;
   let originalRepoDir: string | undefined;
+  let worktreeId: string | undefined;
+  let effectiveBranch: string | undefined;
 
-  if (branch) {
-    worktreePath = await createWorktree(workingDir, branch);
-    originalRepoDir = workingDir;
+  // Auto-create worktree for spec-driven runs and explicit --branch
+  // In isolate mode, skip the single-worktree — each spec gets its own worktree later
+  const specRefPath = specDir || specPath;
+  const needsWorktree = (specRefPath || branch) && !isolate;
 
-    if (!quiet) {
-      console.log(`${DIM}[branch: ${branch}]${RESET} -> ${worktreePath}`);
-      console.log('');
+  if (needsWorktree) {
+    const wgId = workGroupId || generateWorkGroupId();
+
+    try {
+      if (specRefPath) {
+        // Spec-driven: sibling worktree with DB registry
+        worktreePath = await createWorktree(workingDir, branch || 'auto', {
+          spec_path: specRefPath,
+          work_group_id: wgId,
+          force,
+          noAutoPrune,
+        });
+      } else {
+        // Legacy: explicit --branch without spec (backward compat)
+        worktreePath = await createWorktree(workingDir, branch!, { force, noAutoPrune });
+      }
+
+      originalRepoDir = workingDir;
+
+      // Look up worktree entry for lifecycle tracking
+      const db = getDb(workingDir);
+      if (db && worktreePath) {
+        const wtRow = getWorktreeByPath(db, worktreePath);
+        if (wtRow) {
+          worktreeId = wtRow.id;
+          effectiveBranch = wtRow.branch;
+          transitionWorktreeStatus(db, wtRow.id, 'running');
+        }
+      }
+
+      effectiveBranch = effectiveBranch || branch;
+
+      if (!quiet) {
+        console.log(`${DIM}[branch: ${effectiveBranch || 'auto'}]${RESET} -> ${worktreePath}`);
+        console.log('');
+      }
+
+      // Override cwd so all downstream code works in the worktree
+      options = { ...options, cwd: worktreePath, workGroupId: wgId };
+    } catch (err) {
+      // Worktree creation failed — run in-place with a warning
+      if (!quiet) {
+        console.log(`${DIM}[forge]${RESET} \x1b[33mWorktree creation failed, running in-place\x1b[0m: ${err instanceof Error ? err.message : err}\n`);
+      }
     }
-
-    // Override cwd so all downstream code works in the worktree
-    options = { ...options, cwd: worktreePath };
   }
 
   // When in worktree mode, results/manifest persist to the original repo
   // persistDir (from external callers like pipeline) takes precedence over worktree-derived originalRepoDir
   const resultDir = options.persistDir || originalRepoDir || workingDir;
 
-  // Internal option: pass result dir through to runSingleSpec and runSpecBatch
-  const runOptions: ForgeOptions & { _resultDir?: string } = resultDir !== workingDir
-    ? { ...options, _resultDir: resultDir }
-    : options;
+  // Auto-mint work group ID for batch runs when not already set (fallback for worktree failure)
+  if (!options.workGroupId && (specDir || specPath || branch || isolate)) {
+    options = { ...options, workGroupId: generateWorkGroupId() };
+  }
 
-  try {
-    const { anyPassed } = await runForgeInner(runOptions, workingDir, resultDir, quiet, sequential, sequentialFirst, rerunFailed, pendingOnly, force);
+  // Internal option: pass result dir + worktree info through to runSingleSpec and runSpecBatch
+  // When originalRepoDir is set, we're in worktree mode and results must route to the original repo
+  const runOptions: RunOptions = {
+    ...options,
+    ...(originalRepoDir && { _resultDir: resultDir }),
+    ...(worktreeId && { _worktreeId: worktreeId }),
+    ...(worktreePath && { _worktreePath: worktreePath }),
+  };
 
-    // Auto-commit on branch — skip if all specs failed
-    if (worktreePath && originalRepoDir) {
-      if (anyPassed) {
-        const committed = await commitWorktree(worktreePath, branch!);
-        if (!quiet) {
-          if (committed) {
-            console.log(`\n${DIM}[forge]${RESET} Committed changes to branch ${BOLD}${branch}${RESET}`);
-          } else {
-            console.log(`\n${DIM}[forge]${RESET} No changes to commit on branch ${BOLD}${branch}${RESET}`);
-          }
-        }
-      } else if (!quiet) {
-        console.log(`\n${DIM}[forge]${RESET} All specs failed — skipping commit on branch ${BOLD}${branch}${RESET}`);
-      }
-    }
-  } catch (err) {
-    // Single spec failure or pre-execution error — don't commit broken state
-    throw err;
-  } finally {
-    // Always clean up the worktree
-    if (worktreePath && originalRepoDir) {
-      await cleanupWorktree(worktreePath, originalRepoDir);
+  const { anyPassed } = await runForgeInner(runOptions, workingDir, resultDir, quiet, sequential, sequentialFirst, rerunFailed, pendingOnly, force, isolate);
+
+  // Auto-commit on worktree — skip if all specs failed
+  // Worktree persists after run completes (no cleanup).
+  // Users control the worktree lifecycle explicitly.
+  if (worktreePath && originalRepoDir) {
+    const branchLabel = effectiveBranch || 'worktree';
+
+    if (anyPassed) {
+      const committed = await commitWorktree(worktreePath, effectiveBranch || 'forge-run');
       if (!quiet) {
-        console.log(`${DIM}[forge]${RESET} Cleaned up worktree for branch ${BOLD}${branch}${RESET}`);
+        if (committed) {
+          console.log(`\n${DIM}[forge]${RESET} Committed changes to branch ${BOLD}${branchLabel}${RESET}`);
+        } else {
+          console.log(`\n${DIM}[forge]${RESET} No changes to commit on branch ${BOLD}${branchLabel}${RESET}`);
+        }
+      }
+    } else if (!quiet) {
+      console.log(`\n${DIM}[forge]${RESET} All specs failed — skipping commit on branch ${BOLD}${branchLabel}${RESET}`);
+    }
+
+    // Transition worktree lifecycle: running -> complete/failed
+    const db = getDb(originalRepoDir);
+    if (db && worktreeId) {
+      try {
+        const finalStatus = anyPassed ? 'complete' : 'failed';
+        transitionWorktreeStatus(db, worktreeId, finalStatus);
+      } catch {
+        // Best effort — don't fail the run because of status transition
       }
     }
   }
@@ -840,6 +1295,7 @@ async function runForgeInner(
   rerunFailed: boolean | undefined,
   pendingOnly: boolean | undefined,
   force: boolean | undefined,
+  isolate: boolean | undefined,
 ): Promise<{ anyPassed: boolean }> {
   const parallel = !sequential;
 
@@ -917,7 +1373,7 @@ async function runForgeInner(
       await resetRunningSpecs(resultDir).catch(() => {});
     }
 
-    printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, undefined, hasTracker);
+    printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, undefined, hasTracker, options._worktreePath);
     return { anyPassed: results.some(r => r.status === 'success') };
   }
 
@@ -967,7 +1423,7 @@ async function runForgeInner(
       await resetRunningSpecs(resultDir).catch(() => {});
     }
 
-    printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, undefined, hasTracker);
+    printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, undefined, hasTracker, options._worktreePath);
     return { anyPassed: results.some(r => r.status === 'success') };
   }
 
@@ -1002,7 +1458,8 @@ async function runForgeInner(
     }
 
     // Auto-register discovered specs in the manifest
-    await withManifestLock(resultDir, async (manifest) => {
+    const specDirWorkGroupId = options.workGroupId;
+    await withSpecTransaction(resultDir, async (manifest) => {
       const tracked = new Set(manifest.specs.map(e => e.spec));
       for (const f of allSpecFiles) {
         const absPath = path.join(resolvedDir, f);
@@ -1010,7 +1467,7 @@ async function runForgeInner(
         if (!tracked.has(key)) {
           let content: string | undefined;
           try { content = await fs.readFile(absPath, 'utf-8'); } catch {}
-          findOrCreateEntry(manifest, key, resolveSpecSource(content, absPath));
+          findOrCreateEntry(manifest, key, resolveSpecSource(content, absPath), specDirWorkGroupId);
         }
       }
     });
@@ -1032,20 +1489,30 @@ async function runForgeInner(
     }
 
     if (!quiet) {
-      const mode = parallel
-        ? `parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})`
-        : 'sequential';
+      const mode = isolate
+        ? `isolate (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`}, 1 worktree per spec)`
+        : parallel
+          ? `parallel (concurrency: ${options.concurrency ? concurrency : `auto: ${concurrency}`})`
+          : 'sequential';
       console.log(`Found ${BOLD}${specFiles.length}${RESET} specs in ${DIM}${resolvedDir}${RESET}`);
       if (skippedCount > 0) {
         console.log(`${DIM}[skipped ${skippedCount} already passed — use --force to re-run]${RESET}`);
       }
       console.log(`${DIM}[${mode}]${RESET}`);
-      if (parallel && sequentialFirst > 0) {
+      if (!isolate && parallel && sequentialFirst > 0) {
         console.log(`\nSequential-first: ${Math.min(sequentialFirst, specFiles.length)} spec(s) run before parallel phase`);
       }
     }
 
     const specFilePaths = specFiles.map(f => path.join(resolvedDir, f));
+
+    // Update worktree registry with discovered spec paths
+    if (options._worktreeId) {
+      const wtDb = getDb(resultDir);
+      if (wtDb) {
+        updateWorktreeSpecPaths(wtDb, options._worktreeId, specFilePaths);
+      }
+    }
 
     // ── Spec-dir preflight: warn about complex specs ──
     if (!quiet) {
@@ -1066,7 +1533,7 @@ async function runForgeInner(
       ?? (db
         ? new DbTaskContext(db, {
             command: 'run',
-            description: `spec-dir: ${specFiles.length} spec(s) in ${path.relative(resultDir, resolvedDir) || resolvedDir}`,
+            description: `${isolate ? 'isolate' : 'spec-dir'}: ${specFiles.length} spec(s) in ${path.relative(resultDir, resolvedDir) || resolvedDir}`,
             specPath: resolvedDir,
             cwd: effectiveWorkingDir,
           })
@@ -1074,7 +1541,53 @@ async function runForgeInner(
     const specDirOptions: RunOptions = { ...options, _parentTaskContext: specDirBatchContext };
 
     const wallClockStart = Date.now();
-    const { results, hasTracker } = await runSpecBatch(specFilePaths, specFiles, specDirOptions, concurrency, runId, skippedNames);
+
+    // ── Isolate mode: one worktree per spec ──
+    let results: BatchResult[];
+    let hasTracker: boolean;
+    if (isolate) {
+      const wgId = options.workGroupId || generateWorkGroupId();
+      const specs = specFiles.map((name, i) => ({ name, path: specFilePaths[i] }));
+
+      // Register all specs in manifest as 'running'
+      await withSpecTransaction(resultDir, (manifest) => {
+        for (const specFilePath of specFilePaths) {
+          const key = specKey(specFilePath, resultDir);
+          const entry = findOrCreateEntry(manifest, key, 'file', wgId);
+          entry.status = 'running';
+          entry.updatedAt = new Date().toISOString();
+        }
+      });
+
+      // Check for dependencies — use level-aware execution if deps exist
+      const specDeps = await loadSpecDeps(specFilePaths, specFiles);
+
+      // Strip already-satisfied deps (from passed specs filtered from the batch)
+      if (skippedNames && skippedNames.size > 0) {
+        for (const spec of specDeps) {
+          spec.depends = spec.depends.filter(d => !skippedNames.has(d));
+        }
+      }
+
+      const useDeps = hasDependencies(specDeps);
+
+      if (useDeps) {
+        // Dependency-aware isolate: group into topo levels with consolidation gates
+        const manifest = await loadManifest(resultDir);
+        const levels = topoSort(specDeps, manifest);
+        results = await runSpecsIsolatedWithLevels(levels, specDirOptions, concurrency, runId, wgId, resultDir);
+        hasTracker = true; // Level-aware function uses its own tracker
+      } else {
+        // No dependencies — flat parallel isolation
+        results = await runSpecsIsolated(specs, specDirOptions, concurrency, runId, wgId, resultDir);
+        hasTracker = false;
+      }
+    } else {
+      const batch = await runSpecBatch(specFilePaths, specFiles, specDirOptions, concurrency, runId, skippedNames);
+      results = batch.results;
+      hasTracker = batch.hasTracker;
+    }
+
     const wallClockDuration = (Date.now() - wallClockStart) / 1000;
 
     // Update parent batch task status + manifest cleanup on cancel
@@ -1090,7 +1603,7 @@ async function runForgeInner(
     }
 
     const displayDir = path.relative(resultDir, resolvedDir) || resolvedDir;
-    printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, displayDir, hasTracker);
+    printBatchSummary(results, wallClockDuration, !sequential, quiet ?? false, displayDir, hasTracker, options._worktreePath);
 
     return { anyPassed: results.some(r => r.status === 'success') };
   }
@@ -1137,7 +1650,7 @@ async function runForgeInner(
     let isFile = false;
     try { isFile = (await fs.stat(absSpec)).isFile(); } catch {}
     if (isFile) {
-      await withManifestLock(resultDir, async (manifest) => {
+      await withSpecTransaction(resultDir, async (manifest) => {
         const key = specKey(absSpec, resultDir);
         if (!manifest.specs.some(e => e.spec === key)) {
           let content: string | undefined;
@@ -1145,6 +1658,14 @@ async function runForgeInner(
           findOrCreateEntry(manifest, key, resolveSpecSource(content, absSpec));
         }
       });
+
+      // Update worktree registry with single spec path
+      if (options._worktreeId) {
+        const wtDb = getDb(resultDir);
+        if (wtDb) {
+          updateWorktreeSpecPaths(wtDb, options._worktreeId, [absSpec]);
+        }
+      }
     }
   }
 

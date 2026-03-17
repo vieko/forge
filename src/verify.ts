@@ -147,8 +147,26 @@ export function determineAffectedPackages(
   specPath?: string,
   specContent?: string,
   workingDir?: string,
+  specScope?: string,
 ): string[] {
   const affected = new Set<string>();
+
+  // Strategy 0 (highest priority): Explicit scope from spec frontmatter
+  // scope: packages/api  ->  directly resolves to that package
+  if (specScope) {
+    // Normalize scope for matching (strip trailing slashes)
+    const normalizedScope = specScope.replace(/\/+$/, '');
+    for (const [dir, name] of monorepo.packages) {
+      if (dir === normalizedScope || dir.startsWith(normalizedScope + '/')) {
+        affected.add(name);
+      }
+    }
+    // If scope matched packages, return immediately (explicit scope overrides heuristics)
+    if (affected.size > 0) {
+      return Array.from(affected);
+    }
+    // Scope was specified but didn't match any package -- fall through to heuristics
+  }
 
   // Strategy 1: Spec file lives inside a workspace package dir
   if (specPath && workingDir) {

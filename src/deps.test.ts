@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { parseDependencies, parseSource, topoSort, detectCycle, validateDeps, hasDependencies, type SpecDep } from './deps.js';
+import { parseDependencies, parseSource, parseScope, topoSort, detectCycle, validateDeps, hasDependencies, type SpecDep } from './deps.js';
 import type { SpecManifest } from './types.js';
 
 // ── parseDependencies ───────────────────────────────────────
@@ -196,6 +196,96 @@ source:   github:vieko/forge#99
 
 # Content`;
     expect(parseSource(content)).toBe('github:vieko/forge#99');
+  });
+});
+
+// ── parseScope ──────────────────────────────────────────────
+
+describe('parseScope', () => {
+  test('no frontmatter -> returns undefined', () => {
+    expect(parseScope('# Just a heading\nSome content')).toBeUndefined();
+  });
+
+  test('frontmatter without scope field -> returns undefined', () => {
+    const content = `---
+title: My Spec
+depends: [01-foo.md]
+---
+
+# Content`;
+    expect(parseScope(content)).toBeUndefined();
+  });
+
+  test('scope: packages/api -> returns "packages/api"', () => {
+    const content = `---
+scope: packages/api
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('packages/api');
+  });
+
+  test('scope: apps/web -> returns "apps/web"', () => {
+    const content = `---
+scope: apps/web
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('apps/web');
+  });
+
+  test('scope with extra whitespace -> trimmed correctly', () => {
+    const content = `---
+scope:   packages/api
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('packages/api');
+  });
+
+  test('scope with leading slash -> stripped', () => {
+    const content = `---
+scope: /packages/api
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('packages/api');
+  });
+
+  test('scope with trailing slash -> stripped', () => {
+    const content = `---
+scope: packages/api/
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('packages/api');
+  });
+
+  test('scope alongside other frontmatter fields', () => {
+    const content = `---
+depends: [01-base.md]
+scope: packages/api
+source: github:vieko/forge#42
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('packages/api');
+  });
+
+  test('scope in body (not frontmatter) -> returns undefined', () => {
+    const content = `# Spec
+
+scope: packages/api`;
+    expect(parseScope(content)).toBeUndefined();
+  });
+
+  test('single directory scope -> returns as-is', () => {
+    const content = `---
+scope: api
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('api');
   });
 });
 

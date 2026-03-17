@@ -7,7 +7,8 @@ import { DIM, RESET, BOLD, CMD, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
 import { resolveConfig, ensureForgeDir } from './utils.js';
 import { parseSource } from './deps.js';
-import { getDb } from './db.js';
+import { getDb, listSpecEntries, getSpecRunsByEntry, type SpecEntryRow } from './db.js';
+import type { Database } from 'bun:sqlite';
 
 // ── Spec complexity assessment ───────────────────────────────
 
@@ -60,65 +61,31 @@ export function assessSpecComplexity(file: string, content: string): ComplexityW
 // ── Manifest path ────────────────────────────────────────────
 
 const MANIFEST_FILE = 'specs.json';
-const LOCK_FILE = 'specs.json.lock';
-const LOCK_STALE_MS = 30_000; // 30 seconds
 
 function manifestPath(workingDir: string): string {
   return path.join(workingDir, '.forge', MANIFEST_FILE);
 }
 
-function lockPath(workingDir: string): string {
-  return path.join(workingDir, '.forge', LOCK_FILE);
+// ── In-process mutex per working directory ───────────────────
+
+const dirMutexes = new Map<string, Promise<void>>();
+
+/** Acquire a per-directory mutex. Returns a release function. */
+function acquireSpecMutex(workingDir: string): Promise<() => void> {
+  const key = path.resolve(workingDir);
+  const prev = dirMutexes.get(key) ?? Promise.resolve();
+
+  let release!: () => void;
+  const next = new Promise<void>(resolve => { release = resolve; });
+  dirMutexes.set(key, next);
+
+  return prev.then(() => release);
 }
 
-// ── File-based lock ──────────────────────────────────────────
+// ── JSON file helpers (internal) ─────────────────────────────
 
-async function acquireLock(workingDir: string, maxRetries = 10): Promise<void> {
-  const lp = lockPath(workingDir);
-  await ensureForgeDir(workingDir);
-
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      // O_CREAT | O_EXCL: atomic create-if-not-exists
-      const fd = await fs.open(lp, 'wx');
-      await fd.writeFile(String(Date.now()));
-      await fd.close();
-      return; // Lock acquired
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-
-      // Lock file exists — check staleness
-      try {
-        const content = await fs.readFile(lp, 'utf-8');
-        const lockTime = parseInt(content, 10);
-        if (!isNaN(lockTime) && Date.now() - lockTime > LOCK_STALE_MS) {
-          // Stale lock — remove and retry
-          await fs.unlink(lp).catch(() => {});
-          continue;
-        }
-      } catch {
-        // Can't read lock file — remove and retry
-        await fs.unlink(lp).catch(() => {});
-        continue;
-      }
-
-      // Backoff: 50ms * 2^attempt (max ~25s total)
-      const delay = 50 * Math.pow(2, Math.min(attempt, 8));
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-
-  throw new Error('Could not acquire manifest lock after retries');
-}
-
-async function releaseLock(workingDir: string): Promise<void> {
-  await fs.unlink(lockPath(workingDir)).catch(() => {});
-}
-
-// ── Manifest read/write ──────────────────────────────────────
-
-/** Load the spec manifest. Returns empty manifest if file does not exist. */
-export async function loadManifest(workingDir: string): Promise<SpecManifest> {
+/** Load manifest from JSON file. Returns empty manifest if file does not exist or is invalid. */
+async function loadManifestFromJson(workingDir: string): Promise<SpecManifest> {
   try {
     const content = await fs.readFile(manifestPath(workingDir), 'utf-8');
     return JSON.parse(content) as SpecManifest;
@@ -127,14 +94,142 @@ export async function loadManifest(workingDir: string): Promise<SpecManifest> {
   }
 }
 
-/** Atomic write: write to tmp, then rename. */
-export async function saveManifest(workingDir: string, manifest: SpecManifest): Promise<void> {
+/** Atomic JSON export: write to tmp, then rename. */
+async function exportManifestJson(workingDir: string, manifest: SpecManifest): Promise<void> {
   const mp = manifestPath(workingDir);
   const tmp = mp + '.tmp';
 
   await ensureForgeDir(workingDir);
   await fs.writeFile(tmp, JSON.stringify(manifest, null, 2));
   await fs.rename(tmp, mp);
+}
+
+// ── DB helpers (internal) ────────────────────────────────────
+
+/** In-memory tracking of which directories have had JSON->DB migration checked. */
+const migratedDirs = new Set<string>();
+
+/** Load manifest from spec_entries + spec_runs DB tables. */
+function loadManifestFromDb(db: Database): SpecManifest {
+  const entries = listSpecEntries(db);
+  const specs: SpecEntry[] = entries.map(row => {
+    const runs = getSpecRunsByEntry(db, row.id)
+      .reverse() // DB returns DESC (newest first), manifest expects ASC (chronological)
+      .map(r => ({
+        runId: r.run_id,
+        timestamp: r.timestamp,
+        status: r.status as 'passed' | 'failed',
+        costUsd: r.cost_usd ?? undefined,
+        durationSeconds: r.duration_seconds ?? 0,
+        numTurns: r.num_turns ?? undefined,
+        verifyAttempts: r.verify_attempts ?? undefined,
+      }));
+    return {
+      spec: row.spec,
+      status: row.status as SpecEntry['status'],
+      runs,
+      source: row.source as SpecEntry['source'],
+      workGroupId: row.work_group_id ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  });
+  return { version: 1, specs };
+}
+
+/** Sync manifest to DB tables. Must be called inside an active transaction or standalone. */
+function syncManifestToDbInner(db: Database, manifest: SpecManifest): void {
+  const existing = new Map<string, SpecEntryRow>();
+  for (const row of listSpecEntries(db)) {
+    existing.set(row.spec, row);
+  }
+
+  const seen = new Set<string>();
+  for (const entry of manifest.specs) {
+    seen.add(entry.spec);
+    const existingRow = existing.get(entry.spec);
+
+    if (existingRow) {
+      db.run(
+        'UPDATE spec_entries SET status = ?, source = ?, work_group_id = COALESCE(?, work_group_id), updated_at = ? WHERE id = ?',
+        [entry.status, entry.source, entry.workGroupId ?? null, entry.updatedAt, existingRow.id],
+      );
+      db.run('DELETE FROM spec_runs WHERE spec_entry_id = ?', [existingRow.id]);
+      for (const run of entry.runs) {
+        db.run(
+          `INSERT INTO spec_runs (id, spec_entry_id, run_id, timestamp, status, cost_usd, duration_seconds, num_turns, verify_attempts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [crypto.randomUUID(), existingRow.id, run.runId, run.timestamp, run.status,
+           run.costUsd ?? null, run.durationSeconds, run.numTurns ?? null, run.verifyAttempts ?? null],
+        );
+      }
+    } else {
+      const entryId = crypto.randomUUID();
+      db.run(
+        `INSERT INTO spec_entries (id, spec, status, source, work_group_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [entryId, entry.spec, entry.status, entry.source, entry.workGroupId ?? null, entry.createdAt, entry.updatedAt],
+      );
+      for (const run of entry.runs) {
+        db.run(
+          `INSERT INTO spec_runs (id, spec_entry_id, run_id, timestamp, status, cost_usd, duration_seconds, num_turns, verify_attempts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [crypto.randomUUID(), entryId, run.runId, run.timestamp, run.status,
+           run.costUsd ?? null, run.durationSeconds, run.numTurns ?? null, run.verifyAttempts ?? null],
+        );
+      }
+    }
+  }
+
+  // Delete entries not in manifest (pruned)
+  for (const [_spec, row] of existing) {
+    if (!seen.has(row.spec)) {
+      db.run('DELETE FROM spec_runs WHERE spec_entry_id = ?', [row.id]);
+      db.run('DELETE FROM spec_entries WHERE id = ?', [row.id]);
+    }
+  }
+}
+
+/** Sync manifest to DB tables in a standalone transaction. */
+function syncManifestToDb(db: Database, manifest: SpecManifest): void {
+  db.transaction(() => {
+    syncManifestToDbInner(db, manifest);
+  })();
+}
+
+/** Auto-migrate: if spec_entries is empty and JSON has data, import it. Idempotent. */
+async function ensureMigration(db: Database, workingDir: string): Promise<void> {
+  const resolved = path.resolve(workingDir);
+  if (migratedDirs.has(resolved)) return;
+  migratedDirs.add(resolved);
+
+  const existing = listSpecEntries(db);
+  if (existing.length > 0) return;
+
+  const manifest = await loadManifestFromJson(workingDir);
+  if (manifest.specs.length === 0) return;
+
+  syncManifestToDb(db, manifest);
+}
+
+// ── Manifest read/write ──────────────────────────────────────
+
+/** Load the spec manifest. Reads from DB (with auto-migration), falls back to JSON if DB unavailable. */
+export async function loadManifest(workingDir: string): Promise<SpecManifest> {
+  const db = getDb(workingDir);
+  if (!db) return loadManifestFromJson(workingDir);
+
+  await ensureMigration(db, workingDir);
+  return loadManifestFromDb(db);
+}
+
+/** Save manifest to DB tables, then export JSON for backward compatibility. */
+export async function saveManifest(workingDir: string, manifest: SpecManifest): Promise<void> {
+  const db = getDb(workingDir);
+  if (db) {
+    syncManifestToDb(db, manifest);
+  }
+  await exportManifestJson(workingDir, manifest);
 }
 
 // ── Entry helpers ────────────────────────────────────────────
@@ -144,9 +239,17 @@ export function findOrCreateEntry(
   manifest: SpecManifest,
   spec: string,
   source: SpecEntry['source'],
+  workGroupId?: string,
 ): SpecEntry {
   const existing = manifest.specs.find(e => e.spec === spec);
-  if (existing) return existing;
+  if (existing) {
+    // Assign work group ID to existing entry if not already set
+    if (workGroupId && !existing.workGroupId) {
+      existing.workGroupId = workGroupId;
+      existing.updatedAt = new Date().toISOString();
+    }
+    return existing;
+  }
 
   const now = new Date().toISOString();
   const entry: SpecEntry = {
@@ -154,6 +257,7 @@ export function findOrCreateEntry(
     status: 'pending',
     runs: [],
     source,
+    workGroupId,
     createdAt: now,
     updatedAt: now,
   };
@@ -208,25 +312,43 @@ export function resolveSpecSource(specContent?: string, specPath?: string): Spec
   return 'file';
 }
 
-// ── Locked manifest update ───────────────────────────────────
+// ── Transaction-based manifest update ────────────────────────
 
 /**
- * Atomically update the manifest with file locking.
- * Loads the manifest, calls the updater, and saves.
+ * Atomically update the manifest using SQLite transactions.
+ * Loads from DB, calls the updater, saves to DB, then exports JSON.
+ * Uses an in-process mutex to serialize concurrent access within the same process.
+ * SQLite WAL mode + busy_timeout handles multi-process serialization.
  */
-export async function withManifestLock(
+export async function withSpecTransaction(
   workingDir: string,
   updater: (manifest: SpecManifest) => void | Promise<void>,
 ): Promise<void> {
-  await acquireLock(workingDir);
+  const release = await acquireSpecMutex(workingDir);
   try {
-    const manifest = await loadManifest(workingDir);
+    const db = getDb(workingDir);
+
+    if (!db) {
+      // Graceful degradation: JSON-only path
+      await ensureForgeDir(workingDir);
+      const manifest = await loadManifestFromJson(workingDir);
+      await updater(manifest);
+      await exportManifestJson(workingDir, manifest);
+      return;
+    }
+
+    await ensureMigration(db, workingDir);
+    const manifest = loadManifestFromDb(db);
     await updater(manifest);
-    await saveManifest(workingDir, manifest);
+    syncManifestToDb(db, manifest);
+    await exportManifestJson(workingDir, manifest);
   } finally {
-    await releaseLock(workingDir);
+    release();
   }
 }
+
+/** @deprecated Use withSpecTransaction instead. */
+export const withManifestLock = withSpecTransaction;
 
 // ── Manifest cleanup on cancel ───────────────────────────────
 
@@ -236,7 +358,7 @@ export async function withManifestLock(
  */
 export async function resetRunningSpecs(workingDir: string): Promise<number> {
   let resetCount = 0;
-  await withManifestLock(workingDir, (manifest) => {
+  await withSpecTransaction(workingDir, (manifest) => {
     for (const entry of manifest.specs) {
       if (entry.status === 'running') {
         entry.status = 'pending';
@@ -319,7 +441,7 @@ export async function reconcileSpecs(workingDir: string): Promise<number> {
   if (records.length === 0) return 0;
 
   let reconciled = 0;
-  await withManifestLock(workingDir, (manifest) => {
+  await withSpecTransaction(workingDir, (manifest) => {
     // Build set of already-tracked run keys to avoid duplicates
     const existingRuns = new Set<string>();
     for (const entry of manifest.specs) {
@@ -351,7 +473,7 @@ export async function reconcileSpecs(workingDir: string): Promise<number> {
 /** Remove orphaned entries (file missing) from the manifest. */
 export async function pruneSpecs(workingDir: string): Promise<number> {
   let pruned = 0;
-  await withManifestLock(workingDir, async (manifest) => {
+  await withSpecTransaction(workingDir, async (manifest) => {
     const kept: typeof manifest.specs = [];
     for (const entry of manifest.specs) {
       if (entry.source === 'pipe') {
@@ -481,7 +603,7 @@ export async function addSpecs(patterns: string[], workingDir: string): Promise<
   if (allPaths.size === 0) return 0;
 
   let added = 0;
-  await withManifestLock(workingDir, (manifest) => {
+  await withSpecTransaction(workingDir, (manifest) => {
     const trackedSpecs = new Set(manifest.specs.map(e => {
       return path.isAbsolute(e.spec)
         ? e.spec
@@ -505,7 +627,7 @@ export async function addSpecs(patterns: string[], workingDir: string): Promise<
 
 export async function resolveSpecs(patterns: string[], workingDir: string): Promise<number> {
   let resolved = 0;
-  await withManifestLock(workingDir, (manifest) => {
+  await withSpecTransaction(workingDir, (manifest) => {
     for (const pattern of patterns) {
       // Match by exact key, basename, or trailing path
       const entry = manifest.specs.find(e =>
@@ -533,7 +655,7 @@ export async function resolveSpecs(patterns: string[], workingDir: string): Prom
 
 export async function unresolveSpecs(patterns: string[], workingDir: string): Promise<number> {
   let unresolved = 0;
-  await withManifestLock(workingDir, (manifest) => {
+  await withSpecTransaction(workingDir, (manifest) => {
     for (const pattern of patterns) {
       const entry = manifest.specs.find(e =>
         e.spec === pattern

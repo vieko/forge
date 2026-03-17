@@ -9,7 +9,7 @@ import {
   pipeSpecId,
   loadManifest,
   saveManifest,
-  withManifestLock,
+  withSpecTransaction,
   resolveSpecs,
   addSpecs,
   findUntrackedSpecs,
@@ -21,6 +21,7 @@ import {
 } from './specs.js';
 import { filterPassedSpecs } from './parallel.js';
 import { parseSource } from './deps.js';
+import { closeDb } from './db.js';
 import type { SpecManifest, SpecEntry, SpecRun } from './types.js';
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -35,6 +36,7 @@ async function makeTmpDir(): Promise<string> {
 
 afterEach(async () => {
   for (const dir of tmpDirs) {
+    closeDb(dir);
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
   }
   tmpDirs = [];
@@ -48,7 +50,6 @@ function makeRun(overrides: Partial<SpecRun> = {}): SpecRun {
   return {
     runId: 'run-1',
     timestamp: '2026-02-15T00:00:00Z',
-    resultPath: '.forge/results/2026-02-15T00:00:00Z',
     status: 'passed',
     costUsd: 0.5,
     durationSeconds: 60,
@@ -408,16 +409,15 @@ describe('saveManifest', () => {
   });
 });
 
-// ── withManifestLock ─────────────────────────────────────────
+// ── withSpecTransaction ──────────────────────────────────────
 
-describe('withManifestLock', () => {
-  test('acquires lock, runs updater, releases lock (lock file gone after)', async () => {
+describe('withSpecTransaction', () => {
+  test('runs updater and persists changes', async () => {
     const dir = await makeTmpDir();
-    // Pre-create .forge so lock path resolves
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
     let updaterCalled = false;
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       updaterCalled = true;
       manifest.specs.push({
         spec: 'test.md',
@@ -430,19 +430,13 @@ describe('withManifestLock', () => {
     });
 
     expect(updaterCalled).toBe(true);
-
-    // Lock file should be gone
-    const lockExists = await fs.access(path.join(dir, '.forge', 'specs.json.lock'))
-      .then(() => true)
-      .catch(() => false);
-    expect(lockExists).toBe(false);
   });
 
-  test('updater changes are persisted to manifest file', async () => {
+  test('updater changes are persisted to DB and JSON', async () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'persisted.md', 'file');
     });
 
@@ -450,63 +444,46 @@ describe('withManifestLock', () => {
     expect(loaded.specs).toHaveLength(1);
     expect(loaded.specs[0].spec).toBe('persisted.md');
     expect(loaded.specs[0].status).toBe('pending');
+
+    // JSON export also written
+    const jsonPath = path.join(dir, '.forge', 'specs.json');
+    const jsonContent = JSON.parse(await fs.readFile(jsonPath, 'utf-8'));
+    expect(jsonContent.specs).toHaveLength(1);
+    expect(jsonContent.specs[0].spec).toBe('persisted.md');
   });
 
-  test('lock is released even when updater throws (finally block)', async () => {
+  test('updater error is propagated and does not corrupt state', async () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
     try {
-      await withManifestLock(dir, () => {
+      await withSpecTransaction(dir, () => {
         throw new Error('updater exploded');
       });
     } catch (err) {
       expect((err as Error).message).toBe('updater exploded');
     }
 
-    // Lock file should be gone even after error
-    const lockExists = await fs.access(path.join(dir, '.forge', 'specs.json.lock'))
-      .then(() => true)
-      .catch(() => false);
-    expect(lockExists).toBe(false);
+    // Manifest should still be empty (no partial state)
+    const loaded = await loadManifest(dir);
+    expect(loaded.specs).toHaveLength(0);
   });
 
-  test('stale lock (older than 30s) is cleaned up and re-acquired', async () => {
+  test('subsequent transactions see previous changes', async () => {
     const dir = await makeTmpDir();
-    const forgeDir = path.join(dir, '.forge');
-    await fs.mkdir(forgeDir, { recursive: true });
+    await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    // Write a stale lock file (timestamp 60 seconds ago)
-    const staleLockPath = path.join(forgeDir, 'specs.json.lock');
-    const staleTime = Date.now() - 60_000; // 60 seconds ago
-    await fs.writeFile(staleLockPath, String(staleTime));
-
-    // withManifestLock should clean up the stale lock and proceed
-    let updaterCalled = false;
-    await withManifestLock(dir, (manifest) => {
-      updaterCalled = true;
-      manifest.specs.push({
-        spec: 'after-stale.md',
-        status: 'pending',
-        runs: [],
-        source: 'file',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
+    await withSpecTransaction(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'first.md', 'file');
     });
 
-    expect(updaterCalled).toBe(true);
+    await withSpecTransaction(dir, (manifest) => {
+      findOrCreateEntry(manifest, 'second.md', 'file');
+    });
 
-    // Verify the manifest was saved
     const loaded = await loadManifest(dir);
-    expect(loaded.specs).toHaveLength(1);
-    expect(loaded.specs[0].spec).toBe('after-stale.md');
-
-    // Lock should be released
-    const lockExists = await fs.access(staleLockPath)
-      .then(() => true)
-      .catch(() => false);
-    expect(lockExists).toBe(false);
+    expect(loaded.specs).toHaveLength(2);
+    expect(loaded.specs.map(e => e.spec).sort()).toEqual(['first.md', 'second.md']);
   });
 });
 
@@ -514,7 +491,7 @@ describe('withManifestLock', () => {
 
 describe('integration: run.ts manifest flow', () => {
   // These tests exercise the building blocks as composed in runSingleSpec:
-  // resolveSpecSource logic + withManifestLock + findOrCreateEntry + push run + updateEntryStatus
+  // resolveSpecSource logic + withSpecTransaction + findOrCreateEntry + push run + updateEntryStatus
 
   function resolveSpecSource(specContent?: string, specPath?: string): SpecEntry['source'] {
     if (!specPath && !specContent) return 'file';
@@ -555,7 +532,7 @@ describe('integration: run.ts manifest flow', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'specs/auth.md', 'file');
       entry.runs.push(makeRun({ runId: 'run-1', status: 'passed', costUsd: 1.5, durationSeconds: 30 }));
       updateEntryStatus(entry);
@@ -572,7 +549,7 @@ describe('integration: run.ts manifest flow', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'specs/auth.md', 'file');
       entry.runs.push(makeRun({ runId: 'run-1', status: 'failed', costUsd: 0.75, durationSeconds: 15 }));
       updateEntryStatus(entry);
@@ -588,7 +565,7 @@ describe('integration: run.ts manifest flow', () => {
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
     const batchRunId = 'batch-abc123';
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       for (const spec of ['auth.md', 'users.md', 'api.md']) {
         const entry = findOrCreateEntry(manifest, spec, 'file');
         entry.runs.push(makeRun({ runId: batchRunId, status: 'passed' }));
@@ -608,14 +585,14 @@ describe('integration: run.ts manifest flow', () => {
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
     // First run: pass
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'feature.md', 'file');
       entry.runs.push(makeRun({ runId: 'run-1', status: 'passed', timestamp: '2026-02-15T01:00:00Z' }));
       updateEntryStatus(entry);
     });
 
     // Second run: fail
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'feature.md', 'file');
       entry.runs.push(makeRun({ runId: 'run-2', status: 'failed', timestamp: '2026-02-15T02:00:00Z' }));
       updateEntryStatus(entry);
@@ -633,7 +610,7 @@ describe('integration: run.ts manifest flow', () => {
     const content = 'implement authentication';
     const pipeId = pipeSpecId(content);
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, pipeId, 'pipe');
       entry.runs.push(makeRun({ runId: 'run-1', status: 'passed' }));
       updateEntryStatus(entry);
@@ -652,7 +629,7 @@ describe('integration: parallel.ts batch registration', () => {
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
     const specFiles = ['specs/auth.md', 'specs/users.md', 'specs/api.md'];
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       for (const specFile of specFiles) {
         const entry = findOrCreateEntry(manifest, specFile, 'file');
         entry.status = 'running';
@@ -673,14 +650,14 @@ describe('integration: parallel.ts batch registration', () => {
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
     // Pre-populate with a passed spec
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'specs/auth.md', 'file');
       entry.runs.push(makeRun({ runId: 'old-run', status: 'passed', costUsd: 2.0 }));
       updateEntryStatus(entry);
     });
 
     // Mark as running (as parallel.ts does before a new batch)
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'specs/auth.md', 'file');
       entry.status = 'running';
       entry.updatedAt = new Date().toISOString();
@@ -699,12 +676,12 @@ describe('integration: parallel.ts batch registration', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    // Two concurrent withManifestLock calls that each add a different spec
+    // Two concurrent withSpecTransaction calls that each add a different spec
     await Promise.all([
-      withManifestLock(dir, (manifest) => {
+      withSpecTransaction(dir, (manifest) => {
         findOrCreateEntry(manifest, 'spec-a.md', 'file');
       }),
-      withManifestLock(dir, (manifest) => {
+      withSpecTransaction(dir, (manifest) => {
         findOrCreateEntry(manifest, 'spec-b.md', 'file');
       }),
     ]);
@@ -725,7 +702,7 @@ describe('integration: audit.ts spec registration', () => {
     const auditRunId = `audit:${auditTimestamp}`;
     const outputSpecs = ['fix-auth-flow.md', 'add-error-handling.md', 'update-tests.md'];
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       for (const specFile of outputSpecs) {
         const key = `specs/audit/${specFile}`;
         findOrCreateEntry(manifest, key, `audit:${auditRunId}` as `audit:${string}`);
@@ -747,7 +724,7 @@ describe('integration: audit.ts spec registration', () => {
     const startedAt = '2026-02-15T10:30:00.000Z';
     const auditRunId = `audit:${startedAt}`;
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'fix-bug.md', `audit:${auditRunId}` as `audit:${string}`);
     });
 
@@ -762,14 +739,14 @@ describe('integration: full lifecycle state machine', () => {
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
     // Step 1: Create entry (pending)
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'lifecycle.md', 'file');
     });
     let loaded = await loadManifest(dir);
     expect(loaded.specs[0].status).toBe('pending');
 
     // Step 2: Mark running (as parallel.ts does)
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'lifecycle.md', 'file');
       entry.status = 'running';
       entry.updatedAt = new Date().toISOString();
@@ -778,7 +755,7 @@ describe('integration: full lifecycle state machine', () => {
     expect(loaded.specs[0].status).toBe('running');
 
     // Step 3: Push passed run (as run.ts does on success)
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'lifecycle.md', 'file');
       entry.runs.push(makeRun({ runId: 'run-1', status: 'passed' }));
       updateEntryStatus(entry);
@@ -793,14 +770,14 @@ describe('integration: full lifecycle state machine', () => {
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
     // Create + mark running
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'rerun.md', 'file');
       entry.status = 'running';
       entry.updatedAt = new Date().toISOString();
     });
 
     // First run: fail
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'rerun.md', 'file');
       entry.runs.push(makeRun({ runId: 'run-1', status: 'failed', timestamp: '2026-02-15T01:00:00Z' }));
       updateEntryStatus(entry);
@@ -809,7 +786,7 @@ describe('integration: full lifecycle state machine', () => {
     expect(loaded.specs[0].status).toBe('failed');
 
     // Mark running again (rerun)
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'rerun.md', 'file');
       entry.status = 'running';
       entry.updatedAt = new Date().toISOString();
@@ -818,7 +795,7 @@ describe('integration: full lifecycle state machine', () => {
     expect(loaded.specs[0].status).toBe('running');
 
     // Second run: pass
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'rerun.md', 'file');
       entry.runs.push(makeRun({ runId: 'run-2', status: 'passed', timestamp: '2026-02-15T02:00:00Z' }));
       updateEntryStatus(entry);
@@ -839,7 +816,7 @@ describe('integration: full lifecycle state machine', () => {
     const key = specKey(absSpecPath, dir);
     expect(key).toBe(path.join('specs', 'auth.md'));
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, key, 'file');
       entry.status = 'running';
       entry.updatedAt = new Date().toISOString();
@@ -857,7 +834,7 @@ describe('resolveSpecs', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/game-tests.md', 'file');
     });
 
@@ -875,7 +852,7 @@ describe('resolveSpecs', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/deep/nested/feature.md', 'file');
     });
 
@@ -890,7 +867,7 @@ describe('resolveSpecs', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/unicorn-game/game-tests.md', 'file');
     });
 
@@ -905,7 +882,7 @@ describe('resolveSpecs', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'done.md', 'file');
       entry.runs.push(makeRun({ status: 'passed' }));
       updateEntryStatus(entry);
@@ -922,7 +899,7 @@ describe('resolveSpecs', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'broken.md', 'file');
       entry.runs.push(makeRun({ status: 'failed' }));
       updateEntryStatus(entry);
@@ -948,7 +925,7 @@ describe('resolveSpecs', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'a.md', 'file');
       findOrCreateEntry(manifest, 'b.md', 'file');
       findOrCreateEntry(manifest, 'c.md', 'file');
@@ -971,7 +948,7 @@ describe('unresolveSpecs', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'specs/feature.md', 'file');
       entry.runs.push(makeRun({ status: 'passed' }));
       updateEntryStatus(entry);
@@ -989,7 +966,7 @@ describe('unresolveSpecs', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'broken.md', 'file');
       entry.runs.push(makeRun({ status: 'failed' }));
       updateEntryStatus(entry);
@@ -1007,7 +984,7 @@ describe('unresolveSpecs', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'pending.md', 'file');
     });
 
@@ -1019,7 +996,7 @@ describe('unresolveSpecs', () => {
     const dir = await makeTmpDir();
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'specs/deep/feature.md', 'file');
       entry.runs.push(makeRun({ status: 'passed' }));
       updateEntryStatus(entry);
@@ -1054,7 +1031,7 @@ describe('findUntrackedSpecs', () => {
     await fs.writeFile(path.join(dir, 'specs', 'untracked.md'), '# untracked');
 
     // Register only one
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/tracked.md', 'file');
     });
 
@@ -1069,7 +1046,7 @@ describe('findUntrackedSpecs', () => {
 
     await fs.writeFile(path.join(dir, 'specs', 'a.md'), '# a');
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/a.md', 'file');
     });
 
@@ -1086,7 +1063,7 @@ describe('findUntrackedSpecs', () => {
     await fs.writeFile(path.join(dir, 'specs', 'sub', 'deep.md'), '# deep');
 
     // Register only top.md so specs/ dir is known
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/top.md', 'file');
     });
 
@@ -1106,7 +1083,7 @@ describe('bare --add (addSpecs with untracked)', () => {
     await fs.writeFile(path.join(dir, 'specs', 'new-b.md'), '# new b');
 
     // Track only one
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/existing.md', 'file');
     });
 
@@ -1133,7 +1110,7 @@ describe('bare --add (addSpecs with untracked)', () => {
 
     await fs.writeFile(path.join(dir, 'specs', 'only.md'), '# only');
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/only.md', 'file');
     });
 
@@ -1211,7 +1188,7 @@ describe('filterPassedSpecs', () => {
     await fs.writeFile(path.join(specsDir, 'c.md'), '# c');
 
     // Mark 'a.md' as passed in manifest
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'specs/a.md', 'file');
       entry.runs.push(makeRun({ status: 'passed' }));
       updateEntryStatus(entry);
@@ -1234,7 +1211,7 @@ describe('filterPassedSpecs', () => {
     await fs.writeFile(path.join(specsDir, 'b.md'), '# b');
 
     // Both pending
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/a.md', 'file');
       findOrCreateEntry(manifest, 'specs/b.md', 'file');
     });
@@ -1265,7 +1242,7 @@ describe('filterPassedSpecs', () => {
     await fs.writeFile(path.join(specsDir, 'a.md'), '# a');
     await fs.writeFile(path.join(specsDir, 'b.md'), '# b');
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const a = findOrCreateEntry(manifest, 'specs/a.md', 'file');
       a.runs.push(makeRun({ status: 'passed' }));
       updateEntryStatus(a);
@@ -1287,7 +1264,7 @@ describe('filterPassedSpecs', () => {
 
     await fs.writeFile(path.join(specsDir, 'flaky.md'), '# flaky');
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       const entry = findOrCreateEntry(manifest, 'specs/flaky.md', 'file');
       entry.runs.push(makeRun({ status: 'failed' }));
       updateEntryStatus(entry);
@@ -1317,7 +1294,7 @@ describe('knownSpecDirs', () => {
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
     await fs.mkdir(path.join(dir, 'custom', 'deep'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'custom/deep/feature.md', 'file');
     });
 
@@ -1330,7 +1307,7 @@ describe('knownSpecDirs', () => {
     await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
     await fs.mkdir(path.join(dir, 'specs', 'sub'), { recursive: true });
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/a.md', 'file');
       findOrCreateEntry(manifest, 'specs/sub/b.md', 'file');
     });
@@ -1363,7 +1340,7 @@ describe('resolveSpecFile', () => {
     await fs.mkdir(path.join(dir, 'deep', 'nested'), { recursive: true });
     await fs.writeFile(path.join(dir, 'deep', 'nested', 'login.md'), '# login');
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'deep/nested/login.md', 'file');
     });
 
@@ -1377,7 +1354,7 @@ describe('resolveSpecFile', () => {
     await fs.mkdir(path.join(dir, 'specs', 'auth'), { recursive: true });
     await fs.writeFile(path.join(dir, 'specs', 'auth', 'login.md'), '# login');
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/auth/login.md', 'file');
     });
 
@@ -1391,7 +1368,7 @@ describe('resolveSpecFile', () => {
     await fs.mkdir(path.join(dir, 'specs', 'auth'), { recursive: true });
     await fs.writeFile(path.join(dir, 'specs', 'auth', 'login.md'), '# login');
 
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/auth/login.md', 'file');
     });
 
@@ -1426,7 +1403,7 @@ describe('resolveSpecDir', () => {
     await fs.writeFile(path.join(dir, 'specs', 'tracked.md'), '# tracked');
 
     // Track a spec so specs/ becomes a known dir
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'specs/tracked.md', 'file');
     });
 
@@ -1510,7 +1487,7 @@ describe('resolveSpecDir', () => {
     await fs.writeFile(path.join(dir, 'custom-specs', 'existing.md'), '# existing');
 
     // Track a spec so custom-specs/ becomes a known dir
-    await withManifestLock(dir, (manifest) => {
+    await withSpecTransaction(dir, (manifest) => {
       findOrCreateEntry(manifest, 'custom-specs/existing.md', 'file');
     });
 

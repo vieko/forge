@@ -238,7 +238,7 @@ describe('runPipeline', () => {
     const executor = createMockExecutor();
 
     const result = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
+      { goal: 'test', cwd: tmpDir, gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
@@ -263,7 +263,7 @@ describe('runPipeline', () => {
     }, 300);
 
     const result = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'confirm', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
+      { goal: 'test', cwd: tmpDir, gates: { 'define -> run': 'auto', 'run -> audit': 'confirm', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
@@ -280,7 +280,7 @@ describe('runPipeline', () => {
     });
 
     const result = await runPipeline(
-      { goal: 'test', fromStage: 'audit', gates: { 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
+      { goal: 'test', cwd: tmpDir, fromStage: 'audit', gates: { 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
@@ -312,7 +312,7 @@ describe('runPipeline', () => {
     });
 
     const result = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto' } },
+      { goal: 'test', cwd: tmpDir, gates: { 'define -> run': 'auto' } },
       provider, undefined, executor,
     );
 
@@ -332,7 +332,7 @@ describe('runPipeline', () => {
     });
 
     const result = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
+      { goal: 'test', cwd: tmpDir, gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
@@ -345,7 +345,7 @@ describe('runPipeline', () => {
     const events = createMockEvents();
 
     await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
+      { goal: 'test', cwd: tmpDir, gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, events, executor,
     );
 
@@ -377,7 +377,7 @@ describe('runPipeline', () => {
     }, 300);
 
     await runPipeline(
-      { goal: 'test' },
+      { goal: 'test', cwd: tmpDir },
       provider, events, executor,
     );
 
@@ -393,7 +393,7 @@ describe('runPipeline', () => {
     const executor = createMockExecutor();
 
     await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
+      { goal: 'test', cwd: tmpDir, gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
@@ -433,7 +433,7 @@ describe('pipeline resume', () => {
     }, 300);
 
     const result = await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'confirm', 'proof -> verify': 'auto' } },
+      { goal: 'test', cwd: tmpDir, gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'confirm', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
@@ -449,7 +449,7 @@ describe('pipeline resume', () => {
     const executor = createMockExecutor();
 
     await expect(
-      runPipeline({ goal: 'test', resume: 'nonexistent' }, provider, undefined, executor),
+      runPipeline({ goal: 'test', cwd: tmpDir, resume: 'nonexistent' }, provider, undefined, executor),
     ).rejects.toThrow('Cannot resume pipeline');
   });
 });
@@ -535,7 +535,7 @@ describe('artifact propagation', () => {
     };
 
     await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
+      { goal: 'test', cwd: tmpDir, gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 
@@ -559,7 +559,7 @@ describe('artifact propagation', () => {
     };
 
     await runPipeline(
-      { goal: 'test', gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
+      { goal: 'test', cwd: tmpDir, gates: { 'define -> run': 'auto', 'run -> audit': 'auto', 'audit -> proof': 'auto', 'proof -> verify': 'auto' } },
       provider, undefined, executor,
     );
 

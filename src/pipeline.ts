@@ -26,8 +26,7 @@ import { runProof as realRunProof } from './proof.js';
 import { runVerify as realRunVerify } from './proof-runner.js';
 import { resolveWorkingDir, ForgeError, sleep, createWorktree, commitWorktree, cleanupWorktree } from './utils.js';
 import { isInterrupted } from './abort.js';
-import { getConfig } from './config.js';
-import { resolveSetupCommands, resolveTeardownCommands, runWorkspaceHooks } from './workspace.js';
+import { setupWorktree, teardownWorktree } from './workspace.js';
 import { getDb } from './db.js';
 import { promises as fs } from 'fs';
 import path from 'path';
@@ -502,51 +501,35 @@ export async function runPipeline(
     }
 
     // ── Run workspace setup hooks ─────────────────────────────
-    const config = getConfig(originalCwd);
-    const setupCommands = await resolveSetupCommands(worktreePath, config);
+    const setupResult = await setupWorktree(worktreePath, originalCwd, { quiet: options.quiet });
 
-    if (setupCommands.length > 0) {
-      if (!options.quiet) {
-        console.log(`\x1b[2m[forge]\x1b[0m Running workspace setup (${setupCommands.length} command${setupCommands.length > 1 ? 's' : ''})...`);
+    if (setupResult && !setupResult.success) {
+      // Setup failed -- mark pipeline and first stage as failed, then clean up worktree
+      const errorMsg = `Workspace setup failed: ${setupResult.failedCommand}\n${setupResult.output}`;
+      pipeline.status = 'failed';
+      pipeline.stages[0].status = 'failed';
+      pipeline.updatedAt = new Date().toISOString();
+      await stateProvider.savePipeline(pipeline);
+
+      await events.publish({
+        type: 'pipeline_failed',
+        pipelineId: pipeline.id,
+        timestamp: new Date().toISOString(),
+        stage: 'define',
+        error: errorMsg,
+      });
+
+      // Best-effort worktree cleanup after setup failure
+      try {
+        await cleanupWorktree(worktreePath, originalCwd);
+      } catch {
+        // Best effort
       }
 
-      const setupResult = await runWorkspaceHooks(
-        setupCommands,
-        worktreePath,
-        config.setupTimeout,
-        options.quiet,
-      );
+      return pipeline;
+    }
 
-      if (!setupResult.success) {
-        // Setup failed -- mark pipeline and first stage as failed, then clean up worktree
-        const errorMsg = `Workspace setup failed: ${setupResult.failedCommand}\n${setupResult.output}`;
-        pipeline.status = 'failed';
-        pipeline.stages[0].status = 'failed';
-        pipeline.updatedAt = new Date().toISOString();
-        await stateProvider.savePipeline(pipeline);
-
-        await events.publish({
-          type: 'pipeline_failed',
-          pipelineId: pipeline.id,
-          timestamp: new Date().toISOString(),
-          stage: 'define',
-          error: errorMsg,
-        });
-
-        // Best-effort worktree cleanup after setup failure
-        try {
-          await cleanupWorktree(worktreePath, originalCwd);
-        } catch {
-          // Best effort
-        }
-
-        return pipeline;
-      }
-
-      if (!options.quiet) {
-        console.log(`\x1b[2m[forge]\x1b[0m Workspace setup complete`);
-      }
-
+    if (setupResult) {
       // Persist setup output for debugging (truncate to 10KB)
       const MAX_HOOK_OUTPUT = 10 * 1024;
       const setupOutput = setupResult.output.length > MAX_HOOK_OUTPUT
@@ -575,50 +558,34 @@ export async function runPipeline(
         await stateProvider.savePipeline(pipeline);
 
         // Run workspace setup hooks in the recreated worktree
-        const config = getConfig(originalCwd);
-        const setupCommands = await resolveSetupCommands(worktreePath, config);
+        const setupResult = await setupWorktree(worktreePath, originalCwd, { quiet: options.quiet });
 
-        if (setupCommands.length > 0) {
-          if (!options.quiet) {
-            console.log(`\x1b[2m[forge]\x1b[0m Running workspace setup (${setupCommands.length} command${setupCommands.length > 1 ? 's' : ''})...`);
+        if (setupResult && !setupResult.success) {
+          const errorMsg = `Workspace setup failed on resume: ${setupResult.failedCommand}\n${setupResult.output}`;
+          pipeline.status = 'failed';
+          pipeline.stages[0].status = 'failed';
+          pipeline.updatedAt = new Date().toISOString();
+          await stateProvider.savePipeline(pipeline);
+
+          await events.publish({
+            type: 'pipeline_failed',
+            pipelineId: pipeline.id,
+            timestamp: new Date().toISOString(),
+            stage: 'define',
+            error: errorMsg,
+          });
+
+          // Best-effort worktree cleanup after setup failure
+          try {
+            await cleanupWorktree(worktreePath, originalCwd);
+          } catch {
+            // Best effort
           }
 
-          const setupResult = await runWorkspaceHooks(
-            setupCommands,
-            worktreePath,
-            config.setupTimeout,
-            options.quiet,
-          );
+          return pipeline;
+        }
 
-          if (!setupResult.success) {
-            const errorMsg = `Workspace setup failed on resume: ${setupResult.failedCommand}\n${setupResult.output}`;
-            pipeline.status = 'failed';
-            pipeline.stages[0].status = 'failed';
-            pipeline.updatedAt = new Date().toISOString();
-            await stateProvider.savePipeline(pipeline);
-
-            await events.publish({
-              type: 'pipeline_failed',
-              pipelineId: pipeline.id,
-              timestamp: new Date().toISOString(),
-              stage: 'define',
-              error: errorMsg,
-            });
-
-            // Best-effort worktree cleanup after setup failure
-            try {
-              await cleanupWorktree(worktreePath, originalCwd);
-            } catch {
-              // Best effort
-            }
-
-            return pipeline;
-          }
-
-          if (!options.quiet) {
-            console.log(`\x1b[2m[forge]\x1b[0m Workspace setup complete`);
-          }
-
+        if (setupResult) {
           // Persist setup output for debugging (truncate to 10KB)
           const MAX_HOOK_OUTPUT = 10 * 1024;
           const setupOutput = setupResult.output.length > MAX_HOOK_OUTPUT
@@ -954,23 +921,11 @@ export async function runPipeline(
           }
         }
 
-        // Run teardown hooks before removing the worktree
+        // Run teardown hooks and clean up the worktree
         try {
-          const teardownConfig = getConfig(originalCwd);
-          const teardownCommands = resolveTeardownCommands(teardownConfig);
+          const teardownResult = await teardownWorktree(pipeline.worktreePath, originalCwd, { quiet: options.quiet });
 
-          if (teardownCommands.length > 0) {
-            if (!options.quiet) {
-              console.log(`\x1b[2m[forge]\x1b[0m Running workspace teardown (${teardownCommands.length} command${teardownCommands.length > 1 ? 's' : ''})...`);
-            }
-
-            const teardownResult = await runWorkspaceHooks(
-              teardownCommands,
-              pipeline.worktreePath,
-              teardownConfig.setupTimeout,
-              options.quiet,
-            );
-
+          if (teardownResult) {
             // Persist teardown output for debugging (truncate to 10KB)
             const MAX_TEARDOWN_OUTPUT = 10 * 1024;
             const teardownOutput = teardownResult.output.length > MAX_TEARDOWN_OUTPUT
@@ -983,10 +938,6 @@ export async function runPipeline(
               timestamp: new Date().toISOString(),
               output: teardownOutput,
             });
-
-            if (!teardownResult.success && !options.quiet) {
-              console.log(`\x1b[2m[forge]\x1b[0m Teardown warning: ${teardownResult.failedCommand}`);
-            }
           }
         } catch {
           // Best effort — don't fail the pipeline on teardown error

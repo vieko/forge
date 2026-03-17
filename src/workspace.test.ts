@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
-import { detectSetupCommands } from './workspace.js';
+import { detectSetupCommands, detectScopedSetupCommands } from './workspace.js';
 
 // ── Test Helpers ─────────────────────────────────────────────
 
@@ -110,5 +110,67 @@ describe('detectSetupCommands', () => {
     await writeFile(tmpDir, 'go.mod', 'module example.com');
     const commands = await detectSetupCommands(tmpDir);
     expect(commands).toEqual(['yarn install', 'cargo build', 'go mod download']);
+  });
+});
+
+// ── detectScopedSetupCommands ────────────────────────────────
+
+describe('detectScopedSetupCommands', () => {
+  test('returns empty when scoped directory has no project files', async () => {
+    await fs.mkdir(path.join(tmpDir, 'packages', 'api'), { recursive: true });
+    const result = await detectScopedSetupCommands(tmpDir, 'packages/api');
+    expect(result.commands).toEqual([]);
+    expect(result.cwd).toBe(path.join(tmpDir, 'packages', 'api'));
+  });
+
+  test('detects build script in scoped package', async () => {
+    await writeFile(tmpDir, 'pnpm-lock.yaml', '');
+    await writeFile(tmpDir, 'package.json', '{}');
+    await writeFile(tmpDir, 'packages/api/package.json', JSON.stringify({
+      name: '@repo/api',
+      scripts: { build: 'tsc' },
+    }));
+    const result = await detectScopedSetupCommands(tmpDir, 'packages/api');
+    expect(result.commands).toEqual(['pnpm run build']);
+    expect(result.cwd).toBe(path.join(tmpDir, 'packages', 'api'));
+  });
+
+  test('uses root package manager for scoped commands', async () => {
+    await writeFile(tmpDir, 'bun.lockb', '');
+    await writeFile(tmpDir, 'package.json', '{}');
+    await writeFile(tmpDir, 'apps/web/package.json', JSON.stringify({
+      name: '@repo/web',
+      scripts: { build: 'next build' },
+    }));
+    const result = await detectScopedSetupCommands(tmpDir, 'apps/web');
+    expect(result.commands).toEqual(['bun run build']);
+  });
+
+  test('skips package without build script', async () => {
+    await writeFile(tmpDir, 'package.json', '{}');
+    await writeFile(tmpDir, 'packages/shared/package.json', JSON.stringify({
+      name: '@repo/shared',
+      scripts: { test: 'jest' },
+    }));
+    const result = await detectScopedSetupCommands(tmpDir, 'packages/shared');
+    expect(result.commands).toEqual([]);
+  });
+
+  test('detects Cargo.toml in scoped directory', async () => {
+    await writeFile(tmpDir, 'packages/core/Cargo.toml', '[package]');
+    const result = await detectScopedSetupCommands(tmpDir, 'packages/core');
+    expect(result.commands).toEqual(['cargo build']);
+  });
+
+  test('detects go.mod in scoped directory', async () => {
+    await writeFile(tmpDir, 'services/api/go.mod', 'module example.com/api');
+    const result = await detectScopedSetupCommands(tmpDir, 'services/api');
+    expect(result.commands).toEqual(['go mod download']);
+  });
+
+  test('returns cwd pointing to scoped directory', async () => {
+    await fs.mkdir(path.join(tmpDir, 'packages', 'api'), { recursive: true });
+    const result = await detectScopedSetupCommands(tmpDir, 'packages/api');
+    expect(result.cwd).toBe(path.join(tmpDir, 'packages', 'api'));
   });
 });

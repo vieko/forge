@@ -4,10 +4,10 @@ import path from 'path';
 import { resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
 import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
-import { withManifestLock, findOrCreateEntry, specKey, resolveSpecDir, resolveSpecFile, resolveSpecSource } from './specs.js';
+import { withSpecTransaction, findOrCreateEntry, specKey, resolveSpecDir, resolveSpecFile, resolveSpecSource } from './specs.js';
 import { runForge } from './parallel.js';
 import { isInterrupted } from './abort.js';
-import { getDb } from './db.js';
+import { getDb, getWorktree, transitionWorktreeStatus } from './db.js';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -114,7 +114,7 @@ async function readSpecContents(
   const allSpecContents = specContents.join('\n\n---\n\n');
 
   // Auto-register input specs in the manifest
-  await withManifestLock(persistBase, (manifest) => {
+  await withSpecTransaction(persistBase, (manifest) => {
     const tracked = new Set(manifest.specs.map(e => e.spec));
     for (let i = 0; i < specFiles.length; i++) {
       const absPath = path.join(resolvedSpecDir, specFiles[i]);
@@ -239,7 +239,7 @@ ${options.prompt ? `## Additional Context\n\n${options.prompt}\n` : ''}
   // Register audit-generated specs in the manifest
   if (outputSpecs.length > 0) {
     const auditSource = `audit:${forgeResult.startedAt}`;
-    await withManifestLock(persistBase, (manifest) => {
+    await withSpecTransaction(persistBase, (manifest) => {
       for (const specFile of outputSpecs) {
         const specFilePath = path.join(outputDir, specFile);
         const key = specKey(specFilePath, persistBase);
@@ -265,11 +265,47 @@ export async function runAudit(options: AuditOptions): Promise<void> {
     showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS');
   }
 
+  // ── Worktree resolution ────────────────────────────────────
+  // When --worktree <id> is provided, resolve the worktree from the registry
+  // and scope the audit to that worktree's filesystem path.
+  let worktreeId: string | undefined;
+  let resolvedCwd = options.cwd;
+  let resolvedPersistDir = options.persistDir;
+
+  if (options.worktreeId) {
+    const mainDir = await resolveWorkingDir(options.cwd);
+    const db = getDb(mainDir);
+    if (!db) {
+      throw new Error('Database unavailable -- cannot resolve worktree');
+    }
+
+    const worktreeRow = getWorktree(db, options.worktreeId);
+    if (!worktreeRow) {
+      throw new Error(`Worktree not found: ${options.worktreeId}`);
+    }
+
+    worktreeId = worktreeRow.id;
+
+    // Point the audit at the worktree's filesystem path
+    resolvedCwd = worktreeRow.worktree_path;
+
+    // Results persist to the main repo DB, not the worktree's .forge/
+    resolvedPersistDir = resolvedPersistDir || mainDir;
+
+    // Transition worktree status: complete -> auditing
+    transitionWorktreeStatus(db, worktreeId, 'auditing');
+
+    if (!quiet) {
+      console.log(`${DIM}[worktree]${RESET} ${worktreeRow.id} -> ${worktreeRow.worktree_path}`);
+      console.log(`${DIM}[worktree]${RESET} persist -> ${resolvedPersistDir}\n`);
+    }
+  }
+
   // Resolve and validate working directory
-  const workingDir = await resolveWorkingDir(options.cwd);
+  const workingDir = await resolveWorkingDir(resolvedCwd);
 
   // Persistence base: original repo when in a worktree, otherwise workingDir
-  const persistBase = options.persistDir || workingDir;
+  const persistBase = resolvedPersistDir || workingDir;
 
   // Load config and merge with defaults (CLI flags override config)
   const resolved = await resolveConfig(workingDir, {
@@ -304,7 +340,29 @@ export async function runAudit(options: AuditOptions): Promise<void> {
 
   // ── Fix mode: convergence loop ─────────────────────────────
   if (options.fix) {
-    await runAuditFixLoop(ctx, options);
+    try {
+      await runAuditFixLoop(ctx, options);
+      // Transition worktree to audited on completion (clean convergence)
+      if (worktreeId) {
+        const db = getDb(persistBase);
+        if (db) transitionWorktreeStatus(db, worktreeId, 'audited');
+      }
+    } catch (error) {
+      // Transition worktree to audited even on non-convergence (remediation specs were produced)
+      // Only transition to failed on unexpected errors, not AuditFixNotConverged
+      if (worktreeId) {
+        const db = getDb(persistBase);
+        if (db) {
+          const isNotConverged = error instanceof Error && error.name === 'AuditFixNotConverged';
+          if (isNotConverged) {
+            transitionWorktreeStatus(db, worktreeId, 'audited');
+          } else {
+            transitionWorktreeStatus(db, worktreeId, 'failed', error instanceof Error ? error.message : String(error));
+          }
+        }
+      }
+      throw error;
+    }
     return;
   }
 
@@ -330,23 +388,38 @@ export async function runAudit(options: AuditOptions): Promise<void> {
     console.log(`${DIM}Working dir:${RESET} ${workingDir}\n`);
   }
 
-  const result = await runAuditRound(ctx, outputDir, '', options);
+  try {
+    const result = await runAuditRound(ctx, outputDir, '', options);
 
-  if (!quiet) {
-    printRunSummary({ durationSeconds: result.durationSeconds, costUsd: result.costUsd });
-
-    if (result.outputSpecs.length === 0) {
-      console.log(`\n  \x1b[32mAll specs fully implemented — no remaining work.\x1b[0m`);
-      const relSpecDir = path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir;
-      console.log(`\n  ${DIM}Next step:${RESET}\n    ${CMD}forge proof ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir}${RESET}`);
-    } else {
-      const relOutputDir = path.relative(workingDir, outputDir) || outputDir;
-      console.log(`\n  ${BOLD}${result.outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
-      result.outputSpecs.forEach((f, i) => console.log(`    ${DIM}${i + 1}.${RESET} ${f}`));
-      const relSpecDir = path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir;
-      console.log(`\n  Next step:\n    ${CMD}forge audit ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir} --fix "verify and fix"${RESET}`);
+    // Transition worktree to audited on successful single audit
+    if (worktreeId) {
+      const db = getDb(persistBase);
+      if (db) transitionWorktreeStatus(db, worktreeId, 'audited');
     }
-    console.log('');
+
+    if (!quiet) {
+      printRunSummary({ durationSeconds: result.durationSeconds, costUsd: result.costUsd });
+
+      if (result.outputSpecs.length === 0) {
+        console.log(`\n  \x1b[32mAll specs fully implemented — no remaining work.\x1b[0m`);
+        const relSpecDir = path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir;
+        console.log(`\n  ${DIM}Next step:${RESET}\n    ${CMD}forge proof ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir}${RESET}`);
+      } else {
+        const relOutputDir = path.relative(workingDir, outputDir) || outputDir;
+        console.log(`\n  ${BOLD}${result.outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
+        result.outputSpecs.forEach((f, i) => console.log(`    ${DIM}${i + 1}.${RESET} ${f}`));
+        const relSpecDir = path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir;
+        console.log(`\n  Next step:\n    ${CMD}forge audit ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir} --fix "verify and fix"${RESET}`);
+      }
+      console.log('');
+    }
+  } catch (error) {
+    // Transition worktree to failed on unexpected errors
+    if (worktreeId) {
+      const db = getDb(persistBase);
+      if (db) transitionWorktreeStatus(db, worktreeId, 'failed', error instanceof Error ? error.message : String(error));
+    }
+    throw error;
   }
 }
 

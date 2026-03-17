@@ -23,6 +23,8 @@ import type { StageName, GateKey, GateType } from './pipeline-types.js';
 import { triggerAbort, isInterrupted } from './abort.js';
 import { showBanner } from './display.js';
 import { formatConfig } from './config.js';
+import { showWorktreeList, showWorktreeStatus, markWorktreeReady, pruneWorktrees, repairWorktrees } from './worktree-cli.js';
+import { runConsolidate } from './consolidate.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -100,6 +102,9 @@ program
   .option('--pending', 'Run only pending specs from the manifest')
   .option('-F, --force', 'Re-run all specs including already passed')
   .option('-B, --branch <name>', 'Run in an isolated git worktree on the named branch')
+  .option('-I, --isolate', 'Create one worktree per spec for fully isolated parallel execution')
+  .option('-W, --work-group <id>', 'Join an existing work group (for incremental runs)')
+  .option('--no-auto-prune', 'Skip automatic pruning of merged worktrees when approaching disk limits')
   .option('-w, --watch', 'Open a tmux pane with live session logs')
   .action(async (prompt: string, options: {
     spec?: string;
@@ -122,6 +127,9 @@ program
     pending?: boolean;
     force?: boolean;
     branch?: string;
+    isolate?: boolean;
+    workGroup?: string;
+    noAutoPrune?: boolean;
     watch?: boolean;
   }) => {
     guardNestedSession();
@@ -168,6 +176,9 @@ program
         pendingOnly: options.pending,
         force: options.force,
         branch: options.branch,
+        isolate: options.isolate,
+        workGroupId: options.workGroup,
+        noAutoPrune: options.noAutoPrune,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);
@@ -206,6 +217,7 @@ program
   .option('-b, --max-budget <usd>', 'Maximum budget in USD')
   .option('--fix', 'Run audit-fix convergence loop until clean or max rounds')
   .option('--fix-rounds <n>', 'Maximum audit-fix rounds (default: 3)')
+  .option('-W, --worktree <id>', 'Scope audit to a specific worktree (resolves path from registry)')
   .option('-v, --verbose', 'Show detailed output')
   .option('-q, --quiet', 'Suppress progress output')
   .option('-r, --resume <session>', 'Resume a previous session')
@@ -219,6 +231,7 @@ program
     maxBudget?: string;
     fix?: boolean;
     fixRounds?: string;
+    worktree?: string;
     verbose?: boolean;
     quiet?: boolean;
     resume?: string;
@@ -260,6 +273,7 @@ program
         fork: options.fork,
         fix: options.fix,
         fixRounds: options.fixRounds ? parseInt(options.fixRounds, 10) : undefined,
+        worktreeId: options.worktree,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);
@@ -361,6 +375,7 @@ const proofAction = async (specPaths: string[], options: {
     model?: string;
     maxTurns?: string;
     maxBudget?: string;
+    worktree?: string;
     verbose?: boolean;
     quiet?: boolean;
     resume?: string;
@@ -377,6 +392,7 @@ const proofAction = async (specPaths: string[], options: {
         model: options.model,
         maxTurns: parseTurns(options.maxTurns, 100),
         maxBudgetUsd: parseBudget(options.maxBudget),
+        worktreeId: options.worktree,
         verbose: options.verbose,
         quiet: options.quiet,
         resume: options.resume,
@@ -395,6 +411,7 @@ const proofOpts = (cmd: ReturnType<typeof program.command>) => cmd
   .option('-m, --model <model>', 'Model to use (opus, sonnet, or full model ID)', 'sonnet')
   .option('-t, --max-turns <n>', 'Maximum turns (default: 100)', '100')
   .option('-b, --max-budget <usd>', 'Maximum budget in USD')
+  .option('-W, --worktree <id>', 'Scope proof to a specific worktree (resolves path from registry, includes diff)')
   .option('-v, --verbose', 'Show detailed output')
   .option('-q, --quiet', 'Suppress progress output')
   .option('-r, --resume <session>', 'Resume a previous session')
@@ -449,11 +466,13 @@ program
   .description('Watch live session logs')
   .argument('[session-id]', 'Session ID to watch (default: latest)')
   .option('-C, --cwd <path>', 'Working directory (target repo)')
-  .action(async (sessionId: string | undefined, options: { cwd?: string }) => {
+  .option('-W, --worktree <id>', 'Scope to sessions in a specific worktree')
+  .action(async (sessionId: string | undefined, options: { cwd?: string; worktree?: string }) => {
     try {
       await runWatch({
         sessionId,
         cwd: options.cwd,
+        worktreeId: options.worktree,
       });
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);
@@ -783,10 +802,157 @@ program
     }
   });
 
+// ── Consolidate Command ──────────────────────────────────────
+
+program
+  .command('consolidate')
+  .description('Merge ready worktree branches into main via dependency-ordered consolidation')
+  .option('-W, --work-group <id>', 'Work group ID (default: auto-detect most recent with ready worktrees)')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('-m, --model <model>', 'Model to use for type-error fix agents (default: sonnet)', 'sonnet')
+  .option('-t, --max-turns <n>', 'Maximum turns for fix agents (default: 50)', '50')
+  .option('-b, --max-budget <usd>', 'Maximum budget in USD for fix agents')
+  .option('-v, --verbose', 'Show detailed output')
+  .option('-q, --quiet', 'Suppress progress output')
+  .option('--dry-run', 'Preview merge plan without making changes')
+  .action(async (options: {
+    workGroup?: string;
+    cwd?: string;
+    model?: string;
+    maxTurns?: string;
+    maxBudget?: string;
+    verbose?: boolean;
+    quiet?: boolean;
+    dryRun?: boolean;
+  }) => {
+    guardNestedSession();
+    validateBudget(options.maxBudget);
+    try {
+      await runConsolidate({
+        workGroupId: options.workGroup,
+        cwd: options.cwd,
+        model: options.model,
+        maxTurns: parseTurns(options.maxTurns, 50),
+        maxBudgetUsd: parseBudget(options.maxBudget),
+        verbose: options.verbose,
+        quiet: options.quiet,
+        dryRun: options.dryRun,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+// ── Worktree Command ─────────────────────────────────────────
+
+const worktreeCmd = program
+  .command('worktree')
+  .description('Manage worktrees');
+
+worktreeCmd
+  .command('list')
+  .description('List all worktrees with status, spec, branch, path, and age')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('--status <status>', 'Filter by worktree status (e.g. created, running, complete, failed, ready, merged, cleaned)')
+  .option('--work-group <id>', 'Filter by work group ID')
+  .option('-q, --quiet', 'Suppress progress output')
+  .action(async (options: { cwd?: string; status?: string; workGroup?: string; quiet?: boolean }) => {
+    try {
+      await showWorktreeList({
+        cwd: options.cwd,
+        status: options.status,
+        workGroup: options.workGroup,
+        quiet: options.quiet,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+worktreeCmd
+  .command('status')
+  .description('Show detailed worktree info: spec content, run history, cost, duration')
+  .argument('<id>', 'Worktree ID')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('-q, --quiet', 'Suppress progress output')
+  .action(async (id: string, options: { cwd?: string; quiet?: boolean }) => {
+    try {
+      await showWorktreeStatus(id, {
+        cwd: options.cwd,
+        quiet: options.quiet,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+worktreeCmd
+  .command('mark-ready')
+  .description('Transition a worktree to ready status (signals readiness for consolidation)')
+  .argument('<id>', 'Worktree ID')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('-q, --quiet', 'Suppress progress output')
+  .action(async (id: string, options: { cwd?: string; quiet?: boolean }) => {
+    try {
+      await markWorktreeReady(id, {
+        cwd: options.cwd,
+        quiet: options.quiet,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+worktreeCmd
+  .command('prune')
+  .description('Remove merged and abandoned worktrees, clean up branches and registry')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('-n, --dry-run', 'Preview what would be pruned without taking action')
+  .option('--force', 'Prune worktrees in any non-running status (not just merged/cleaned)')
+  .option('--auto', 'Auto-prune merged worktrees only when disk usage exceeds 80% threshold')
+  .option('-q, --quiet', 'Suppress progress output')
+  .action(async (options: { cwd?: string; dryRun?: boolean; force?: boolean; auto?: boolean; quiet?: boolean }) => {
+    try {
+      await pruneWorktrees({
+        cwd: options.cwd,
+        dryRun: options.dryRun,
+        force: options.force,
+        auto: options.auto,
+        quiet: options.quiet,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+worktreeCmd
+  .command('repair')
+  .description('Detect and fix corrupted or orphaned worktrees (dry-run by default)')
+  .option('-C, --cwd <path>', 'Working directory (target repo)')
+  .option('--fix', 'Apply repairs (default is dry-run scan only)')
+  .option('-q, --quiet', 'Suppress progress output')
+  .action(async (options: { cwd?: string; fix?: boolean; quiet?: boolean }) => {
+    try {
+      await repairWorktrees({
+        cwd: options.cwd,
+        fix: options.fix,
+        quiet: options.quiet,
+      });
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
 // Quick alias: `forge "do something"` = `forge run "do something"`
 // Also handles `forge --spec-dir ... "prompt"` → `forge run --spec-dir ... "prompt"`
-const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'proof', 'prove', 'verify', 'watch', 'specs', 'stats', 'config', 'tui', 'pipeline', 'executor', 'serve', 'help']);
-const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--plan-model', '--dry-run', '--sequential-first', '--branch']);
+const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'proof', 'prove', 'verify', 'watch', 'specs', 'stats', 'config', 'tui', 'pipeline', 'executor', 'serve', 'worktree', 'consolidate', 'help']);
+const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--plan-model', '--dry-run', '--sequential-first', '--branch', '--isolate']);
 const args = process.argv.slice(2);
 if (args.length > 0 && !COMMANDS.has(args[0])) {
   if (!args[0].startsWith('-') || RUN_FLAGS.has(args[0])) {
