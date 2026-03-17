@@ -1409,7 +1409,7 @@ const VALID_TRANSITIONS: Record<WorktreeStatus, WorktreeStatus[]> = {
   complete:     ['auditing', 'proofing', 'ready'],
   failed:       ['created'],
   auditing:     ['audited', 'failed'],
-  audited:      ['proofing'],
+  audited:      ['proofing', 'ready'],
   proofing:     ['proofed', 'failed'],
   proofed:      ['ready'],
   ready:        ['merging'],
@@ -1483,11 +1483,11 @@ export function getValidTransitions(status: WorktreeStatus): WorktreeStatus[] {
 export function listWorktrees(db: Database, status?: WorktreeStatus): WorktreeRow[] {
   if (status) {
     return db.query(
-      'SELECT * FROM worktrees WHERE status = ? ORDER BY created_at DESC',
+      'SELECT * FROM worktrees WHERE status = ? ORDER BY created_at DESC, rowid DESC',
     ).all(status) as WorktreeRow[];
   }
   return db.query(
-    'SELECT * FROM worktrees ORDER BY created_at DESC',
+    'SELECT * FROM worktrees ORDER BY created_at DESC, rowid DESC',
   ).all() as WorktreeRow[];
 }
 

@@ -678,7 +678,7 @@ export async function runConsolidate(options: ConsolidateOptions): Promise<Conso
     maxBudgetUsd: options.maxBudgetUsd,
     defaultModel: 'sonnet',
     defaultMaxTurns: 50,
-    defaultMaxBudgetUsd: 10.00,
+    defaultMaxBudgetUsd: 20.00,
   });
 
   const quiet = options.quiet ?? false;

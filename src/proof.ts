@@ -400,7 +400,7 @@ export async function runProof(options: ProofOptions): Promise<void> {
     maxBudgetUsd,
     defaultModel: 'sonnet',
     defaultMaxTurns: 100,
-    defaultMaxBudgetUsd: 5.00,
+    defaultMaxBudgetUsd: 10.00,
   });
   const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd } = resolved;
 
