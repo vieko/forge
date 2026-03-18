@@ -42,6 +42,7 @@ forge run --spec-dir ./specs/ -P "implement these"       # Parallel specs
 forge run --pending -P "implement pending"               # Run only pending specs
 forge run --resume <session-id> "continue"               # Resume session
 forge run --spec-dir ./specs/ --isolate "implement all"  # One worktree per spec
+forge run --spec specs/feat.md --in-place "implement"   # Skip auto-worktree creation
 ```
 
 ```bash

@@ -381,8 +381,9 @@ server.registerTool('forge_start', {
     worktree: z.boolean().optional().describe('Create an isolated git worktree for this task'),
     worktree_id: z.string().optional().describe('Run inside an existing worktree (by worktree ID from forge_worktrees)'),
     isolate: z.boolean().optional().describe('Enable worktree-per-spec isolation mode — each spec runs in its own worktree'),
+    in_place: z.boolean().optional().describe('Skip automatic worktree creation for spec-dir runs. No effect on single-spec MCP runs (which already run in-place). Incompatible with worktree and isolate.'),
   },
-}, async ({ command, description, cwd, output_dir, model, spec_path, extra_args, max_turns, max_budget, plan_only, worktree, worktree_id, isolate }) => {
+}, async ({ command, description, cwd, output_dir, model, spec_path, extra_args, max_turns, max_budget, plan_only, worktree, worktree_id, isolate, in_place }) => {
   try {
     const workingDir = path.resolve(cwd);
     const db = getDb(workingDir);
@@ -411,6 +412,20 @@ server.registerTool('forge_start', {
     // Clean up stale tasks via SQL
     markStaleTasks(db, TASK_TTL_MS);
 
+    // Validate incompatible flags
+    if (in_place && worktree) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: '--in-place cannot be used with worktree' }) }],
+        isError: true,
+      };
+    }
+    if (in_place && isolate) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: '--in-place cannot be used with --isolate' }) }],
+        isError: true,
+      };
+    }
+
     const taskId = crypto.randomBytes(8).toString('hex');
 
     // Store structured parameters for the executor to dispatch.
@@ -426,6 +441,7 @@ server.registerTool('forge_start', {
       ...(worktree !== undefined && { worktree }),
       ...(worktree_id !== undefined && { worktreeId: worktree_id }),
       ...(isolate !== undefined && { isolate }),
+      ...(in_place !== undefined && { inPlace: in_place }),
     };
 
     // Insert task with status 'pending' — executor picks it up

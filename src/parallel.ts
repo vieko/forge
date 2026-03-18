@@ -1182,7 +1182,7 @@ interface ForgeRunOutcome {
 
 // Main entry point - handles single spec or spec directory
 export async function runForge(options: ForgeOptions & { _batchTaskContext?: TaskContext }): Promise<ForgeRunOutcome> {
-  const { specDir, specPath, quiet, sequential, sequentialFirst = 0, rerunFailed, pendingOnly, force, branch, isolate, workGroupId, noAutoPrune } = options;
+  const { specDir, specPath, quiet, sequential, sequentialFirst = 0, rerunFailed, pendingOnly, force, branch, isolate, inPlace, workGroupId, noAutoPrune } = options;
 
   if (!quiet) {
     showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS');
@@ -1200,7 +1200,7 @@ export async function runForge(options: ForgeOptions & { _batchTaskContext?: Tas
   // Auto-create worktree for spec-driven runs and explicit --branch
   // In isolate mode, skip the single-worktree — each spec gets its own worktree later
   const specRefPath = specDir || specPath;
-  const needsWorktree = (specRefPath || branch) && !isolate;
+  const needsWorktree = (specRefPath || branch) && !isolate && !inPlace;
 
   if (needsWorktree) {
     const wgId = workGroupId || generateWorkGroupId();

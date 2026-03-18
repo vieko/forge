@@ -67,6 +67,12 @@ forge run --fork <session-id> "try different approach"
 # Run in isolated git worktree
 forge run --spec-dir ./specs/ --branch feat "implement"
 
+# One worktree per spec (isolated parallel execution)
+forge run --spec-dir ./specs/ --isolate "implement"
+
+# Run directly in current checkout (skip automatic worktree creation)
+forge run --spec specs/feature.md --in-place "implement"
+
 # Auto-split tmux pane with live logs
 forge run --watch "implement feature X"
 
@@ -204,7 +210,11 @@ src/
 ├── pipeline-types.ts # Pipeline, Stage, Gate, PipelineEvent types, provider interfaces
 ├── pipeline-status.ts # CLI display for pipeline status
 ├── mcp.ts           # MCP server (8 tools, stdio transport, async task spawn, pipeline-aware forge_task)
-├── tui.tsx          # OpenTUI React TUI (sessions, specs, pipeline tabs, fs.watch live updates)
+├── consolidate.ts   # forge consolidate: dep-order merge, incremental type-check, agent conflict resolution, PR
+├── worktree-cli.ts  # forge worktree list/status/mark-ready/prune/repair CLI
+├── worktree-limits.ts # disk quota + count enforcement
+├── workspace.ts     # Workspace hooks (setup/teardown), used by pipeline + worktrees
+├── tui.tsx          # OpenTUI React TUI (sessions, specs, pipeline, worktrees tabs, fs.watch live updates)
 ├── file-watcher.ts  # Core createFileWatcher(): debounced fs.watch, fallback polling, error recovery, dispose API
 ├── types.ts         # TypeScript types (ForgeResult, SpecManifest, SpecEntry, SpecRun, DefineOptions, MonorepoContext)
 ├── query.test.ts    # Tests for core utilities
@@ -272,6 +282,9 @@ src/
 35. **TUI fs.watch** — All polling replaced with `createFileWatcher()`: debounced `fs.watch` (100ms), configurable fallback polling (15s safety net), platform-aware error recovery (EPERM/EACCES/ENOENT/EMFILE → polling-only), dispose API
 36. **Pipeline-aware MCP** — `forge_task` enriches pipeline tasks with stage progress (`current_stage`, `completed_stages`, `pending_stages`) and behavioral hints telling agents to wait for completion
 37. **Define CLAUDE.md compliance** — `forge define` prompt includes constraint to respect target repo's CLAUDE.md conventions over observed codebase patterns
+38. **Worktree-per-spec** — spec-driven runs (`--spec`, `--spec-dir`) auto-create sibling worktrees (`~/dev/project-spec-name`) with DB registry tracking. `--isolate` creates one worktree per spec for fully isolated parallel execution with dep-level consolidation gates. `--in-place` opts out of automatic worktree creation. Incompatible flag pairs (`--in-place` + `--branch`, `--in-place` + `--isolate`) are rejected at CLI, MCP, and executor levels
+39. **Consolidate** — `forge consolidate` merges `ready` worktrees in dependency order into a consolidation branch. Git conflicts dispatch an SDK agent for resolution. Type errors after merge get up to 2 fix attempts. Concurrency guard via DB lock per work group. Creates PR on success
+40. **Worktree CLI** — `forge worktree list/status/mark-ready/prune/repair` for worktree lifecycle management. 14-status state machine: created→running→complete→ready→merging→merged→cleaned (+ failed/merge_failed/paused/auditing/audited/proofing/proofed)
 
 ## Spec Naming
 

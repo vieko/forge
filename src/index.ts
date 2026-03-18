@@ -103,6 +103,7 @@ program
   .option('-F, --force', 'Re-run all specs including already passed')
   .option('-B, --branch <name>', 'Run in an isolated git worktree on the named branch')
   .option('-I, --isolate', 'Create one worktree per spec for fully isolated parallel execution')
+  .option('--in-place', 'Run directly in the current checkout (skip automatic worktree creation)')
   .option('-W, --work-group <id>', 'Join an existing work group (for incremental runs)')
   .option('--no-auto-prune', 'Skip automatic pruning of merged worktrees when approaching disk limits')
   .option('-w, --watch', 'Open a tmux pane with live session logs')
@@ -128,6 +129,7 @@ program
     force?: boolean;
     branch?: string;
     isolate?: boolean;
+    inPlace?: boolean;
     workGroup?: string;
     noAutoPrune?: boolean;
     watch?: boolean;
@@ -135,6 +137,15 @@ program
     guardNestedSession();
     validateSession(options.resume, options.fork);
     validateBudget(options.maxBudget);
+
+    if (options.inPlace && options.branch) {
+      console.error('--in-place cannot be used with --branch');
+      process.exit(1);
+    }
+    if (options.inPlace && options.isolate) {
+      console.error('--in-place cannot be used with --isolate');
+      process.exit(1);
+    }
 
     // --watch: open a tmux pane with live session logs
     if (options.watch) {
@@ -177,6 +188,7 @@ program
         force: options.force,
         branch: options.branch,
         isolate: options.isolate,
+        inPlace: options.inPlace,
         workGroupId: options.workGroup,
         noAutoPrune: options.noAutoPrune,
       });
@@ -952,7 +964,7 @@ worktreeCmd
 // Quick alias: `forge "do something"` = `forge run "do something"`
 // Also handles `forge --spec-dir ... "prompt"` → `forge run --spec-dir ... "prompt"`
 const COMMANDS = new Set(['run', 'status', 'audit', 'define', 'review', 'proof', 'prove', 'verify', 'watch', 'specs', 'stats', 'config', 'tui', 'pipeline', 'executor', 'serve', 'worktree', 'consolidate', 'help']);
-const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--plan-model', '--dry-run', '--sequential-first', '--branch', '--isolate']);
+const RUN_FLAGS = new Set(['--spec', '--spec-dir', '--rerun-failed', '--pending', '--sequential', '--plan-only', '--plan-model', '--dry-run', '--sequential-first', '--branch', '--isolate', '--in-place']);
 const args = process.argv.slice(2);
 if (args.length > 0 && !COMMANDS.has(args[0])) {
   if (!args[0].startsWith('-') || RUN_FLAGS.has(args[0])) {

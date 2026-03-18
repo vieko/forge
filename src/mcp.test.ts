@@ -975,6 +975,70 @@ describe('forge_pipeline_start', () => {
     expect(['pending', 'running', 'failed', 'complete']).toContain(taskJson.status);
     expect(taskJson.elapsed).toBeTruthy();
   });
+
+  test('in_place param is stored in task params', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+    await fs.writeFile(path.join(dir, '.forge', 'executor.pid'), String(process.pid));
+
+    const { json } = await callTool('forge_start', {
+      command: 'run',
+      description: 'test in_place',
+      cwd: dir,
+      spec_path: 'specs/test.md',
+      in_place: true,
+    });
+
+    expect(json.task_id).toBeTruthy();
+
+    // Verify the param was persisted for the executor to read
+    const db = getDb(dir)!;
+    const task = db.query('SELECT params FROM tasks WHERE id = ?').get(json.task_id) as { params: string } | null;
+    expect(task).toBeTruthy();
+    const params = JSON.parse(task!.params);
+    expect(params.inPlace).toBe(true);
+  });
+
+  test('rejects in_place with worktree', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+    await fs.writeFile(path.join(dir, '.forge', 'executor.pid'), String(process.pid));
+
+    const { json, isError } = await callTool('forge_start', {
+      command: 'run',
+      description: 'test conflict',
+      cwd: dir,
+      spec_path: 'specs/test.md',
+      in_place: true,
+      worktree: true,
+    });
+
+    expect(isError).toBe(true);
+    expect(json.error).toContain('--in-place cannot be used with worktree');
+  });
+
+  test('rejects in_place with isolate', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+    await fs.writeFile(path.join(dir, '.forge', 'executor.pid'), String(process.pid));
+
+    const { json, isError } = await callTool('forge_start', {
+      command: 'run',
+      description: 'test conflict',
+      cwd: dir,
+      spec_path: 'specs/',
+      in_place: true,
+      isolate: true,
+    });
+
+    expect(isError).toBe(true);
+    expect(json.error).toContain('--in-place cannot be used with --isolate');
+  });
+
+  // NOTE: in_place has no effect on MCP single-spec runs because those
+  // dispatch to runSingleSpec (not runForge), which never auto-creates
+  // worktrees. The param is intentionally accepted but inert in that path.
+  // It is meaningful for spec-dir runs routed through runForge.
 });
 
 // ── forge_start ──────────────────────────────────────────────

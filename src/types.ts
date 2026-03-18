@@ -46,6 +46,8 @@ export interface ForgeOptions {
   branch?: string;
   /** Enable worktree-per-spec isolation mode -- each spec runs in its own worktree */
   isolate?: boolean;
+  /** Run directly in the current checkout — skip automatic worktree creation */
+  inPlace?: boolean;
   /** Skip automatic pruning of merged worktrees when approaching disk limits */
   noAutoPrune?: boolean;
   /** Directory for .forge/ persistence (session logs, results, manifest). Defaults to cwd. Used to route writes to the original repo when running in a worktree. */

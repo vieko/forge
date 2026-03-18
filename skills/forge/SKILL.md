@@ -82,6 +82,7 @@ Important flags:
 - `-F, --force` -- Re-run all specs including already passed.
 - `-B, --branch <name>` -- Run in an isolated git worktree on the named branch. Auto-commits on success, cleans up after.
 - `-I, --isolate` -- Create one worktree per spec. Best used after committing required local runtime changes.
+- `--in-place` -- Run directly in the current checkout, skip automatic worktree creation. Incompatible with `--branch` and `--isolate`.
 - `--concurrency <n>` -- Override auto-detected parallelism (default: freeMem/2GB, capped at CPUs).
 - `--sequential-first <n>` -- Run first N specs sequentially, then parallelize.
 - `-C, --cwd <path>` -- Target repo directory.

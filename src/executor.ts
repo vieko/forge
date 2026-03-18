@@ -249,6 +249,14 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
       const concurrency = extractNumberArg(extraArgs, '--concurrency');
       const branch = extractStringArg(extraArgs, '--branch');
       const isolate = (params.isolate as boolean | undefined) ?? hasFlag(extraArgs, '--isolate');
+      const inPlace = (params.inPlace as boolean | undefined) ?? hasFlag(extraArgs, '--in-place');
+
+      if (inPlace && branch) {
+        throw new Error('--in-place cannot be used with --branch');
+      }
+      if (inPlace && isolate) {
+        throw new Error('--in-place cannot be used with --isolate');
+      }
 
       if (specPath) {
         const resolvedSpec = path.resolve(workingDir, specPath);
@@ -292,6 +300,7 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
             force,
             branch,
             isolate,
+            inPlace,
             _batchTaskContext: new ExecutorTaskContext(task.id),
             _onSpecResult: quiet ? undefined : (spec, status) => {
               const icon = status === 'success' ? '+' : 'x';
@@ -455,6 +464,10 @@ async function executeTask(
   // ── Worktree creation on task claim ────────────────────────
   let effectiveWorkingDir = workingDir;
   let worktreeId: string | null = null;
+
+  if (params.inPlace && params.worktree) {
+    throw new Error('--in-place cannot be used with worktree');
+  }
 
   if (params.worktree) {
     try {

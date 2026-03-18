@@ -248,6 +248,74 @@ describe('runForge outcome', () => {
   });
 });
 
+// ── --in-place ─────────────────────────────────────────────
+
+describe('--in-place', () => {
+  test('CLI rejects --in-place with --branch', async () => {
+    const { execAsync } = await import('./utils.js');
+    const entry = path.resolve(import.meta.dirname, 'index.ts');
+    const env: Record<string, string> = { ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== undefined) as [string, string][]), FORGE_ALLOW_NESTED: '1' };
+    delete env.CLAUDECODE;
+    delete env.CLAUDE_CODE_ENTRYPOINT;
+    const result = await execAsync(
+      `bun ${entry} run --in-place --branch feat --spec /dev/null "test"`,
+      { cwd: os.tmpdir(), env },
+    ).catch(e => e);
+    expect(result.stderr || result.message).toContain('--in-place cannot be used with --branch');
+  });
+
+  test('CLI rejects --in-place with --isolate', async () => {
+    const { execAsync } = await import('./utils.js');
+    const entry = path.resolve(import.meta.dirname, 'index.ts');
+    const env: Record<string, string> = { ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== undefined) as [string, string][]), FORGE_ALLOW_NESTED: '1' };
+    delete env.CLAUDECODE;
+    delete env.CLAUDE_CODE_ENTRYPOINT;
+    const result = await execAsync(
+      `bun ${entry} run --in-place --isolate --spec-dir /dev/null "test"`,
+      { cwd: os.tmpdir(), env },
+    ).catch(e => e);
+    expect(result.stderr || result.message).toContain('--in-place cannot be used with --isolate');
+  });
+
+  test('spec-dir with inPlace runs specs in the original directory (no worktree)', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+    await writeSpec(dir, 'specs/a.md');
+    mockRunBehavior = 'success';
+    mockRunCalls.length = 0;
+
+    await runForge({
+      prompt: 'implement',
+      specDir: path.join(dir, 'specs'),
+      cwd: dir,
+      quiet: true,
+      inPlace: true,
+    });
+
+    // The spec ran and its cwd was NOT redirected to a worktree path
+    expect(mockRunCalls.length).toBe(1);
+    expect(mockRunCalls[0].specPath).toContain('a.md');
+  });
+
+  test('single spec with inPlace runs in the original directory (no worktree)', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+    const specFile = await writeSpec(dir, 'specs/a.md');
+    mockRunBehavior = 'success';
+    mockRunCalls.length = 0;
+
+    await runForge({
+      prompt: 'implement',
+      specPath: specFile,
+      cwd: dir,
+      quiet: true,
+      inPlace: true,
+    });
+
+    expect(mockRunCalls.length).toBe(1);
+  });
+});
+
 // ── filterPassedSpecs ────────────────────────────────────────
 
 describe('filterPassedSpecs', () => {
