@@ -18,6 +18,7 @@ import path from 'path';
 const StrictFieldSchemas = {
   setup: z.array(z.string()),
   teardown: z.array(z.string()),
+  sharedFiles: z.array(z.string()),
   setupTimeout: z.number().positive(),
   executorIdleTimeout: z.number().positive(),
   dbProvider: z.enum(['sqlite', 'turso']),
@@ -36,6 +37,7 @@ const StrictFieldSchemas = {
 const ConfigSchema = z.object({
   setup: z.array(z.string()).default([]).catch([]),
   teardown: z.array(z.string()).default([]).catch([]),
+  sharedFiles: z.array(z.string()).default([]).catch([]),
   setupTimeout: z.number().positive().default(300000).catch(300000),
   executorIdleTimeout: z.number().positive().default(300000).catch(300000),
   dbProvider: z.enum(['sqlite', 'turso']).default('sqlite').catch('sqlite' as const),
@@ -51,6 +53,7 @@ const ConfigSchema = z.object({
 export interface ForgeLocalConfig {
   setup: string[];
   teardown: string[];
+  sharedFiles: string[];
   setupTimeout: number;
   executorIdleTimeout: number;
   dbProvider: 'sqlite' | 'turso';
@@ -64,6 +67,7 @@ export interface ForgeLocalConfig {
 export const CONFIG_DEFAULTS: ForgeLocalConfig = {
   setup: [],
   teardown: [],
+  sharedFiles: [],
   setupTimeout: 300000,
   executorIdleTimeout: 300000,
   dbProvider: 'sqlite',
@@ -204,6 +208,7 @@ export function getConfig(workingDir: string): ForgeLocalConfig {
   const config: ForgeLocalConfig = {
     setup: parsed.setup,
     teardown: parsed.teardown,
+    sharedFiles: parsed.sharedFiles,
     setupTimeout: parsed.setupTimeout,
     executorIdleTimeout: parsed.executorIdleTimeout,
     dbProvider: parsed.dbProvider,
@@ -263,6 +268,7 @@ export function formatConfig(workingDir: string): string {
   const fields: Array<{ key: keyof ForgeLocalConfig; envVar?: string }> = [
     { key: 'setup' },
     { key: 'teardown' },
+    { key: 'sharedFiles' },
     { key: 'setupTimeout', envVar: 'FORGE_SETUP_TIMEOUT' },
     { key: 'executorIdleTimeout', envVar: 'FORGE_EXECUTOR_IDLE_TIMEOUT' },
     { key: 'dbProvider', envVar: 'FORGE_DB_PROVIDER' },

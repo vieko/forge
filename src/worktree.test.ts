@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
 import { execAsync, createWorktree, commitWorktree, cleanupWorktree, deriveSpecName } from './utils.js';
+import { linkSharedFiles } from './workspace.js';
 import { setupHermeticGit, teardownHermeticGit } from './test-utils.js';
 
 // ── Hermetic Git ─────────────────────────────────────────────
@@ -224,6 +225,45 @@ describe('createWorktree sibling mode', () => {
     await cleanupWorktree(wtPath, tmpDir);
   });
 
+  test('symlinks sharedFiles from source repo into worktree', async () => {
+    // Create .env and .env.local in the source repo (gitignored)
+    await fs.writeFile(path.join(tmpDir, '.env'), 'SECRET=abc123\n');
+    await fs.writeFile(path.join(tmpDir, '.env.local'), 'LOCAL=yes\n');
+
+    const forgeDir = path.join(tmpDir, '.forge');
+    await fs.mkdir(forgeDir, { recursive: true });
+    await fs.writeFile(
+      path.join(forgeDir, 'config.json'),
+      JSON.stringify({
+        sharedFiles: ['.env', '.env.local', '.env.missing'],
+      }),
+    );
+
+    const wtPath = await createWorktree(tmpDir, 'ignored-branch', {
+      spec_path: 'specs/shared-files-check.md',
+    });
+
+    // .env and .env.local should be symlinked
+    const envStat = await fs.lstat(path.join(wtPath, '.env'));
+    expect(envStat.isSymbolicLink()).toBe(true);
+
+    const envContent = await fs.readFile(path.join(wtPath, '.env'), 'utf-8');
+    expect(envContent).toBe('SECRET=abc123\n');
+
+    const localContent = await fs.readFile(path.join(wtPath, '.env.local'), 'utf-8');
+    expect(localContent).toBe('LOCAL=yes\n');
+
+    // .env.missing should have been skipped (not exist in worktree)
+    try {
+      await fs.access(path.join(wtPath, '.env.missing'));
+      expect(false).toBe(true); // Should not reach here
+    } catch {
+      // Expected -- file doesn't exist
+    }
+
+    await cleanupWorktree(wtPath, tmpDir);
+  });
+
   test('handles directory collision with numeric suffix', async () => {
     // Create first worktree
     const wtPath1 = await createWorktree(tmpDir, 'ignored', {
@@ -302,6 +342,119 @@ describe('createWorktree sibling mode', () => {
     expect(stat.isDirectory()).toBe(true);
 
     await cleanupWorktree(wtPath, tmpDir);
+  });
+});
+
+// ── linkSharedFiles ─────────────────────────────────────────
+
+describe('linkSharedFiles', () => {
+  let sourceDir: string;
+  let targetDir: string;
+
+  beforeEach(async () => {
+    sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forge-link-src-'));
+    targetDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forge-link-tgt-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(sourceDir, { recursive: true, force: true });
+    await fs.rm(targetDir, { recursive: true, force: true });
+  });
+
+  test('symlinks files that exist in source', async () => {
+    await fs.writeFile(path.join(sourceDir, '.env'), 'KEY=val\n');
+
+    const result = await linkSharedFiles(targetDir, sourceDir, ['.env'], true);
+
+    expect(result.linked).toEqual(['.env']);
+    expect(result.skipped).toEqual([]);
+    expect(result.failed).toEqual([]);
+
+    const stat = await fs.lstat(path.join(targetDir, '.env'));
+    expect(stat.isSymbolicLink()).toBe(true);
+
+    const content = await fs.readFile(path.join(targetDir, '.env'), 'utf-8');
+    expect(content).toBe('KEY=val\n');
+  });
+
+  test('skips files missing from source', async () => {
+    const result = await linkSharedFiles(targetDir, sourceDir, ['.env.missing'], true);
+
+    expect(result.linked).toEqual([]);
+    expect(result.skipped).toEqual(['.env.missing']);
+  });
+
+  test('creates parent directories for nested paths', async () => {
+    await fs.mkdir(path.join(sourceDir, 'config'), { recursive: true });
+    await fs.writeFile(path.join(sourceDir, 'config', '.env'), 'NESTED=yes\n');
+
+    const result = await linkSharedFiles(targetDir, sourceDir, ['config/.env'], true);
+
+    expect(result.linked).toEqual(['config/.env']);
+    const content = await fs.readFile(path.join(targetDir, 'config', '.env'), 'utf-8');
+    expect(content).toBe('NESTED=yes\n');
+  });
+
+  test('replaces existing file at target', async () => {
+    await fs.writeFile(path.join(sourceDir, '.env'), 'NEW=val\n');
+    await fs.writeFile(path.join(targetDir, '.env'), 'OLD=val\n');
+
+    const result = await linkSharedFiles(targetDir, sourceDir, ['.env'], true);
+
+    expect(result.linked).toEqual(['.env']);
+    const stat = await fs.lstat(path.join(targetDir, '.env'));
+    expect(stat.isSymbolicLink()).toBe(true);
+  });
+
+  test('expands glob patterns against source directory', async () => {
+    // Create a monorepo-like structure
+    await fs.mkdir(path.join(sourceDir, 'apps/web'), { recursive: true });
+    await fs.mkdir(path.join(sourceDir, 'apps/api'), { recursive: true });
+    await fs.mkdir(path.join(sourceDir, 'packages/db'), { recursive: true });
+    await fs.writeFile(path.join(sourceDir, 'apps/web/.env.local'), 'WEB=1\n');
+    await fs.writeFile(path.join(sourceDir, 'apps/api/.env.local'), 'API=1\n');
+    await fs.writeFile(path.join(sourceDir, 'packages/db/.env.local'), 'DB=1\n');
+
+    const result = await linkSharedFiles(targetDir, sourceDir, ['**/.env.local'], true);
+
+    expect(result.linked.sort()).toEqual([
+      'apps/api/.env.local',
+      'apps/web/.env.local',
+      'packages/db/.env.local',
+    ]);
+
+    // All should be symlinks
+    for (const file of result.linked) {
+      const stat = await fs.lstat(path.join(targetDir, file));
+      expect(stat.isSymbolicLink()).toBe(true);
+    }
+  });
+
+  test('deduplicates when glob and explicit path overlap', async () => {
+    await fs.writeFile(path.join(sourceDir, '.env.local'), 'ROOT=1\n');
+
+    const result = await linkSharedFiles(
+      targetDir, sourceDir,
+      ['.env.local', '*.env.local', '.env.local'],
+      true,
+    );
+
+    // Should only link once
+    expect(result.linked).toEqual(['.env.local']);
+  });
+
+  test('handles mixed present/missing files', async () => {
+    await fs.writeFile(path.join(sourceDir, '.env'), 'A=1\n');
+    await fs.writeFile(path.join(sourceDir, '.env.local'), 'B=2\n');
+
+    const result = await linkSharedFiles(
+      targetDir, sourceDir,
+      ['.env', '.env.staging', '.env.local', '.env.production'],
+      true,
+    );
+
+    expect(result.linked).toEqual(['.env', '.env.local']);
+    expect(result.skipped).toEqual(['.env.staging', '.env.production']);
   });
 });
 

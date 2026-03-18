@@ -10,6 +10,109 @@ import { execAsync, detectPackageManager } from './utils.js';
 import { getConfig } from './config.js';
 import type { ForgeLocalConfig } from './config.js';
 
+// ── Shared Files ────────────────────────────────────────────
+
+const GLOB_CHARS = /[*?{}\[\]]/;
+
+/**
+ * Resolve sharedFiles entries into concrete relative paths.
+ * Entries without glob characters are returned as-is.
+ * Glob patterns are expanded against the source directory using Bun.Glob.
+ */
+export async function resolveSharedFiles(
+  configDir: string,
+  patterns: string[],
+): Promise<string[]> {
+  const resolved: string[] = [];
+  const seen = new Set<string>();
+
+  for (const pattern of patterns) {
+    if (!GLOB_CHARS.test(pattern)) {
+      if (!seen.has(pattern)) {
+        seen.add(pattern);
+        resolved.push(pattern);
+      }
+      continue;
+    }
+
+    const glob = new Bun.Glob(pattern);
+    for await (const match of glob.scan({ cwd: configDir, absolute: false, dot: true })) {
+      if (!seen.has(match)) {
+        seen.add(match);
+        resolved.push(match);
+      }
+    }
+  }
+
+  return resolved;
+}
+
+/**
+ * Symlink shared files (e.g. .env, .env.local) from the source repo
+ * into a worktree. Falls back to copy if symlink fails (e.g. Windows
+ * without developer mode). Skips files that don't exist in the source.
+ *
+ * Supports glob patterns in the file list (e.g. "**\/.env.local").
+ * Creates parent directories in the worktree as needed (supports
+ * nested paths like "config/.env").
+ */
+export async function linkSharedFiles(
+  worktreePath: string,
+  configDir: string,
+  files: string[],
+  quiet?: boolean,
+): Promise<{ linked: string[]; skipped: string[]; failed: string[] }> {
+  // Expand any glob patterns to concrete paths
+  const resolvedFiles = await resolveSharedFiles(configDir, files);
+
+  const linked: string[] = [];
+  const skipped: string[] = [];
+  const failed: string[] = [];
+
+  for (const file of resolvedFiles) {
+    const sourcePath = path.resolve(configDir, file);
+    const targetPath = path.resolve(worktreePath, file);
+
+    // Check source exists
+    try {
+      await fs.access(sourcePath);
+    } catch {
+      skipped.push(file);
+      continue;
+    }
+
+    // Ensure parent directory exists in worktree
+    const targetDir = path.dirname(targetPath);
+    await fs.mkdir(targetDir, { recursive: true });
+
+    // Remove existing target (stale symlink, previous copy, etc.)
+    try {
+      await fs.unlink(targetPath);
+    } catch {
+      // Doesn't exist -- fine
+    }
+
+    // Symlink, fall back to copy
+    try {
+      await fs.symlink(sourcePath, targetPath);
+      linked.push(file);
+    } catch {
+      try {
+        await fs.copyFile(sourcePath, targetPath);
+        linked.push(file);
+      } catch (err) {
+        failed.push(file);
+        if (!quiet) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`\x1b[2m[forge]\x1b[0m Failed to link ${file}: ${msg}`);
+        }
+      }
+    }
+  }
+
+  return { linked, skipped, failed };
+}
+
 // ── Types ────────────────────────────────────────────────────
 
 export interface WorkspaceHookResult {
@@ -234,12 +337,28 @@ export async function setupWorktree(
 ): Promise<WorkspaceHookResult | null> {
   const config = getConfig(configDir);
   const commands = await resolveSetupCommands(worktreePath, config);
+  const hasSharedFiles = config.sharedFiles.length > 0;
 
-  if (commands.length === 0 && !options?.scope) {
+  if (commands.length === 0 && !options?.scope && !hasSharedFiles) {
     return null;
   }
 
-  const totalPhases = options?.scope ? 2 : 1;
+  // Phase 0: Symlink shared files (before install -- some postinstall scripts read .env)
+  if (hasSharedFiles) {
+    const { linked, skipped, failed } = await linkSharedFiles(
+      worktreePath,
+      configDir,
+      config.sharedFiles,
+      options?.quiet,
+    );
+    if (!options?.quiet && linked.length > 0) {
+      console.log(`\x1b[2m[forge]\x1b[0m Linked shared files: ${linked.join(', ')}`);
+    }
+    if (!options?.quiet && skipped.length > 0) {
+      console.log(`\x1b[2m[forge]\x1b[0m Skipped (not found in source): ${skipped.join(', ')}`);
+    }
+  }
+
   if (!options?.quiet && commands.length > 0) {
     const scopeNote = options?.scope ? ` (root + scoped: ${options.scope})` : '';
     console.log(`\x1b[2m[forge]\x1b[0m Running workspace setup (${commands.length} command${commands.length > 1 ? 's' : ''})${scopeNote}...`);
