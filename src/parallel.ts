@@ -551,17 +551,12 @@ async function runSpecsIsolated(
           taskContext: childContext,
         });
 
+        await finalizeIsolatedWorktree(specWorktreePath, `forge/isolate-${specFile.replace(/\.md$/, '')}`);
+
         const duration = (Date.now() - startTime) / 1000;
         display?.done(i, duration);
         results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration });
         options._onSpecResult?.(specFile, 'success');
-
-        // Auto-commit on success
-        try {
-          await commitWorktree(specWorktreePath, `forge/isolate-${specFile.replace(/\.md$/, '')}`);
-        } catch {
-          // Best effort -- don't fail the spec run on commit error
-        }
 
         // Transition worktree to complete
         if (specWorktreeId) {
@@ -605,6 +600,24 @@ async function runSpecsIsolated(
   }
 
   return results;
+}
+
+async function finalizeIsolatedWorktree(
+  worktreePath: string,
+  branch: string,
+): Promise<void> {
+  try {
+    const committed = await commitWorktree(worktreePath, branch);
+    if (committed) return;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to commit isolated worktree changes: ${msg}`);
+  }
+
+  const { stdout: status } = await execAsync('git status --porcelain --untracked-files=all', { cwd: worktreePath });
+  if (status.trim()) {
+    throw new Error('Isolated spec completed with uncommitted changes; unable to consolidate worktree output');
+  }
 }
 
 // Run specs in isolated worktrees with dependency-level consolidation gates.
@@ -816,17 +829,15 @@ async function runSpecsIsolatedForLevel(
           taskContext: childContext,
         });
 
+        await finalizeIsolatedWorktree(
+          specWorktreePath,
+          specBranch || `forge/isolate-${specFile.replace(/\.md$/, '')}`,
+        );
+
         const duration = (Date.now() - startTime) / 1000;
         display?.done(i, duration);
         results.push({ spec: specFile, status: 'success', cost: result.costUsd, duration, _branch: specBranch });
         options._onSpecResult?.(specFile, 'success');
-
-        // Auto-commit on success
-        try {
-          await commitWorktree(specWorktreePath, specBranch || `forge/isolate-${specFile.replace(/\.md$/, '')}`);
-        } catch {
-          // Best effort
-        }
 
         // Transition worktree to complete
         if (specWorktreeId) {
@@ -1163,8 +1174,14 @@ export async function filterPassedSpecs(
   return { remaining, skipped: skippedNames.size, skippedNames };
 }
 
+interface ForgeRunOutcome {
+  anyPassed: boolean;
+  allPassed: boolean;
+  anyCancelled: boolean;
+}
+
 // Main entry point - handles single spec or spec directory
-export async function runForge(options: ForgeOptions & { _batchTaskContext?: TaskContext }): Promise<void> {
+export async function runForge(options: ForgeOptions & { _batchTaskContext?: TaskContext }): Promise<ForgeRunOutcome> {
   const { specDir, specPath, quiet, sequential, sequentialFirst = 0, rerunFailed, pendingOnly, force, branch, isolate, workGroupId, noAutoPrune } = options;
 
   if (!quiet) {
@@ -1250,7 +1267,7 @@ export async function runForge(options: ForgeOptions & { _batchTaskContext?: Tas
     ...(worktreePath && { _worktreePath: worktreePath }),
   };
 
-  const { anyPassed } = await runForgeInner(runOptions, workingDir, resultDir, quiet, sequential, sequentialFirst, rerunFailed, pendingOnly, force, isolate);
+  const outcome = await runForgeInner(runOptions, workingDir, resultDir, quiet, sequential, sequentialFirst, rerunFailed, pendingOnly, force, isolate);
 
   // Auto-commit on worktree — skip if all specs failed
   // Worktree persists after run completes (no cleanup).
@@ -1258,7 +1275,7 @@ export async function runForge(options: ForgeOptions & { _batchTaskContext?: Tas
   if (worktreePath && originalRepoDir) {
     const branchLabel = effectiveBranch || 'worktree';
 
-    if (anyPassed) {
+    if (outcome.anyPassed) {
       const committed = await commitWorktree(worktreePath, effectiveBranch || 'forge-run');
       if (!quiet) {
         if (committed) {
@@ -1275,13 +1292,19 @@ export async function runForge(options: ForgeOptions & { _batchTaskContext?: Tas
     const db = getDb(originalRepoDir);
     if (db && worktreeId) {
       try {
-        const finalStatus = anyPassed ? 'complete' : 'failed';
+        const finalStatus = outcome.anyPassed ? 'complete' : 'failed';
         transitionWorktreeStatus(db, worktreeId, finalStatus);
       } catch {
         // Best effort — don't fail the run because of status transition
       }
     }
   }
+
+  if (!outcome.allPassed) {
+    throw new Error(outcome.anyCancelled ? 'Run cancelled before all specs completed' : 'One or more specs failed');
+  }
+
+  return outcome;
 }
 
 // Inner implementation of runForge — separated to allow worktree wrapping
@@ -1296,7 +1319,7 @@ async function runForgeInner(
   pendingOnly: boolean | undefined,
   force: boolean | undefined,
   isolate: boolean | undefined,
-): Promise<{ anyPassed: boolean }> {
+): Promise<ForgeRunOutcome> {
   const parallel = !sequential;
 
   // Re-resolve working dir since cwd may have been overridden for worktree
@@ -1333,7 +1356,7 @@ async function runForgeInner(
 
     if (failedPaths.length === 0) {
       console.log('No failed specs found in latest batch. All passed!');
-      return { anyPassed: true };
+      return { anyPassed: true, allPassed: true, anyCancelled: false };
     }
 
     const failedNames = failedPaths.map(p => path.basename(p));
@@ -1374,7 +1397,11 @@ async function runForgeInner(
     }
 
     printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, undefined, hasTracker, options._worktreePath);
-    return { anyPassed: results.some(r => r.status === 'success') };
+    return {
+      anyPassed: results.some(r => r.status === 'success'),
+      allPassed,
+      anyCancelled,
+    };
   }
 
   // Run only pending specs from the manifest
@@ -1383,7 +1410,7 @@ async function runForgeInner(
 
     if (pendingPaths.length === 0) {
       console.log('No pending specs found in manifest. All done!');
-      return { anyPassed: true };
+      return { anyPassed: true, allPassed: true, anyCancelled: false };
     }
 
     const pendingNames = pendingPaths.map(p => path.basename(p));
@@ -1424,7 +1451,11 @@ async function runForgeInner(
     }
 
     printBatchSummary(results, wallClockDuration, parallel, quiet ?? false, undefined, hasTracker, options._worktreePath);
-    return { anyPassed: results.some(r => r.status === 'success') };
+    return {
+      anyPassed: results.some(r => r.status === 'success'),
+      allPassed: pendingAllPassed,
+      anyCancelled: pendingAnyCancelled,
+    };
   }
 
   // If spec directory provided, run each spec
@@ -1485,7 +1516,7 @@ async function runForgeInner(
 
     if (specFiles.length === 0) {
       console.log(`All ${allSpecFiles.length} specs already passed. Use ${BOLD}--force${RESET} to re-run.`);
-      return { anyPassed: true };
+      return { anyPassed: true, allPassed: true, anyCancelled: false };
     }
 
     if (!quiet) {
@@ -1605,7 +1636,11 @@ async function runForgeInner(
     const displayDir = path.relative(resultDir, resolvedDir) || resolvedDir;
     printBatchSummary(results, wallClockDuration, !sequential, quiet ?? false, displayDir, hasTracker, options._worktreePath);
 
-    return { anyPassed: results.some(r => r.status === 'success') };
+    return {
+      anyPassed: results.some(r => r.status === 'success'),
+      allPassed: specDirAllPassed,
+      anyCancelled: specDirAnyCancelled,
+    };
   }
 
   // Auto-detect: if prompt looks like a file path to an existing .md file, treat as --spec
@@ -1692,5 +1727,5 @@ async function runForgeInner(
         })
       : new NoopTaskContext());
   await runSingleSpec({ ...effectiveOptions, _runId: runId, taskContext: singleContext });
-  return { anyPassed: true };
+  return { anyPassed: true, allPassed: true, anyCancelled: false };
 }

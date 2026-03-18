@@ -1338,7 +1338,7 @@ export function getWorktree(db: Database, id: string): WorktreeRow | null {
  */
 export function getWorktreeByPath(db: Database, worktreePath: string): WorktreeRow | null {
   return db.query(
-    'SELECT * FROM worktrees WHERE worktree_path = ?',
+    'SELECT * FROM worktrees WHERE worktree_path = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
   ).get(worktreePath) as WorktreeRow | null;
 }
 
@@ -1347,7 +1347,7 @@ export function getWorktreeByPath(db: Database, worktreePath: string): WorktreeR
  */
 export function getWorktreeByBranch(db: Database, branch: string): WorktreeRow | null {
   return db.query(
-    'SELECT * FROM worktrees WHERE branch = ?',
+    'SELECT * FROM worktrees WHERE branch = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
   ).get(branch) as WorktreeRow | null;
 }
 

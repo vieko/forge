@@ -56,6 +56,7 @@ import {
   findPendingSpecs,
   runSpecBatch,
   printBatchSummary,
+  runForge,
 } from './parallel.js';
 
 import {
@@ -227,6 +228,23 @@ describe('smartDispatch', () => {
     const result = await smartDispatch('specs', resultDir, workDir);
     expect(result).not.toBeNull();
     expect(result!.specDir).toBe(path.join(resultDir, 'specs'));
+  });
+});
+
+describe('runForge outcome', () => {
+  test('throws when a spec-dir batch has failing specs', async () => {
+    const dir = await makeTmpDir();
+    await setupForge(dir);
+    await writeSpec(dir, 'specs/a.md');
+    await writeSpec(dir, 'specs/b.md');
+    mockRunBehavior = 'fail';
+
+    await expect(runForge({
+      prompt: 'implement',
+      specDir: path.join(dir, 'specs'),
+      cwd: dir,
+      quiet: true,
+    })).rejects.toThrow('One or more specs failed');
   });
 });
 

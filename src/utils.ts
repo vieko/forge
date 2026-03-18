@@ -388,7 +388,9 @@ export async function createWorktree(
   }
 
   // ── Run workspace setup hooks ────────────────────────────
-  if (registryOptions?.runSetup) {
+  // Spec-driven sibling worktrees should bootstrap automatically so a
+  // fresh checkout can verify without relying on pre-existing node_modules.
+  if (registryOptions?.runSetup || useSiblingMode) {
     const result = await setupWorktree(worktreePath, repoDir, { quiet: registryOptions.quiet, scope: registryOptions.scope });
 
     if (result && !result.success) {

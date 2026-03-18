@@ -112,15 +112,26 @@ function makeEntry(overrides: Partial<SpecManifest['specs'][0]> = {}): SpecManif
 let client: Client;
 let transport: StdioClientTransport;
 
-beforeAll(async () => {
-  const serverPath = path.resolve(import.meta.dirname, '..', 'dist', 'mcp.js');
-
-  // Verify built server exists
+async function resolveMcpServerPath(): Promise<string> {
+  const repoServerPath = path.resolve(import.meta.dirname, 'mcp.ts');
   try {
-    await fs.access(serverPath);
-  } catch {
-    throw new Error(`MCP server not built. Run 'bun run build' first. Expected: ${serverPath}`);
-  }
+    await fs.access(repoServerPath);
+    return repoServerPath;
+  } catch {}
+
+  const builtServerPath = path.resolve(import.meta.dirname, '..', 'dist', 'mcp.js');
+  try {
+    await fs.access(builtServerPath);
+    return builtServerPath;
+  } catch {}
+
+  throw new Error(
+    `MCP server not found. Expected source entry ${repoServerPath} or build output ${builtServerPath}`,
+  );
+}
+
+beforeAll(async () => {
+  const serverPath = await resolveMcpServerPath();
 
   transport = new StdioClientTransport({
     command: 'bun',

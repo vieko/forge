@@ -204,6 +204,26 @@ describe('createWorktree sibling mode', () => {
     await cleanupWorktree(wtPath, tmpDir);
   });
 
+  test('runs workspace setup automatically for spec-driven worktrees', async () => {
+    const forgeDir = path.join(tmpDir, '.forge');
+    await fs.mkdir(forgeDir, { recursive: true });
+    await fs.writeFile(
+      path.join(forgeDir, 'config.json'),
+      JSON.stringify({
+        setup: ['sh -c "echo bootstrapped > .setup-ran"'],
+      }),
+    );
+
+    const wtPath = await createWorktree(tmpDir, 'ignored-branch', {
+      spec_path: 'specs/setup-check.md',
+    });
+
+    const marker = await fs.readFile(path.join(wtPath, '.setup-ran'), 'utf-8');
+    expect(marker.trim()).toBe('bootstrapped');
+
+    await cleanupWorktree(wtPath, tmpDir);
+  });
+
   test('handles directory collision with numeric suffix', async () => {
     // Create first worktree
     const wtPath1 = await createWorktree(tmpDir, 'ignored', {
