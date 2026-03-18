@@ -26,6 +26,7 @@ import { detectVerification, runVerification } from './verify.js';
 import { runQuery } from './core.js';
 import { DIM, RESET, BOLD, showBanner, createInlineSpinner } from './display.js';
 import { loadManifest } from './specs.js';
+import { setupWorktree } from './workspace.js';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -820,6 +821,12 @@ export async function runConsolidate(options: ConsolidateOptions): Promise<Conso
     console.log(`${DIM}[forge]${RESET} Consolidation branch: ${consolidationBranch}`);
     console.log(`${DIM}[forge]${RESET} Working in: ${tmpDir}`);
     console.log();
+  }
+
+  // ── Workspace setup (install dependencies) ────────────────
+  const setupResult = await setupWorktree(tmpDir, workingDir, { quiet });
+  if (setupResult && !setupResult.success) {
+    throw new Error(`Workspace setup failed in consolidation worktree: ${setupResult.failedCommand}`);
   }
 
   // ── Merge worktrees in dependency order ───────────────────
