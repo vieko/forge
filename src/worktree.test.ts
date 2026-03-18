@@ -356,6 +356,7 @@ describe('commitWorktree', () => {
 
   test('excludes .forge/ directory from commit', async () => {
     await fs.writeFile(path.join(wtPath, 'real-change.ts'), 'export const y = 2;\n');
+    await fs.writeFile(path.join(wtPath, '.gitignore'), '.forge/\n');
     await fs.mkdir(path.join(wtPath, '.forge'), { recursive: true });
     await fs.writeFile(path.join(wtPath, '.forge', 'audit.jsonl'), '{"tool":"bash"}\n');
     await fs.writeFile(path.join(wtPath, '.forge', 'latest-session.json'), '{"id":"test"}\n');
