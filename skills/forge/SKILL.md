@@ -12,7 +12,7 @@ description: >-
   or straightforward work in the current repo that doesn't need autonomous agent execution.
 allowed-tools: Bash(forge:*)
 metadata:
-  version: 3.24.0
+  version: 3.24.1
   author: vieko
 ---
 
@@ -45,6 +45,20 @@ Run this in your forge tmux pane. I can run `forge watch` here for live progress
 
 After presenting an SDK command, offer to run `forge watch` for live tailing (it's read-only and works inside Claude Code).
 
+## Operating Model
+
+Treat Forge in two modes:
+
+- Authoring mode: `define`, `proof`, and similar planning/spec-generation flows can operate against the current checkout.
+- Execution mode: `run --isolate`, worktree-backed execution, and dependency-level consolidation should be treated as committed-state validation.
+
+Rules that matter in practice:
+
+- spawned isolate worktrees are created from git refs, not from uncommitted filesystem state
+- if a worktree-backed run depends on a local Forge/runtime fix, commit that fix first
+- after changing Forge runtime code, rebuild with `bun run build` and make sure MCP is using a fresh executor before trusting results
+- prefer mechanical verification over narrative agent judgment whenever possible
+
 ## Commands
 
 ### forge run
@@ -67,6 +81,7 @@ Important flags:
 - `--sequential` -- Run specs sequentially instead of parallel (default: parallel).
 - `-F, --force` -- Re-run all specs including already passed.
 - `-B, --branch <name>` -- Run in an isolated git worktree on the named branch. Auto-commits on success, cleans up after.
+- `-I, --isolate` -- Create one worktree per spec. Best used after committing required local runtime changes.
 - `--concurrency <n>` -- Override auto-detected parallelism (default: freeMem/2GB, capped at CPUs).
 - `--sequential-first <n>` -- Run first N specs sequentially, then parallelize.
 - `-C, --cwd <path>` -- Target repo directory.
@@ -202,6 +217,8 @@ forge specs --summary                           # Directory-level roll-up (compa
 - Resolves `depends:` frontmatter into a topological execution order
 - Tracks all specs in a single batch with grouped cost reporting
 - Auto-tunes concurrency based on available memory
+
+**For `--isolate`, commit first.** Isolate worktrees only see committed branch state. If the run depends on local Forge/runtime changes, commit them first, rebuild if needed, and ensure MCP is using a fresh executor.
 
 **`--spec` takes exactly one file.** The prompt is always the last positional argument (a quoted string). Bare file paths without a flag are interpreted as the prompt, not as spec files. To run multiple specs, use `--spec-dir`.
 

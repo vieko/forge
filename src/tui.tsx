@@ -3211,6 +3211,15 @@ function App({ cwd }: { cwd: string }) {
     return () => { mounted = false; };
   }, [cwd, dbVersion, db]);
 
+  // Compute filtered sessions when worktree filter is active
+  // (must be above tab early-returns to satisfy React hooks rules)
+  const filteredSessions = useMemo(() => {
+    if (!worktreeFilter || !db) return sessions;
+    const allowedIds = getWorktreeSessionIds(db, worktreeFilter);
+    if (allowedIds.size === 0) return [];
+    return sessions.filter(s => allowedIds.has(s.sessionId));
+  }, [sessions, worktreeFilter, db]);
+
   const handleQuit = () => {
     shutdownTui();
   };
@@ -3412,14 +3421,6 @@ function App({ cwd }: { cwd: string }) {
   }
 
   // ── Sessions tab ──────────────────────────────────────────
-
-  // Compute filtered sessions when worktree filter is active
-  const filteredSessions = useMemo(() => {
-    if (!worktreeFilter || !db) return sessions;
-    const allowedIds = getWorktreeSessionIds(db, worktreeFilter);
-    if (allowedIds.size === 0) return [];
-    return sessions.filter(s => allowedIds.has(s.sessionId));
-  }, [sessions, worktreeFilter, db]);
 
   // Task detail view
   if (view === 'detail' && selectedTask && !selectedSession) {
