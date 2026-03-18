@@ -12,15 +12,23 @@
 import path from 'path';
 import { promises as fs } from 'fs';
 import { spawn } from 'child_process';
+import { getForgeEntryPoint, createWorktree, generateWorkGroupId } from './utils.js';
 import {
   getDb,
   getTaskById,
   updateTaskStatus,
   updateTaskOutput,
   updateTaskSessionId,
+  updateTaskParams,
   markStaleTasks,
   getPendingTasks,
   claimTask,
+  getWorktreeByPath,
+  insertWorktree,
+  linkWorktreeTask,
+  linkWorktreeSession,
+  updateWorktreePid,
+  transitionWorktreeStatus,
 } from './db.js';
 import type { TaskRow } from './db.js';
 import { runSingleSpec } from './run.js';
@@ -30,16 +38,17 @@ import { runProof } from './proof.js';
 import { runVerify as runVerifyFn } from './proof-runner.js';
 import { runForge } from './parallel.js';
 import { runPipeline } from './pipeline.js';
-import { FileSystemStateProvider } from './pipeline-state.js';
+import { SqliteStateProvider, markStalePipelines } from './db-pipeline-state.js';
 import { isInterrupted, triggerAbort } from './abort.js';
 import { DIM, RESET, BOLD } from './display.js';
 import { getConfig } from './config.js';
 import type { GateKey, GateType, StageName } from './pipeline-types.js';
+import { ExecutorTaskContext } from './task-context.js';
 
 // ── Constants ────────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 1000;
-const DEFAULT_CONCURRENCY = 2;
+const DEFAULT_CONCURRENCY = 3;
 const MAX_BUFFER_LINES = 50;
 const STALE_TASK_TTL_MS = 60 * 60 * 1000; // 1 hour
 
@@ -91,8 +100,7 @@ export function spawnDetachedExecutor(cwd: string): boolean {
   try {
     const resolvedCwd = path.resolve(cwd);
     // Use process.argv[0] (bun/node) to run the forge CLI entry point.
-    // Resolve the dist/index.js path relative to this module.
-    const forgeBin = path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'dist', 'index.js'));
+    const forgeBin = getForgeEntryPoint();
     const child = spawn(process.argv[0], [forgeBin, 'executor', '--quiet', '-C', resolvedCwd], {
       detached: true,
       stdio: 'ignore',
@@ -149,6 +157,64 @@ async function getSessionDirs(cwd: string): Promise<Set<string>> {
   }
 }
 
+// ── Queued Option Contract ────────────────────────────────────
+//
+// Options supported by dispatchTask() for queued tasks (via MCP forge_start).
+// These are extracted from typed task `params` JSON and/or `extraArgs` string array.
+//
+// SUPPORTED (typed params — preferred for commonly used options):
+//   model         - Model shorthand or full ID (all commands)
+//   specPath      - Spec file or directory path (run, audit, proof, verify)
+//   outputDir     - Output directory (define, audit, proof, verify)
+//   maxTurns      - Maximum agent turns (all commands)
+//   maxBudgetUsd  - Maximum budget in USD (all commands)
+//   planOnly      - Plan-only mode, no implementation (run)
+//   planModel     - Model for plan-only runs (run)
+//   dryRun        - Preview without executing (run, verify)
+//
+// SUPPORTED (extraArgs — for less common or flag-style options):
+//   --force / -F         - Force re-run of passed specs (run)
+//   --sequential         - Run specs sequentially (run)
+//   --sequential-first N - Run first N specs sequentially (run)
+//   --concurrency N      - Max concurrent specs (run)
+//   --rerun-failed       - Rerun only failed specs (run)
+//   --pending            - Run only pending specs (run)
+//   --branch <name>      - Run in isolated git worktree (run)
+//   --fix                - Audit-fix convergence loop (audit)
+//   --fix-rounds N       - Max audit-fix rounds (audit)
+//
+// INTENTIONALLY EXCLUDED:
+//   verbose       - Executor is always quiet; no terminal to print to
+//   resume/fork   - Session management doesn't apply to queued tasks;
+//                   each task gets a fresh session
+//   _onSpecResult - Internal callback; executor handles its own per-spec logging
+//   _silent       - Internal display flag; executor controls its own output
+//   persistDir    - Set by pipeline orchestrator, not by individual tasks
+
+// ── Helpers: extraArgs parsing ───────────────────────────────
+
+/** Extract a string value following a flag in extraArgs, e.g. --branch <name> */
+function extractStringArg(extraArgs: string[], flag: string): string | undefined {
+  const idx = extraArgs.indexOf(flag);
+  if (idx >= 0 && idx + 1 < extraArgs.length) return extraArgs[idx + 1];
+  return undefined;
+}
+
+/** Extract a numeric value following a flag in extraArgs, e.g. --concurrency 5 */
+function extractNumberArg(extraArgs: string[], flag: string): number | undefined {
+  const val = extractStringArg(extraArgs, flag);
+  if (val !== undefined) {
+    const n = parseInt(val, 10);
+    if (!isNaN(n)) return n;
+  }
+  return undefined;
+}
+
+/** Check if a flag is present in extraArgs, e.g. --sequential */
+function hasFlag(extraArgs: string[], ...flags: string[]): boolean {
+  return flags.some(f => extraArgs.includes(f));
+}
+
 // ── Task dispatch ────────────────────────────────────────────
 
 /**
@@ -162,9 +228,35 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
   const extraArgs = (params.extraArgs || []) as string[];
   const taskShortId = task.id.slice(0, 8);
 
+  // Extract typed params (preferred over extraArgs for common options)
+  const model = params.model as string | undefined;
+  const maxTurns = params.maxTurns as number | undefined;
+  const maxBudgetUsd = params.maxBudgetUsd as number | undefined;
+  const planOnly = params.planOnly as boolean | undefined;
+  const planModel = params.planModel as string | undefined;
+  const dryRun = params.dryRun as boolean | undefined;
+
   switch (cmd) {
     case 'run': {
       const specPath = (params.specPath || task.specPath) as string | undefined;
+
+      // Extract run-specific options from extraArgs
+      const sequential = hasFlag(extraArgs, '--sequential');
+      const force = hasFlag(extraArgs, '--force', '-F');
+      const rerunFailed = hasFlag(extraArgs, '--rerun-failed');
+      const pendingOnly = hasFlag(extraArgs, '--pending');
+      const sequentialFirst = extractNumberArg(extraArgs, '--sequential-first');
+      const concurrency = extractNumberArg(extraArgs, '--concurrency');
+      const branch = extractStringArg(extraArgs, '--branch');
+      const isolate = (params.isolate as boolean | undefined) ?? hasFlag(extraArgs, '--isolate');
+      const inPlace = (params.inPlace as boolean | undefined) ?? hasFlag(extraArgs, '--in-place');
+
+      if (inPlace && branch) {
+        throw new Error('--in-place cannot be used with --branch');
+      }
+      if (inPlace && isolate) {
+        throw new Error('--in-place cannot be used with --isolate');
+      }
 
       if (specPath) {
         const resolvedSpec = path.resolve(workingDir, specPath);
@@ -184,19 +276,32 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
             specCount = entries.filter(e => e.endsWith('.md')).length;
           } catch { /* best effort */ }
 
-          const isSequential = extraArgs.includes('--sequential');
           if (!quiet && specCount > 1) {
-            console.log(`${DIM}[executor]${RESET} > ${task.command} (${taskShortId}) ${specCount} specs [${isSequential ? 'sequential' : 'parallel'}]`);
+            const modeLabel = isolate ? 'isolate' : sequential ? 'sequential' : 'parallel';
+            console.log(`${DIM}[executor]${RESET} > ${task.command} (${taskShortId}) ${specCount} specs [${modeLabel}]`);
           }
 
           await runForge({
             prompt: task.description || 'implement',
             specDir: specPath,
             cwd: workingDir,
-            model: params.model as string | undefined,
+            model,
+            maxTurns,
+            maxBudgetUsd,
+            planOnly: planOnly ?? hasFlag(extraArgs, '--plan-only'),
+            planModel: planModel ?? extractStringArg(extraArgs, '--plan-model'),
+            dryRun: dryRun ?? hasFlag(extraArgs, '--dry-run'),
             quiet: true,
-            sequential: isSequential,
-            force: extraArgs.includes('--force') || extraArgs.includes('-F'),
+            sequential,
+            sequentialFirst,
+            concurrency,
+            rerunFailed,
+            pendingOnly,
+            force,
+            branch,
+            isolate,
+            inPlace,
+            _batchTaskContext: new ExecutorTaskContext(task.id),
             _onSpecResult: quiet ? undefined : (spec, status) => {
               const icon = status === 'success' ? '+' : 'x';
               console.log(`${DIM}[executor]${RESET}   ${icon} ${spec} (${taskShortId})`);
@@ -207,18 +312,30 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
             prompt: task.description || 'implement',
             specPath,
             cwd: workingDir,
-            model: params.model as string | undefined,
+            model,
+            maxTurns,
+            maxBudgetUsd,
+            planOnly: planOnly ?? hasFlag(extraArgs, '--plan-only'),
+            planModel: planModel ?? extractStringArg(extraArgs, '--plan-model'),
+            dryRun: dryRun ?? hasFlag(extraArgs, '--dry-run'),
             quiet: true,
             _silent: true,
+            taskContext: new ExecutorTaskContext(task.id),
           });
         }
       } else {
         await runSingleSpec({
           prompt: task.description || '',
           cwd: workingDir,
-          model: params.model as string | undefined,
+          model,
+          maxTurns,
+          maxBudgetUsd,
+          planOnly: planOnly ?? hasFlag(extraArgs, '--plan-only'),
+          planModel: planModel ?? extractStringArg(extraArgs, '--plan-model'),
+          dryRun: dryRun ?? hasFlag(extraArgs, '--dry-run'),
           quiet: true,
           _silent: true,
+          taskContext: new ExecutorTaskContext(task.id),
         });
       }
       break;
@@ -231,12 +348,12 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
         prompt: task.description || undefined,
         outputDir: params.outputDir as string | undefined,
         cwd: workingDir,
-        model: params.model as string | undefined,
+        model,
+        maxTurns,
+        maxBudgetUsd,
         quiet: true,
-        fix: extraArgs.includes('--fix'),
-        fixRounds: extraArgs.includes('--fix-rounds')
-          ? parseInt(extraArgs[extraArgs.indexOf('--fix-rounds') + 1], 10)
-          : undefined,
+        fix: hasFlag(extraArgs, '--fix'),
+        fixRounds: extractNumberArg(extraArgs, '--fix-rounds'),
       });
       break;
     }
@@ -246,7 +363,9 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
         prompt: task.description || '',
         outputDir: params.outputDir as string | undefined,
         cwd: workingDir,
-        model: params.model as string | undefined,
+        model,
+        maxTurns,
+        maxBudgetUsd,
         quiet: true,
       });
       break;
@@ -260,7 +379,9 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
         specPaths,
         outputDir: params.outputDir as string | undefined,
         cwd: workingDir,
-        model: params.model as string | undefined,
+        model,
+        maxTurns,
+        maxBudgetUsd,
         quiet: true,
       });
       break;
@@ -272,7 +393,10 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
         proofDir: specPath,
         outputDir: params.outputDir as string | undefined,
         cwd: workingDir,
-        model: params.model as string | undefined,
+        model,
+        maxTurns,
+        maxBudgetUsd,
+        dryRun: dryRun ?? hasFlag(extraArgs, '--dry-run'),
         quiet: true,
       });
       break;
@@ -291,7 +415,9 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
         };
       }
 
-      const stateProvider = new FileSystemStateProvider(workingDir);
+      const db = getDb(workingDir);
+      if (!db) throw new Error('Database unavailable — cannot run pipeline');
+      const stateProvider = new SqliteStateProvider(db);
       await runPipeline(
         {
           goal: task.description || '',
@@ -299,7 +425,7 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
           fromStage: params.fromStage as StageName | undefined,
           specDir: params.specPath as string | undefined,
           cwd: workingDir,
-          model: params.model as string | undefined,
+          model,
           resume: params.resume as string | undefined,
           quiet: true,
         },
@@ -318,6 +444,10 @@ async function dispatchTask(task: TaskRow, workingDir: string, quiet?: boolean):
 /**
  * Execute a single task: dispatch to the appropriate function,
  * capture session ID via directory snapshot, update DB on completion.
+ *
+ * When the task has a `worktree` intent in params, creates an isolated
+ * git worktree at claim time (before dispatch) and manages the worktree
+ * lifecycle alongside the task lifecycle.
  */
 async function executeTask(
   task: TaskRow,
@@ -329,41 +459,133 @@ async function executeTask(
 
   const stdoutBuf: string[] = [];
   const stderrBuf: string[] = [];
+  const params: Record<string, unknown> = JSON.parse(task.params || '{}');
+
+  // ── Worktree creation on task claim ────────────────────────
+  let effectiveWorkingDir = workingDir;
+  let worktreeId: string | null = null;
+
+  if (params.inPlace && params.worktree) {
+    throw new Error('--in-place cannot be used with worktree');
+  }
+
+  if (params.worktree) {
+    try {
+      const specPath = (params.specPath || task.specPath) as string | undefined;
+      const linearIssueId = params.linearIssueId as string | undefined;
+      const workGroupId = (params.workGroupId as string | undefined) ?? generateWorkGroupId();
+      const branchFallback = `forge/task-${task.id.slice(0, 8)}`;
+
+      const forceWorktree = !!params.force;
+      const registryOpts = specPath
+        ? { spec_path: specPath, linear_issue_id: linearIssueId, work_group_id: workGroupId, force: forceWorktree }
+        : forceWorktree ? { force: forceWorktree } : undefined;
+
+      const worktreePath = await createWorktree(workingDir, branchFallback, registryOpts);
+
+      // Look up worktree row (createWorktree registers when specPath is provided)
+      let worktreeRow = getWorktreeByPath(db, worktreePath);
+      if (!worktreeRow) {
+        // No specPath -- register manually so the worktree is always tracked
+        const wtId = `wt-${Date.now()}-${Math.random().toString(16).substring(2, 6)}`;
+        insertWorktree(db, {
+          id: wtId,
+          work_group_id: workGroupId,
+          spec_path: specPath || task.description || 'task',
+          branch: branchFallback,
+          worktree_path: worktreePath,
+          status: 'created',
+          linear_issue_id: linearIssueId,
+        });
+        worktreeRow = getWorktreeByPath(db, worktreePath);
+      }
+
+      if (worktreeRow) {
+        worktreeId = worktreeRow.id;
+        linkWorktreeTask(db, worktreeId, task.id);
+        updateWorktreePid(db, worktreeId, process.pid);
+        transitionWorktreeStatus(db, worktreeId, 'running');
+      }
+
+      // Store worktree path and ID in task params for downstream consumers
+      const updatedParams = { ...params, worktreePath, worktreeId };
+      updateTaskParams(db, task.id, updatedParams);
+
+      effectiveWorkingDir = worktreePath;
+      pushLine(stdoutBuf, `Worktree created at ${worktreePath}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      pushLine(stderrBuf, `Worktree creation failed: ${msg}`);
+      updateTaskStatus(db, task.id, 'failed', 1);
+      updateTaskOutput(db, task.id, stdoutBuf, stderrBuf);
+      return;
+    }
+  }
 
   pushLine(stdoutBuf, `Executing ${task.command}...`);
   updateTaskOutput(db, task.id, stdoutBuf, stderrBuf);
 
   // Snapshot sessions directory before execution for session ID capture
-  const beforeSessions = await getSessionDirs(workingDir);
+  const beforeSessions = await getSessionDirs(effectiveWorkingDir);
 
   try {
-    await dispatchTask(task, workingDir, quiet);
+    await dispatchTask(task, effectiveWorkingDir, quiet);
 
     // Capture session ID: new session directories created during execution
-    const afterSessions = await getSessionDirs(workingDir);
+    const afterSessions = await getSessionDirs(effectiveWorkingDir);
     const newSessions = [...afterSessions].filter(s => !beforeSessions.has(s));
     if (newSessions.length > 0) {
       // Use the latest new session (most recently created)
       const sorted = newSessions.sort();
-      updateTaskSessionId(db, task.id, sorted[sorted.length - 1]);
+      const sessionId = sorted[sorted.length - 1];
+      updateTaskSessionId(db, task.id, sessionId);
+
+      // Link session to worktree for session-based queries
+      if (worktreeId) {
+        linkWorktreeSession(db, worktreeId, sessionId);
+      }
     }
 
     updateTaskStatus(db, task.id, 'completed', 0);
     pushLine(stdoutBuf, 'Task completed successfully.');
     updateTaskOutput(db, task.id, stdoutBuf, stderrBuf);
+
+    // Transition worktree to complete on success
+    if (worktreeId) {
+      try {
+        transitionWorktreeStatus(db, worktreeId, 'complete');
+      } catch {
+        // Best effort -- don't fail the task if worktree transition fails
+      }
+    }
   } catch (err) {
     // Capture session ID even on failure
-    const afterSessions = await getSessionDirs(workingDir);
+    const afterSessions = await getSessionDirs(effectiveWorkingDir);
     const newSessions = [...afterSessions].filter(s => !beforeSessions.has(s));
     if (newSessions.length > 0) {
       const sorted = newSessions.sort();
-      updateTaskSessionId(db, task.id, sorted[sorted.length - 1]);
+      const sessionId = sorted[sorted.length - 1];
+      updateTaskSessionId(db, task.id, sessionId);
+
+      // Link session to worktree even on failure
+      if (worktreeId) {
+        linkWorktreeSession(db, worktreeId, sessionId);
+      }
     }
 
     const msg = err instanceof Error ? err.message : String(err);
     pushLine(stderrBuf, `Error: ${msg}`);
     updateTaskStatus(db, task.id, 'failed', 1);
     updateTaskOutput(db, task.id, stdoutBuf, stderrBuf);
+
+    // Transition worktree to failed with error message
+    if (worktreeId) {
+      try {
+        transitionWorktreeStatus(db, worktreeId, 'failed', msg);
+      } catch {
+        // Best effort -- don't fail the task if worktree transition fails
+      }
+    }
   }
 }
 
@@ -448,8 +670,9 @@ export async function startExecutor(options: ExecutorOptions): Promise<void> {
       continue;
     }
 
-    // Mark stale tasks (abandoned by dead processes)
+    // Mark stale tasks and pipelines (abandoned by dead processes)
     markStaleTasks(db, STALE_TASK_TTL_MS);
+    markStalePipelines(db);
 
     // Pick up pending tasks up to concurrency limit
     const available = concurrency - runningCount;

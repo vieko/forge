@@ -41,6 +41,8 @@ forge run --spec specs/feature.md "implement this"       # From a spec file
 forge run --spec-dir ./specs/ -P "implement these"       # Parallel specs
 forge run --pending -P "implement pending"               # Run only pending specs
 forge run --resume <session-id> "continue"               # Resume session
+forge run --spec-dir ./specs/ --isolate "implement all"  # One worktree per spec
+forge run --spec specs/feat.md --in-place "implement"   # Skip auto-worktree creation
 ```
 
 ```bash
@@ -72,6 +74,25 @@ See `forge --help` or `forge <command> --help` for all options.
 
 Specs can declare dependencies via frontmatter (`depends: [a.md, b.md]`) for ordered execution. Parallel runs use auto-tuned concurrency. A manifest (`.forge/specs.json`) tracks every spec from registration through execution. Failed specs can be rerun. Pending specs can be run selectively. Manually completed specs can be resolved. Sessions can be resumed or forked. Destructive commands are blocked. Transient errors retry automatically.
 
+## Operating Model
+
+Forge is safest when treated in two modes:
+
+- Authoring mode: `define`, `proof`, and similar spec-generation or planning flows can run against the current checkout state.
+- Execution mode: `run --isolate` and dependency-level consolidation should be treated as committed-state validation.
+
+Important implications for isolate runs:
+
+- spawned worktrees are created from git refs (`HEAD` or consolidation branches), not from your uncommitted filesystem state
+- if an isolate run depends on a Forge/runtime fix, commit that fix first
+- after changing Forge runtime code, run `bun run build` and make sure MCP uses a fresh executor before trusting results
+
+Long term, prefer mechanical verification over agent judgment:
+
+- encode acceptance criteria in tests or verification commands where possible
+- avoid relying on narrative \"this failure is unrelated\" pass decisions
+- expect isolate and consolidation validation to prove required files and states directly
+
 ## Configuration
 
 ```bash
@@ -99,6 +120,13 @@ Forge exposes an MCP server for integration with Claude Code:
 ```bash
 claude mcp add forge --scope user -t stdio -- bun /path/to/forge/dist/mcp.js
 ```
+
+If you change Forge runtime code and use MCP/executor-backed commands:
+
+1. commit the changes you need isolate worktrees to see
+2. run `bun run build`
+3. restart or replace any stale executor daemon
+4. then start MCP `run --isolate` or consolidation validation
 
 ## Development
 

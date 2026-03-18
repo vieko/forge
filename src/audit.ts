@@ -4,9 +4,10 @@ import path from 'path';
 import { resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
 import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
-import { withManifestLock, findOrCreateEntry, specKey, resolveSpecDir, resolveSpecFile, resolveSpecSource } from './specs.js';
+import { withSpecTransaction, findOrCreateEntry, specKey, resolveSpecDir, resolveSpecFile, resolveSpecSource } from './specs.js';
 import { runForge } from './parallel.js';
 import { isInterrupted } from './abort.js';
+import { getDb, getWorktree, transitionWorktreeStatus } from './db.js';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -113,7 +114,7 @@ async function readSpecContents(
   const allSpecContents = specContents.join('\n\n---\n\n');
 
   // Auto-register input specs in the manifest
-  await withManifestLock(persistBase, (manifest) => {
+  await withSpecTransaction(persistBase, (manifest) => {
     const tracked = new Set(manifest.specs.map(e => e.spec));
     for (let i = 0; i < specFiles.length; i++) {
       const absPath = path.join(resolvedSpecDir, specFiles[i]);
@@ -238,7 +239,7 @@ ${options.prompt ? `## Additional Context\n\n${options.prompt}\n` : ''}
   // Register audit-generated specs in the manifest
   if (outputSpecs.length > 0) {
     const auditSource = `audit:${forgeResult.startedAt}`;
-    await withManifestLock(persistBase, (manifest) => {
+    await withSpecTransaction(persistBase, (manifest) => {
       for (const specFile of outputSpecs) {
         const specFilePath = path.join(outputDir, specFile);
         const key = specKey(specFilePath, persistBase);
@@ -264,11 +265,47 @@ export async function runAudit(options: AuditOptions): Promise<void> {
     showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS');
   }
 
+  // ── Worktree resolution ────────────────────────────────────
+  // When --worktree <id> is provided, resolve the worktree from the registry
+  // and scope the audit to that worktree's filesystem path.
+  let worktreeId: string | undefined;
+  let resolvedCwd = options.cwd;
+  let resolvedPersistDir = options.persistDir;
+
+  if (options.worktreeId) {
+    const mainDir = await resolveWorkingDir(options.cwd);
+    const db = getDb(mainDir);
+    if (!db) {
+      throw new Error('Database unavailable -- cannot resolve worktree');
+    }
+
+    const worktreeRow = getWorktree(db, options.worktreeId);
+    if (!worktreeRow) {
+      throw new Error(`Worktree not found: ${options.worktreeId}`);
+    }
+
+    worktreeId = worktreeRow.id;
+
+    // Point the audit at the worktree's filesystem path
+    resolvedCwd = worktreeRow.worktree_path;
+
+    // Results persist to the main repo DB, not the worktree's .forge/
+    resolvedPersistDir = resolvedPersistDir || mainDir;
+
+    // Transition worktree status: complete -> auditing
+    transitionWorktreeStatus(db, worktreeId, 'auditing');
+
+    if (!quiet) {
+      console.log(`${DIM}[worktree]${RESET} ${worktreeRow.id} -> ${worktreeRow.worktree_path}`);
+      console.log(`${DIM}[worktree]${RESET} persist -> ${resolvedPersistDir}\n`);
+    }
+  }
+
   // Resolve and validate working directory
-  const workingDir = await resolveWorkingDir(options.cwd);
+  const workingDir = await resolveWorkingDir(resolvedCwd);
 
   // Persistence base: original repo when in a worktree, otherwise workingDir
-  const persistBase = options.persistDir || workingDir;
+  const persistBase = resolvedPersistDir || workingDir;
 
   // Load config and merge with defaults (CLI flags override config)
   const resolved = await resolveConfig(workingDir, {
@@ -303,7 +340,29 @@ export async function runAudit(options: AuditOptions): Promise<void> {
 
   // ── Fix mode: convergence loop ─────────────────────────────
   if (options.fix) {
-    await runAuditFixLoop(ctx, options);
+    try {
+      await runAuditFixLoop(ctx, options);
+      // Transition worktree to audited on completion (clean convergence)
+      if (worktreeId) {
+        const db = getDb(persistBase);
+        if (db) transitionWorktreeStatus(db, worktreeId, 'audited');
+      }
+    } catch (error) {
+      // Transition worktree to audited even on non-convergence (remediation specs were produced)
+      // Only transition to failed on unexpected errors, not AuditFixNotConverged
+      if (worktreeId) {
+        const db = getDb(persistBase);
+        if (db) {
+          const isNotConverged = error instanceof Error && error.name === 'AuditFixNotConverged';
+          if (isNotConverged) {
+            transitionWorktreeStatus(db, worktreeId, 'audited');
+          } else {
+            transitionWorktreeStatus(db, worktreeId, 'failed', error instanceof Error ? error.message : String(error));
+          }
+        }
+      }
+      throw error;
+    }
     return;
   }
 
@@ -329,23 +388,38 @@ export async function runAudit(options: AuditOptions): Promise<void> {
     console.log(`${DIM}Working dir:${RESET} ${workingDir}\n`);
   }
 
-  const result = await runAuditRound(ctx, outputDir, '', options);
+  try {
+    const result = await runAuditRound(ctx, outputDir, '', options);
 
-  if (!quiet) {
-    printRunSummary({ durationSeconds: result.durationSeconds, costUsd: result.costUsd });
-
-    if (result.outputSpecs.length === 0) {
-      console.log(`\n  \x1b[32mAll specs fully implemented — no remaining work.\x1b[0m`);
-      const relSpecDir = path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir;
-      console.log(`\n  ${DIM}Next step:${RESET}\n    ${CMD}forge proof ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir}${RESET}`);
-    } else {
-      const relOutputDir = path.relative(workingDir, outputDir) || outputDir;
-      console.log(`\n  ${BOLD}${result.outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
-      result.outputSpecs.forEach((f, i) => console.log(`    ${DIM}${i + 1}.${RESET} ${f}`));
-      const relSpecDir = path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir;
-      console.log(`\n  Next step:\n    ${CMD}forge audit ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir} --fix "verify and fix"${RESET}`);
+    // Transition worktree to audited on successful single audit
+    if (worktreeId) {
+      const db = getDb(persistBase);
+      if (db) transitionWorktreeStatus(db, worktreeId, 'audited');
     }
-    console.log('');
+
+    if (!quiet) {
+      printRunSummary({ durationSeconds: result.durationSeconds, costUsd: result.costUsd });
+
+      if (result.outputSpecs.length === 0) {
+        console.log(`\n  \x1b[32mAll specs fully implemented — no remaining work.\x1b[0m`);
+        const relSpecDir = path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir;
+        console.log(`\n  ${DIM}Next step:${RESET}\n    ${CMD}forge proof ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir}${RESET}`);
+      } else {
+        const relOutputDir = path.relative(workingDir, outputDir) || outputDir;
+        console.log(`\n  ${BOLD}${result.outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
+        result.outputSpecs.forEach((f, i) => console.log(`    ${DIM}${i + 1}.${RESET} ${f}`));
+        const relSpecDir = path.relative(workingDir, resolvedSpecDir) || resolvedSpecDir;
+        console.log(`\n  Next step:\n    ${CMD}forge audit ${relSpecDir.includes(' ') ? `"${relSpecDir}"` : relSpecDir} --fix "verify and fix"${RESET}`);
+      }
+      console.log('');
+    }
+  } catch (error) {
+    // Transition worktree to failed on unexpected errors
+    if (worktreeId) {
+      const db = getDb(persistBase);
+      if (db) transitionWorktreeStatus(db, worktreeId, 'failed', error instanceof Error ? error.message : String(error));
+    }
+    throw error;
   }
 }
 
@@ -370,40 +444,40 @@ async function extractOutcomeSentence(specFilePath: string): Promise<string | un
   return undefined;
 }
 
-/** Collect fix results for remediation specs from the results directory. */
-async function collectFixResults(
+/** Collect fix results for remediation specs from the runs DB table. */
+function collectFixResults(
   persistBase: string,
-  remediationDir: string,
+  _remediationDir: string,
   roundSpecs: string[],
-): Promise<Map<string, GapFixStatus>> {
+): Map<string, GapFixStatus> {
   const fixStatuses = new Map<string, GapFixStatus>();
-  try {
-    const resultsBase = path.join(persistBase, '.forge', 'results');
-    const dirs = (await fs.readdir(resultsBase)).sort().reverse();
+  const db = getDb(persistBase);
+  if (!db) return fixStatuses;
 
+  try {
     // Map base gap names to their spec filenames for matching
     const specBasenames = new Set(roundSpecs.map(f => stripRoundPrefix(f)));
 
-    for (const dir of dirs) {
+    // Query recent runs ordered by createdAt DESC (newest first)
+    const rows = db.query(
+      'SELECT specPath, status FROM runs ORDER BY createdAt DESC'
+    ).all() as Array<{ specPath: string | null; status: string }>;
+
+    for (const row of rows) {
       if (fixStatuses.size >= specBasenames.size) break;
-      try {
-        const summary: ForgeResult = JSON.parse(
-          await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
-        );
-        if (!summary.specPath) continue;
+      if (!row.specPath) continue;
 
-        const specBase = stripRoundPrefix(path.basename(summary.specPath));
-        if (!specBasenames.has(specBase)) continue;
-        if (fixStatuses.has(specBase)) continue;
+      const specBase = stripRoundPrefix(path.basename(row.specPath));
+      if (!specBasenames.has(specBase)) continue;
+      if (fixStatuses.has(specBase)) continue;
 
-        if (summary.status === 'success') {
-          fixStatuses.set(specBase, 'success');
-        } else if (summary.status === 'error_execution') {
-          fixStatuses.set(specBase, 'error_execution');
-        } else {
-          fixStatuses.set(specBase, 'error_verification');
-        }
-      } catch { continue; }
+      if (row.status === 'success') {
+        fixStatuses.set(specBase, 'success');
+      } else if (row.status === 'error_execution') {
+        fixStatuses.set(specBase, 'error_execution');
+      } else {
+        fixStatuses.set(specBase, 'error_verification');
+      }
     }
   } catch {}
   return fixStatuses;
@@ -528,8 +602,9 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
     if (prevGapNames && currentGapNamesSet.size === prevGapNames.size && [...currentGapNamesSet].every(g => prevGapNames!.has(g))) {
       // Record these gaps as "found" with no fix (we're stopping)
       for (const gapName of currentGapBaseNames) {
-        if (!gapHistory.has(gapName)) gapHistory.set(gapName, []);
-        gapHistory.get(gapName)!.push({ round, action: 'found', fixStatus: null });
+        const hist = gapHistory.get(gapName) ?? [];
+        hist.push({ round, action: 'found', fixStatus: null });
+        gapHistory.set(gapName, hist);
       }
 
       roundSummaries.push({
@@ -577,33 +652,34 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
     }
     const fixDuration = (Date.now() - fixStartTime) / 1000;
 
-    // Collect per-spec fix results from the results directory
-    const fixStatuses = await collectFixResults(persistBase, remediationDir, auditResult.outputSpecs);
+    // Collect per-spec fix results from the runs DB table
+    const fixStatuses = collectFixResults(persistBase, remediationDir, auditResult.outputSpecs);
 
-    // Estimate fix cost from remediation results (best-effort)
+    // Estimate fix cost from remediation results in DB (best-effort)
     let fixCost = 0;
-    try {
-      const resultsBase = path.join(persistBase, '.forge', 'results');
-      const dirs = (await fs.readdir(resultsBase)).sort().reverse();
-      for (const dir of dirs.slice(0, auditResult.outputSpecs.length)) {
-        try {
-          const summary: ForgeResult = JSON.parse(
-            await fs.readFile(path.join(resultsBase, dir, 'summary.json'), 'utf-8')
-          );
-          if (summary.costUsd) fixCost += summary.costUsd;
-        } catch { continue; }
-      }
-    } catch {}
+    const fixDb = getDb(persistBase);
+    if (fixDb) {
+      try {
+        const costRows = fixDb.query(
+          'SELECT costUsd FROM runs ORDER BY createdAt DESC LIMIT ?'
+        ).all(auditResult.outputSpecs.length) as Array<{ costUsd: number | null }>;
+        for (const row of costRows) {
+          if (row.costUsd) fixCost += row.costUsd;
+        }
+      } catch {}
+    }
 
     // Record gap tracking for this round
     for (const gapName of currentGapBaseNames) {
-      if (!gapHistory.has(gapName)) gapHistory.set(gapName, []);
+      const hist = gapHistory.get(gapName) ?? [];
       const fixStatus = fixStatuses.get(gapName) ?? (fixFailed ? 'error_execution' : 'success');
-      gapHistory.get(gapName)!.push({ round, action: 'found_and_fixed', fixStatus });
+      hist.push({ round, action: 'found_and_fixed', fixStatus });
+      gapHistory.set(gapName, hist);
 
       // Store per-gap fix result
-      if (!gapFixResults.has(gapName)) gapFixResults.set(gapName, new Map());
-      gapFixResults.get(gapName)!.set(round, fixStatus);
+      const fixMap = gapFixResults.get(gapName) ?? new Map();
+      fixMap.set(round, fixStatus);
+      gapFixResults.set(gapName, fixMap);
 
       if (fixStatus === 'error_verification' || fixStatus === 'error_execution') {
         hasVerificationFailures = true;

@@ -1,10 +1,10 @@
 import type { DefineOptions, ForgeResult } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
+import { resolveWorkingDir, resolveConfig, resolveSession, saveResult, generateWorkGroupId } from './utils.js';
 import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
-import { withManifestLock, findOrCreateEntry, specKey, assessSpecComplexity, type ComplexityWarning } from './specs.js';
+import { withSpecTransaction, findOrCreateEntry, specKey, assessSpecComplexity, type ComplexityWarning } from './specs.js';
 
 export async function runDefine(options: DefineOptions): Promise<void> {
   const { prompt, model, maxTurns, maxBudgetUsd, verbose = false, quiet = false } = options;
@@ -127,6 +127,9 @@ ${agentsMdSection}## Acceptance Criteria
 - Dependencies between specs are declared via \`depends:\` frontmatter
 - All spec files written to: ${outputDir}/`;
 
+  // Generate work group ID for this define session
+  const workGroupId = generateWorkGroupId();
+
   const startTime = new Date();
 
   if (!quiet && isFork && effectiveResume) {
@@ -165,6 +168,7 @@ ${agentsMdSection}## Acceptance Criteria
     sessionId: qr.sessionId,
     forkedFrom: isFork ? options.fork : undefined,
     type: 'define',
+    workGroupId,
   };
 
   await saveResult(persistBase, forgeResult, qr.resultText);
@@ -176,14 +180,14 @@ ${agentsMdSection}## Acceptance Criteria
     outputSpecs = files.filter(f => f.endsWith('.md')).sort();
   } catch {}
 
-  // Register define-generated specs in the manifest
+  // Register define-generated specs in the manifest with work group ID
   if (outputSpecs.length > 0) {
     const defineSource = `define:${forgeResult.startedAt}`;
-    await withManifestLock(persistBase, (manifest) => {
+    await withSpecTransaction(persistBase, (manifest) => {
       for (const specFile of outputSpecs) {
         const specFilePath = path.join(outputDir, specFile);
         const key = specKey(specFilePath, persistBase);
-        findOrCreateEntry(manifest, key, defineSource as `define:${string}`);
+        findOrCreateEntry(manifest, key, defineSource as `define:${string}`, workGroupId);
       }
     });
   }
@@ -208,6 +212,7 @@ ${agentsMdSection}## Acceptance Criteria
     } else {
       console.log(`\n  ${BOLD}${outputSpecs.length}${RESET} spec(s) generated in ${DIM}${outputDir}${RESET}:\n`);
       outputSpecs.forEach((f, i) => console.log(`    ${DIM}${i + 1}.${RESET} ${f}`));
+      console.log(`\n  ${DIM}Work group:${RESET} ${workGroupId}`);
 
       // Print complexity warnings
       if (complexityWarnings.length > 0) {

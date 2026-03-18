@@ -7,6 +7,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { execAsync, detectPackageManager } from './utils.js';
+import { getConfig } from './config.js';
 import type { ForgeLocalConfig } from './config.js';
 
 // ── Types ────────────────────────────────────────────────────
@@ -150,4 +151,168 @@ export async function runWorkspaceHooks(
     success: true,
     output: outputLines.join('\n'),
   };
+}
+
+// ── High-Level Workspace Lifecycle ──────────────────────────
+
+/** Options for high-level setup/teardown operations. */
+export interface WorkspaceLifecycleOptions {
+  /** Suppress console output */
+  quiet?: boolean;
+  /** Monorepo package scope (e.g. "packages/api") -- triggers scoped setup after root install */
+  scope?: string;
+}
+
+/**
+ * Detect package-level build/setup commands for a scoped package directory.
+ * Returns commands that should run from the package directory after root-level install.
+ *
+ * For Node.js packages: checks for build scripts in the package's package.json.
+ * Root-level install (bun/pnpm/yarn/npm install) handles dependency installation
+ * for all packages via hoisted lockfiles -- no per-package install needed.
+ */
+export async function detectScopedSetupCommands(
+  worktreePath: string,
+  scope: string,
+): Promise<{ commands: string[]; cwd: string }> {
+  const scopedDir = path.join(worktreePath, scope);
+  const commands: string[] = [];
+
+  // Node.js: check for package.json with build script in scoped dir
+  try {
+    const pkgJsonPath = path.join(scopedDir, 'package.json');
+    const pkgJson = JSON.parse(await fs.readFile(pkgJsonPath, 'utf-8'));
+    const scripts = pkgJson.scripts || {};
+
+    // Use root-level PM for running scoped scripts
+    const pm = await detectPackageManager(worktreePath);
+    const runner = pm || 'npm';
+
+    if (scripts.build) {
+      commands.push(`${runner} run build`);
+    }
+  } catch {
+    // No package.json or unreadable -- skip
+  }
+
+  // Rust: check for Cargo.toml in scoped dir
+  try {
+    await fs.access(path.join(scopedDir, 'Cargo.toml'));
+    commands.push('cargo build');
+  } catch {
+    // Not present -- skip
+  }
+
+  // Go: check for go.mod in scoped dir
+  try {
+    await fs.access(path.join(scopedDir, 'go.mod'));
+    commands.push('go mod download');
+  } catch {
+    // Not present -- skip
+  }
+
+  return { commands, cwd: scopedDir };
+}
+
+/**
+ * Run workspace setup in a worktree directory.
+ *
+ * Resolves config from `configDir` (typically the original repo root),
+ * detects project type, and runs setup commands in `worktreePath`.
+ * Config overrides via .forge/config.json take precedence over auto-detection.
+ *
+ * When a scope is specified (monorepo package targeting), setup runs in two phases:
+ *   1. Root-level install (lockfile-aware, installs all packages via hoisted lockfiles)
+ *   2. Package-level build/setup from the scoped directory
+ *
+ * Returns null if no setup commands were detected; otherwise returns the hook result.
+ */
+export async function setupWorktree(
+  worktreePath: string,
+  configDir: string,
+  options?: WorkspaceLifecycleOptions,
+): Promise<WorkspaceHookResult | null> {
+  const config = getConfig(configDir);
+  const commands = await resolveSetupCommands(worktreePath, config);
+
+  if (commands.length === 0 && !options?.scope) {
+    return null;
+  }
+
+  const totalPhases = options?.scope ? 2 : 1;
+  if (!options?.quiet && commands.length > 0) {
+    const scopeNote = options?.scope ? ` (root + scoped: ${options.scope})` : '';
+    console.log(`\x1b[2m[forge]\x1b[0m Running workspace setup (${commands.length} command${commands.length > 1 ? 's' : ''})${scopeNote}...`);
+  }
+
+  // Phase 1: Root-level setup (install, etc.)
+  let result: WorkspaceHookResult = { success: true, output: '' };
+  if (commands.length > 0) {
+    result = await runWorkspaceHooks(commands, worktreePath, config.setupTimeout, options?.quiet);
+    if (!result.success) {
+      return result;
+    }
+  }
+
+  // Phase 2: Scoped package-level setup (build, etc.)
+  if (options?.scope && result.success) {
+    const scoped = await detectScopedSetupCommands(worktreePath, options.scope);
+    if (scoped.commands.length > 0) {
+      if (!options?.quiet) {
+        console.log(`\x1b[2m[forge]\x1b[0m Running scoped setup in ${options.scope} (${scoped.commands.length} command${scoped.commands.length > 1 ? 's' : ''})...`);
+      }
+      const scopedResult = await runWorkspaceHooks(scoped.commands, scoped.cwd, config.setupTimeout, options?.quiet);
+      if (!scopedResult.success) {
+        return {
+          success: false,
+          output: result.output + '\n' + scopedResult.output,
+          failedCommand: scopedResult.failedCommand,
+        };
+      }
+      result = {
+        success: true,
+        output: result.output + '\n' + scopedResult.output,
+      };
+    }
+  }
+
+  if (result.success && !options?.quiet) {
+    console.log(`\x1b[2m[forge]\x1b[0m Workspace setup complete`);
+  }
+
+  return result.output ? result : null;
+}
+
+/**
+ * Run workspace teardown in a worktree directory.
+ *
+ * Resolves config from `configDir` (typically the original repo root),
+ * runs teardown commands in `worktreePath`. Teardown is best-effort --
+ * failures are reported but do not throw.
+ *
+ * Returns null if no teardown commands are configured; otherwise returns the hook result.
+ */
+export async function teardownWorktree(
+  worktreePath: string,
+  configDir: string,
+  options?: WorkspaceLifecycleOptions,
+): Promise<WorkspaceHookResult | null> {
+  const config = getConfig(configDir);
+  const commands = resolveTeardownCommands(config);
+
+  if (commands.length === 0) {
+    return null;
+  }
+
+  if (!options?.quiet) {
+    console.log(`\x1b[2m[forge]\x1b[0m Running workspace teardown (${commands.length} command${commands.length > 1 ? 's' : ''})...`);
+  }
+
+  const result = await runWorkspaceHooks(commands, worktreePath, config.setupTimeout, options?.quiet);
+
+  if (!result.success && !options?.quiet) {
+    console.log(`\x1b[2m[forge]\x1b[0m Teardown warning: ${result.failedCommand}`);
+  }
+
+  return result;
 }

@@ -147,8 +147,26 @@ export function determineAffectedPackages(
   specPath?: string,
   specContent?: string,
   workingDir?: string,
+  specScope?: string,
 ): string[] {
   const affected = new Set<string>();
+
+  // Strategy 0 (highest priority): Explicit scope from spec frontmatter
+  // scope: packages/api  ->  directly resolves to that package
+  if (specScope) {
+    // Normalize scope for matching (strip trailing slashes)
+    const normalizedScope = specScope.replace(/\/+$/, '');
+    for (const [dir, name] of monorepo.packages) {
+      if (dir === normalizedScope || dir.startsWith(normalizedScope + '/')) {
+        affected.add(name);
+      }
+    }
+    // If scope matched packages, return immediately (explicit scope overrides heuristics)
+    if (affected.size > 0) {
+      return Array.from(affected);
+    }
+    // Scope was specified but didn't match any package -- fall through to heuristics
+  }
 
   // Strategy 1: Spec file lives inside a workspace package dir
   if (specPath && workingDir) {
@@ -363,6 +381,8 @@ export async function detectVerification(workingDir: string, configVerify?: stri
   }
 
   const commands: string[] = [];
+
+  // ── Node.js detection ──────────────────────────────────────
   const pm = await detectPackageManager(workingDir);
 
   if (pm) {
@@ -388,19 +408,22 @@ export async function detectVerification(workingDir: string, configVerify?: stri
     } catch {
       // package.json unreadable despite pm detection -- skip Node commands
     }
-  } else {
-    // No Node.js project - try common patterns
-    try {
-      await fs.access(path.join(workingDir, 'Cargo.toml'));
-      commands.push('cargo check');
-      commands.push('cargo build');
-    } catch {}
-
-    try {
-      await fs.access(path.join(workingDir, 'go.mod'));
-      commands.push('go build ./...');
-    } catch {}
   }
+
+  // ── Rust detection (independent of Node) ───────────────────
+  try {
+    await fs.access(path.join(workingDir, 'Cargo.toml'));
+    commands.push('cargo check');
+    commands.push('cargo build');
+    commands.push('cargo test');
+  } catch {}
+
+  // ── Go detection (independent of Node) ─────────────────────
+  try {
+    await fs.access(path.join(workingDir, 'go.mod'));
+    commands.push('go build ./...');
+    commands.push('go test ./...');
+  } catch {}
 
   return commands;
 }
@@ -411,7 +434,7 @@ export async function runVerification(
   quiet: boolean,
   configVerify?: string[],
   monorepo?: MonorepoContext | null,
-): Promise<{ passed: boolean; errors: string }> {
+): Promise<{ passed: boolean; errors: string; skipped?: boolean }> {
   let commands = await detectVerification(workingDir, configVerify);
 
   // Scope commands to affected packages when monorepo context is available
@@ -428,8 +451,8 @@ export async function runVerification(
   }
 
   if (commands.length === 0) {
-    if (!quiet) console.log(`${DIM}[Verify]${RESET} No verification commands detected`);
-    return { passed: true, errors: '' };
+    console.error(`[forge] No build/test commands detected -- verification skipped`);
+    return { passed: true, errors: '', skipped: true };
   }
 
   const errors: string[] = [];

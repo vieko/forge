@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { parseDependencies, parseSource, topoSort, detectCycle, validateDeps, hasDependencies, type SpecDep } from './deps.js';
+import { parseDependencies, parseSource, parseScope, topoSort, detectCycle, validateDeps, hasDependencies, type SpecDep } from './deps.js';
 import type { SpecManifest } from './types.js';
 
 // ── parseDependencies ───────────────────────────────────────
@@ -196,6 +196,96 @@ source:   github:vieko/forge#99
 
 # Content`;
     expect(parseSource(content)).toBe('github:vieko/forge#99');
+  });
+});
+
+// ── parseScope ──────────────────────────────────────────────
+
+describe('parseScope', () => {
+  test('no frontmatter -> returns undefined', () => {
+    expect(parseScope('# Just a heading\nSome content')).toBeUndefined();
+  });
+
+  test('frontmatter without scope field -> returns undefined', () => {
+    const content = `---
+title: My Spec
+depends: [01-foo.md]
+---
+
+# Content`;
+    expect(parseScope(content)).toBeUndefined();
+  });
+
+  test('scope: packages/api -> returns "packages/api"', () => {
+    const content = `---
+scope: packages/api
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('packages/api');
+  });
+
+  test('scope: apps/web -> returns "apps/web"', () => {
+    const content = `---
+scope: apps/web
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('apps/web');
+  });
+
+  test('scope with extra whitespace -> trimmed correctly', () => {
+    const content = `---
+scope:   packages/api
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('packages/api');
+  });
+
+  test('scope with leading slash -> stripped', () => {
+    const content = `---
+scope: /packages/api
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('packages/api');
+  });
+
+  test('scope with trailing slash -> stripped', () => {
+    const content = `---
+scope: packages/api/
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('packages/api');
+  });
+
+  test('scope alongside other frontmatter fields', () => {
+    const content = `---
+depends: [01-base.md]
+scope: packages/api
+source: github:vieko/forge#42
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('packages/api');
+  });
+
+  test('scope in body (not frontmatter) -> returns undefined', () => {
+    const content = `# Spec
+
+scope: packages/api`;
+    expect(parseScope(content)).toBeUndefined();
+  });
+
+  test('single directory scope -> returns as-is', () => {
+    const content = `---
+scope: api
+---
+
+# Content`;
+    expect(parseScope(content)).toBe('api');
   });
 });
 
@@ -510,6 +600,61 @@ describe('validateDeps (manifest-aware)', () => {
     ]);
     const warnings = validateDeps(specs, manifest);
     expect(warnings).toEqual([]);
+  });
+
+  test('full key match distinguishes same basename in different directories', () => {
+    const specs: SpecDep[] = [
+      { name: 'child.md', path: '/child.md', depends: ['auth/login.md'] },
+    ];
+    // auth/login.md is passed, setup/login.md is failed — same basename
+    const manifest = makeManifest([
+      { spec: 'auth/login.md', status: 'passed' },
+      { spec: 'setup/login.md', status: 'failed' },
+    ]);
+    // Should match the full key auth/login.md (passed), not the basename fallback
+    expect(() => validateDeps(specs, manifest)).not.toThrow();
+    expect(validateDeps(specs, manifest)).toEqual([]);
+  });
+
+  test('full key match returns warning for non-passed dep even if basename is passed elsewhere', () => {
+    const specs: SpecDep[] = [
+      { name: 'child.md', path: '/child.md', depends: ['setup/login.md'] },
+    ];
+    const manifest = makeManifest([
+      { spec: 'auth/login.md', status: 'passed' },
+      { spec: 'setup/login.md', status: 'failed' },
+    ]);
+    // Should match full key setup/login.md (failed), not basename fallback login.md (passed)
+    const warnings = validateDeps(specs, manifest);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('setup/login.md');
+    expect(warnings[0]).toContain('status: failed');
+  });
+
+  test('bare filename falls back to basename when no full key matches', () => {
+    const specs: SpecDep[] = [
+      { name: 'child.md', path: '/child.md', depends: ['login.md'] },
+    ];
+    const manifest = makeManifest([
+      { spec: 'auth/login.md', status: 'passed' },
+    ]);
+    // login.md has no full key match, falls back to basename match -> passed
+    expect(() => validateDeps(specs, manifest)).not.toThrow();
+    expect(validateDeps(specs, manifest)).toEqual([]);
+  });
+
+  test('bare filename basename fallback warns when only non-passed entries exist', () => {
+    const specs: SpecDep[] = [
+      { name: 'child.md', path: '/child.md', depends: ['login.md'] },
+    ];
+    const manifest = makeManifest([
+      { spec: 'auth/login.md', status: 'failed' },
+    ]);
+    // login.md has no full key match, falls back to basename match -> failed
+    const warnings = validateDeps(specs, manifest);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('login.md');
+    expect(warnings[0]).toContain('status: failed');
   });
 });
 

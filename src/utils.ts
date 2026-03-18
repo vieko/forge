@@ -4,7 +4,9 @@ import path from 'path';
 import os from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { getDb, insertRun } from './db.js';
+import { getDb, insertRun, insertWorktree, getWorktreeByPath, updateWorktreeStatus } from './db.js';
+import { setupWorktree, teardownWorktree } from './workspace.js';
+import { checkWorktreeLimits, autoPruneMergedWorktrees } from './worktree-limits.js';
 
 // Custom error that carries the ForgeResult for cost tracking on failure
 export class ForgeError extends Error {
@@ -17,6 +19,16 @@ export class ForgeError extends Error {
 }
 
 export const execAsync = promisify(exec);
+
+// ── Binary Resolution ────────────────────────────────────────
+
+/**
+ * Resolve the forge CLI entry point (dist/index.js) using import.meta.url.
+ * Shared helper so every call site resolves the binary the same way.
+ */
+export function getForgeEntryPoint(): string {
+  return path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'dist', 'index.js'));
+}
 
 // ── Package Manager Detection ────────────────────────────────
 
@@ -181,6 +193,19 @@ export function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// ── Work Group ID ────────────────────────────────────────────
+
+/**
+ * Generate a work group ID with format: wg-{timestamp}-{random}
+ * Short enough for directory names and branch names.
+ * Example: wg-1710500000-a3f2
+ */
+export function generateWorkGroupId(): string {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const random = Math.random().toString(16).substring(2, 6);
+  return `wg-${timestamp}-${random}`;
+}
+
 // ── Git Worktree Helpers ─────────────────────────────────────
 
 /** Validate that a directory is inside a git repository. */
@@ -192,38 +217,149 @@ async function assertGitRepo(dir: string): Promise<void> {
   }
 }
 
+/** Options for worktree registry integration. */
+export interface WorktreeRegistryOptions {
+  /** Path to the spec file (used to derive spec name for directory/branch naming) */
+  spec_path?: string;
+  /** Linear issue ID (e.g. "ENG-123") for directory/branch naming */
+  linear_issue_id?: string;
+  /** Work group ID for associating worktrees from the same session */
+  work_group_id?: string;
+  /** Run workspace setup hooks (lockfile install, cargo build, go mod download) after creation */
+  runSetup?: boolean;
+  /** Suppress console output from setup/teardown hooks */
+  quiet?: boolean;
+  /** Skip worktree count and disk usage limit checks */
+  force?: boolean;
+  /** Skip automatic pruning of merged worktrees when approaching disk limits */
+  noAutoPrune?: boolean;
+  /** Git ref to use as the start point for the new branch (default: HEAD) */
+  startPoint?: string;
+  /** Monorepo package scope (e.g. "packages/api") -- passed to workspace setup for scoped build */
+  scope?: string;
+}
+
 /**
- * Create a git worktree for the given branch.
- * If the branch exists, checks it out; if not, creates from HEAD.
- * Returns the absolute path to the worktree directory.
+ * Derive a clean spec name from a spec file path.
+ * Strips .md extension, takes basename, replaces non-alphanumeric with hyphens,
+ * collapses consecutive hyphens, and trims leading/trailing hyphens.
  */
-export async function createWorktree(repoDir: string, branch: string): Promise<string> {
+export function deriveSpecName(specPath: string): string {
+  const basename = path.basename(specPath, '.md');
+  return basename
+    .replace(/[^a-zA-Z0-9]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase();
+}
+
+/**
+ * Create a git worktree as a sibling directory to the project root.
+ *
+ * Directory naming: {project}-{linear_issue_id}-{spec_name} when Linear issue present,
+ *                   {project}-{spec_name} otherwise.
+ * Branch naming: forge/{issue-id}/{spec-name} with Linear issue,
+ *                forge/{spec-name} without.
+ *
+ * Falls back to legacy /tmp/ path and plain branch name when no registry options
+ * are provided (backward compatibility for pipeline and explicit --branch usage).
+ *
+ * Every created worktree is registered in the `worktrees` DB table.
+ */
+export async function createWorktree(
+  repoDir: string,
+  branch: string,
+  registryOptions?: WorktreeRegistryOptions,
+): Promise<string> {
   await assertGitRepo(repoDir);
 
-  // Deterministic path: /tmp/forge-worktree-<branch>
-  const safeBranch = branch.replace(/[^a-zA-Z0-9_-]/g, '-');
-  const worktreePath = path.join(os.tmpdir(), `forge-worktree-${safeBranch}`);
+  // ── Auto-prune merged worktrees at 80% disk threshold ──
+  if (!registryOptions?.force && !registryOptions?.noAutoPrune) {
+    await autoPruneMergedWorktrees(repoDir, registryOptions?.quiet);
+  }
 
-  // Check if branch already exists
+  // ── Worktree limit enforcement ─────────────────────────
+  if (!registryOptions?.force) {
+    const limitCheck = await checkWorktreeLimits(repoDir);
+    if (!limitCheck.ok) {
+      throw new Error(limitCheck.error!);
+    }
+  }
+
+  // Determine if we're using sibling directory mode (spec-driven) or legacy mode
+  const specPath = registryOptions?.spec_path;
+  const linearIssueId = registryOptions?.linear_issue_id;
+  const workGroupId = registryOptions?.work_group_id;
+  const useSiblingMode = !!specPath;
+
+  let worktreePath: string;
+  let effectiveBranch: string;
+
+  if (useSiblingMode) {
+    // ── Sibling directory mode ──────────────────────────────
+    const specName = deriveSpecName(specPath!);
+    const repoRoot = (await execAsync('git rev-parse --show-toplevel', { cwd: repoDir })).stdout.trim();
+    const projectName = path.basename(repoRoot);
+    const parentDir = path.dirname(repoRoot);
+
+    // Build directory name: {project}-{issue}-{spec} or {project}-{spec}
+    const dirParts = [projectName];
+    if (linearIssueId) dirParts.push(linearIssueId);
+    dirParts.push(specName);
+    const baseDirName = dirParts.join('-');
+
+    // Build branch name: forge/{issue}/{spec} or forge/{spec}
+    const branchParts = ['forge'];
+    if (linearIssueId) branchParts.push(linearIssueId);
+    branchParts.push(specName);
+    const baseBranch = branchParts.join('/');
+
+    // ── Branch collision handling ───────────────────────────
+    // Check if branch already exists AND is checked out in another worktree.
+    // If it exists but is not checked out, we can reuse it.
+    // If it's already checked out elsewhere, suffix with work_group_id short hash.
+    effectiveBranch = baseBranch;
+    const branchCollision = await isBranchCheckedOutElsewhere(repoDir, baseBranch);
+    if (branchCollision) {
+      const suffix = workGroupId ? workGroupId.slice(-4) : Math.random().toString(16).substring(2, 6);
+      effectiveBranch = `${baseBranch}-${suffix}`;
+    }
+
+    // ── Directory collision handling ────────────────────────
+    worktreePath = path.join(parentDir, baseDirName);
+    let dirSuffix = 2;
+    while (await pathExists(worktreePath)) {
+      worktreePath = path.join(parentDir, `${baseDirName}-${dirSuffix}`);
+      dirSuffix++;
+    }
+  } else {
+    // ── Legacy mode (backward compat for --branch and pipelines) ──
+    const safeBranch = branch.replace(/[^a-zA-Z0-9_-]/g, '-');
+    worktreePath = path.join(os.tmpdir(), `forge-worktree-${safeBranch}`);
+    effectiveBranch = branch;
+  }
+
+  // ── Create the worktree ─────────────────────────────────
+  const startPoint = registryOptions?.startPoint || 'HEAD';
   let branchExists = false;
   try {
-    await execAsync(`git rev-parse --verify refs/heads/${branch}`, { cwd: repoDir });
+    await execAsync(`git rev-parse --verify refs/heads/${effectiveBranch}`, { cwd: repoDir });
     branchExists = true;
   } catch {
-    // Branch doesn't exist — will create from HEAD
+    // Branch doesn't exist — will create from startPoint
   }
 
   try {
     if (branchExists) {
-      await execAsync(`git worktree add "${worktreePath}" "${branch}"`, { cwd: repoDir });
+      await execAsync(`git worktree add "${worktreePath}" "${effectiveBranch}"`, { cwd: repoDir });
     } else {
-      await execAsync(`git worktree add -b "${branch}" "${worktreePath}" HEAD`, { cwd: repoDir });
+      await execAsync(`git worktree add -b "${effectiveBranch}" "${worktreePath}" "${startPoint}"`, { cwd: repoDir });
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('already checked out') || msg.includes('is already linked')) {
       throw new Error(
-        `Branch '${branch}' is already checked out in another worktree. ` +
+        `Branch '${effectiveBranch}' is already checked out in another worktree. ` +
         `Finish or remove that worktree first, or choose a different branch name.`
       );
     }
@@ -236,7 +372,75 @@ export async function createWorktree(repoDir: string, branch: string): Promise<s
     throw new Error(`Failed to create worktree: ${msg}`);
   }
 
+  // ── Register in DB ──────────────────────────────────────
+  const db = getDb(repoDir);
+  if (db && specPath) {
+    const id = `wt-${Date.now()}-${Math.random().toString(16).substring(2, 6)}`;
+    insertWorktree(db, {
+      id,
+      work_group_id: workGroupId ?? null,
+      spec_path: specPath,
+      branch: effectiveBranch,
+      worktree_path: worktreePath,
+      status: 'created',
+      linear_issue_id: linearIssueId ?? null,
+    });
+  }
+
+  // ── Run workspace setup hooks ────────────────────────────
+  // Spec-driven sibling worktrees should bootstrap automatically so a
+  // fresh checkout can verify without relying on pre-existing node_modules.
+  if (registryOptions?.runSetup || useSiblingMode) {
+    const result = await setupWorktree(worktreePath, repoDir, { quiet: registryOptions.quiet, scope: registryOptions.scope });
+
+    if (result && !result.success) {
+      // Mark worktree as failed in DB
+      const setupDb = getDb(repoDir);
+      if (setupDb) {
+        const wtRow = getWorktreeByPath(setupDb, worktreePath);
+        if (wtRow) {
+          const errorMsg = `Workspace setup failed: ${result.failedCommand}`;
+          updateWorktreeStatus(setupDb, wtRow.id, 'failed', errorMsg);
+        }
+      }
+    }
+  }
+
   return worktreePath;
+}
+
+/** Check if a branch exists and is already checked out in a worktree. */
+async function isBranchCheckedOutElsewhere(repoDir: string, branch: string): Promise<boolean> {
+  try {
+    await execAsync(`git rev-parse --verify refs/heads/${branch}`, { cwd: repoDir });
+  } catch {
+    return false; // Branch doesn't exist at all — no collision
+  }
+
+  // Branch exists — check if it's checked out in a worktree
+  try {
+    const { stdout } = await execAsync('git worktree list --porcelain', { cwd: repoDir });
+    // Parse porcelain output: look for "branch refs/heads/<branch>" lines
+    const lines = stdout.split('\n');
+    for (const line of lines) {
+      if (line.trim() === `branch refs/heads/${branch}`) {
+        return true;
+      }
+    }
+  } catch {
+    // If we can't list worktrees, assume no collision
+  }
+  return false;
+}
+
+/** Check if a filesystem path exists. */
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -250,16 +454,99 @@ export async function commitWorktree(worktreePath: string, branch: string): Prom
     return false;
   }
 
-  await execAsync('git add -A -- . ":!.forge"', { cwd: worktreePath });
+  await execAsync('git add -A -- .', { cwd: worktreePath });
+  await execAsync('git rm -r --cached --ignore-unmatch .forge', { cwd: worktreePath });
   const message = `forge: branch isolation results on ${branch}`;
   await execAsync(`git commit -m "${message}"`, { cwd: worktreePath });
   return true;
 }
 
 /**
- * Remove the worktree and clean up git's worktree tracking.
+ * Consolidate completed worktree branches into a single merge branch.
+ * Creates a temporary worktree, merges each branch sequentially, then cleans up.
+ * Returns the consolidation branch name for use as the startPoint of the next level.
+ *
+ * @param repoDir - The original repo directory
+ * @param branches - Branch names to merge (from successful worktrees in the level)
+ * @param levelIndex - Level number (for naming the consolidation branch)
+ * @param workGroupId - Work group ID for scoping the consolidation branch
+ * @param baseBranch - The branch to start from (default: HEAD). For level > 0, this is the previous consolidation branch.
+ * @returns The consolidation branch name
  */
-export async function cleanupWorktree(worktreePath: string, repoDir: string): Promise<void> {
+export async function consolidateLevelBranches(
+  repoDir: string,
+  branches: string[],
+  levelIndex: number,
+  workGroupId: string,
+  baseBranch?: string,
+): Promise<string> {
+  if (branches.length === 0) {
+    throw new Error('No branches to consolidate');
+  }
+
+  const consolidationBranch = `forge/consolidate-${workGroupId.slice(-8)}-level-${levelIndex}`;
+  const startRef = baseBranch || 'HEAD';
+
+  // Create the consolidation branch from the base
+  try {
+    await execAsync(`git branch -D "${consolidationBranch}"`, { cwd: repoDir });
+  } catch {
+    // Branch didn't exist — fine
+  }
+  await execAsync(`git branch "${consolidationBranch}" "${startRef}"`, { cwd: repoDir });
+
+  // Create a temporary worktree to perform the merges
+  const tmpPath = path.join(os.tmpdir(), `forge-consolidate-${workGroupId.slice(-8)}-${levelIndex}-${Date.now()}`);
+  try {
+    await execAsync(`git worktree add "${tmpPath}" "${consolidationBranch}"`, { cwd: repoDir });
+
+    // Merge each branch
+    for (const branch of branches) {
+      await execAsync(`git merge "${branch}" --no-edit -m "forge: consolidate ${branch} into level ${levelIndex}"`, { cwd: tmpPath });
+    }
+  } finally {
+    // Clean up the temporary worktree
+    try {
+      await execAsync(`git worktree remove "${tmpPath}" --force`, { cwd: repoDir });
+    } catch {
+      try {
+        await fs.rm(tmpPath, { recursive: true, force: true });
+        await execAsync('git worktree prune', { cwd: repoDir });
+      } catch {
+        // Best effort cleanup
+      }
+    }
+  }
+
+  return consolidationBranch;
+}
+
+/** Options for worktree cleanup. */
+export interface CleanupWorktreeOptions {
+  /** Run workspace teardown hooks before removing the worktree */
+  runTeardown?: boolean;
+  /** Suppress console output from teardown hooks */
+  quiet?: boolean;
+}
+
+/**
+ * Remove the worktree and clean up git's worktree tracking.
+ * When `runTeardown` is true, runs teardown hooks before removal (best-effort).
+ */
+export async function cleanupWorktree(
+  worktreePath: string,
+  repoDir: string,
+  options?: CleanupWorktreeOptions,
+): Promise<void> {
+  // Run teardown hooks before removal (best-effort)
+  if (options?.runTeardown) {
+    try {
+      await teardownWorktree(worktreePath, repoDir, { quiet: options.quiet });
+    } catch {
+      // Best effort -- don't fail cleanup on teardown error
+    }
+  }
+
   try {
     await execAsync(`git worktree remove "${worktreePath}" --force`, { cwd: repoDir });
   } catch {
@@ -276,67 +563,34 @@ export async function cleanupWorktree(worktreePath: string, repoDir: string): Pr
 export async function saveResult(
   workingDir: string,
   result: ForgeResult,
-  resultText: string
+  _resultText: string
 ): Promise<string> {
-  // Create timestamp-based directory name (filesystem safe)
+  // Create timestamp-based ID (filesystem safe)
   const timestamp = result.startedAt.replace(/[:.]/g, '-');
-  const resultsDir = path.join(workingDir, '.forge', 'results', timestamp);
 
   await ensureForgeDir(workingDir);
-  await fs.mkdir(resultsDir, { recursive: true });
 
-  // Save structured summary
-  const summaryPath = path.join(resultsDir, 'summary.json');
-  await fs.writeFile(summaryPath, JSON.stringify(result, null, 2));
-
-  // Save full result text (no truncation)
-  const resultPath = path.join(resultsDir, 'result.md');
-  const resultContent = `# Forge Result
-
-**Started**: ${result.startedAt}
-**Completed**: ${result.completedAt}
-**Duration**: ${result.durationSeconds.toFixed(1)}s
-**Status**: ${result.status}
-**Cost**: ${result.costUsd !== undefined ? `$${result.costUsd.toFixed(4)}` : 'N/A'}
-**Model**: ${result.model}
-${result.sessionId ? `**Session**: ${result.sessionId}` : ''}
-${result.specPath ? `**Spec**: ${result.specPath}` : ''}
-
-## Prompt
-
-${result.prompt}
-
-## Result
-
-${resultText}
-`;
-  await fs.writeFile(resultPath, resultContent);
-
-  // Dual-write to SQLite (best-effort — filesystem is authoritative)
-  try {
-    const db = getDb(workingDir);
-    if (db) {
-      insertRun(db, {
-        id: timestamp,
-        specPath: result.specPath || null,
-        model: result.model || 'unknown',
-        status: result.status,
-        costUsd: result.costUsd ?? null,
-        durationSeconds: result.durationSeconds,
-        numTurns: result.numTurns ?? null,
-        toolCalls: result.toolCalls ?? null,
-        batchId: result.runId || null,
-        type: result.type || null,
-        prompt: result.prompt,
-        cwd: result.cwd,
-        sessionId: result.sessionId || null,
-        error: result.error || null,
-        createdAt: result.startedAt,
-      });
-    }
-  } catch {
-    // Best effort — don't fail the save if DB write fails
+  // Insert into SQLite database (sole store for run metadata)
+  const db = getDb(workingDir);
+  if (db) {
+    insertRun(db, {
+      id: timestamp,
+      specPath: result.specPath || null,
+      model: result.model || 'unknown',
+      status: result.status,
+      costUsd: result.costUsd ?? null,
+      durationSeconds: result.durationSeconds,
+      numTurns: result.numTurns ?? null,
+      toolCalls: result.toolCalls ?? null,
+      batchId: result.runId || null,
+      type: result.type || null,
+      prompt: result.prompt,
+      cwd: result.cwd,
+      sessionId: result.sessionId || null,
+      error: result.error || null,
+      createdAt: result.startedAt,
+    });
   }
 
-  return resultsDir;
+  return timestamp;
 }

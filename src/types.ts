@@ -44,14 +44,22 @@ export interface ForgeOptions {
   force?: boolean;
   /** Run in an isolated git worktree on the named branch */
   branch?: string;
+  /** Enable worktree-per-spec isolation mode -- each spec runs in its own worktree */
+  isolate?: boolean;
+  /** Run directly in the current checkout — skip automatic worktree creation */
+  inPlace?: boolean;
+  /** Skip automatic pruning of merged worktrees when approaching disk limits */
+  noAutoPrune?: boolean;
   /** Directory for .forge/ persistence (session logs, results, manifest). Defaults to cwd. Used to route writes to the original repo when running in a worktree. */
   persistDir?: string;
+  /** Work group ID for associating specs, worktrees, and runs from the same session. Auto-minted if not provided. */
+  workGroupId?: string;
   /** Callback fired when a spec completes in a batch run. Used by the executor for per-spec logging. */
   _onSpecResult?: (spec: string, status: 'success' | 'failed') => void;
 }
 
 /**
- * Result from a Forge run, saved to .forge/results/
+ * Result from a Forge run, persisted to the SQLite runs table.
  */
 export interface ForgeResult {
   /** ISO timestamp when the run started */
@@ -96,6 +104,8 @@ export interface ForgeResult {
   logPath?: string;
   /** Gap tracking data from audit-fix loop (only present for audit --fix results) */
   gapTracking?: GapTrackingEntry[];
+  /** Work group ID for associating specs, worktrees, and runs from the same session */
+  workGroupId?: string;
 }
 
 // ── Audit-Fix Gap Tracking ───────────────────────────────────
@@ -162,6 +172,8 @@ export interface AuditOptions {
   fix?: boolean;
   /** Maximum number of audit-fix rounds (default: 3) */
   fixRounds?: number;
+  /** Worktree ID to scope audit to — resolves path from registry and transitions lifecycle */
+  worktreeId?: string;
 }
 
 /**
@@ -220,6 +232,8 @@ export interface ProofOptions {
   resume?: string;
   /** Fork from a previous session (new session, same history) */
   fork?: string;
+  /** Worktree ID to scope proof generation to (resolves worktree from registry, includes diff in prompt) */
+  worktreeId?: string;
 }
 
 /**
@@ -296,7 +310,7 @@ export interface ProofManifest {
 export interface SpecRun {
   runId: string;
   timestamp: string;         // ISO 8601
-  resultPath: string;        // relative to workingDir, e.g. ".forge/results/2026-02-14T..."
+  resultPath?: string;       // deprecated: was filesystem results path, now unused (DB is sole store)
   status: 'passed' | 'failed';
   costUsd?: number;
   durationSeconds: number;
@@ -312,6 +326,7 @@ export interface SpecEntry {
   status: 'pending' | 'running' | 'passed' | 'failed';
   runs: SpecRun[];
   source: 'file' | 'pipe' | `github:${string}` | `audit:${string}` | `define:${string}`;
+  workGroupId?: string;      // work group ID for associating specs from the same define session
   createdAt: string;         // ISO 8601
   updatedAt: string;         // ISO 8601
 }

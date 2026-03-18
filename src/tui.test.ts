@@ -181,28 +181,29 @@ describe('TUI module and CLI registration', () => {
 // ── Session list: data loading from .forge/results/ ──────────
 
 describe('session list data loading', () => {
-  test('sessions populated from summary.json files sorted by recency', async () => {
+  test('sessions populated from DB sorted by recency', async () => {
     const dir = await makeTmpDir();
     await setupForge(dir);
-    await setupResults(dir, [
-      { ts: '2026-01-01T00-00-00Z', summary: makeSummary({ sessionId: 's1', startedAt: '2026-01-01T00:00:00Z' }) },
-      { ts: '2026-01-02T00-00-00Z', summary: makeSummary({ sessionId: 's2', startedAt: '2026-01-02T00:00:00Z' }) },
-      { ts: '2026-01-03T00-00-00Z', summary: makeSummary({ sessionId: 's3', startedAt: '2026-01-03T00:00:00Z' }) },
-    ]);
 
-    const resultsDir = path.join(dir, '.forge', 'results');
-    const entries = await fs.readdir(resultsDir);
-    expect(entries).toHaveLength(3);
+    // Insert sessions directly into DB (primary data source)
+    const { getDb, insertRun } = await import('./db.js');
+    const db = getDb(dir);
+    expect(db).not.toBeNull();
 
-    // Summaries can be loaded and sorted by startedAt
-    const summaries: ForgeResult[] = [];
-    for (const entry of entries) {
-      const raw = await fs.readFile(path.join(resultsDir, entry, 'summary.json'), 'utf-8');
-      summaries.push(JSON.parse(raw));
+    const runs = [
+      { id: 'r1', sessionId: 's1', createdAt: '2026-01-01T00:00:00Z', model: 'sonnet', status: 'success', durationSeconds: 60, prompt: 'test', cwd: dir, specPath: null, costUsd: 0.5, numTurns: 10, toolCalls: 5, batchId: null, type: null, error: null },
+      { id: 'r2', sessionId: 's2', createdAt: '2026-01-02T00:00:00Z', model: 'sonnet', status: 'success', durationSeconds: 60, prompt: 'test', cwd: dir, specPath: null, costUsd: 0.5, numTurns: 10, toolCalls: 5, batchId: null, type: null, error: null },
+      { id: 'r3', sessionId: 's3', createdAt: '2026-01-03T00:00:00Z', model: 'sonnet', status: 'success', durationSeconds: 60, prompt: 'test', cwd: dir, specPath: null, costUsd: 0.5, numTurns: 10, toolCalls: 5, batchId: null, type: null, error: null },
+    ];
+    for (const run of runs) {
+      insertRun(db!, run);
     }
-    summaries.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
-    expect(summaries[0].sessionId).toBe('s3'); // newest first
-    expect(summaries[2].sessionId).toBe('s1'); // oldest last
+
+    // Verify runs can be queried and sorted by createdAt
+    const rows = db!.query('SELECT * FROM runs ORDER BY createdAt DESC').all() as Array<{ sessionId: string }>;
+    expect(rows).toHaveLength(3);
+    expect(rows[0].sessionId).toBe('s3'); // newest first
+    expect(rows[2].sessionId).toBe('s1'); // oldest last
   });
 
   test('session row data includes all required display fields', () => {
@@ -573,11 +574,14 @@ describe('spec detail run history', () => {
     expect(entry.runs).toHaveLength(0);
   });
 
-  test('session events path can be derived from resultPath', () => {
-    // resultPath stores the result directory, sessionId can be derived from summary
-    const run = makeRun({ resultPath: '.forge/results/2026-01-01T00-00-00Z' });
-    expect(run.resultPath).toContain('.forge/results/');
-    // The TUI reads summary.json from resultPath, then uses sessionId for events
+  test('session events path can be derived from DB sessionId', () => {
+    // The TUI queries the runs DB table by runId, then uses sessionId for events path
+    const run = makeRun({ runId: 'run-abc', resultPath: '.forge/results/2026-01-01T00-00-00Z' });
+    expect(run.runId).toBeTruthy();
+    // eventsPath is derived: .forge/sessions/<sessionId>/events.jsonl
+    const sessionId = 'sess-001';
+    const eventsPath = `.forge/sessions/${sessionId}/events.jsonl`;
+    expect(eventsPath).toContain('events.jsonl');
   });
 
   test('spec metadata includes status, source, timestamps', () => {

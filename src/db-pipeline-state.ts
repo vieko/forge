@@ -2,9 +2,10 @@
 //
 // Implements StateProvider using SQLite tables (pipelines, stages, gates).
 // Uses the shared database from db.ts with migration version 3.
-// FileSystemStateProvider remains available as fallback when DB is null.
+// Sole StateProvider implementation -- FileSystemStateProvider has been removed.
 
 import type { Database } from 'bun:sqlite';
+import { z } from 'zod';
 import type {
   Pipeline,
   PipelineOptions,
@@ -25,6 +26,7 @@ interface PipelineRow {
   branch: string | null;
   worktree_path: string | null;
   total_cost: number;
+  pid: number | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -86,8 +88,8 @@ function rowToStage(row: StageRow): Stage {
     status: row.status as Stage['status'],
     cost: row.cost,
     duration: row.duration,
-    sessions: JSON.parse(row.sessions) as string[],
-    artifacts: JSON.parse(row.artifacts) as Record<string, string>,
+    sessions: z.array(z.string()).catch([]).parse(JSON.parse(row.sessions)),
+    artifacts: z.record(z.string(), z.string()).catch({}).parse(JSON.parse(row.artifacts)),
   };
   if (row.started_at) stage.startedAt = row.started_at;
   if (row.completed_at) stage.completedAt = row.completed_at;
@@ -157,6 +159,7 @@ function rowsToPipeline(
   if (pipelineRow.completed_at) pipeline.completedAt = pipelineRow.completed_at;
   if (pipelineRow.worktree_path) pipeline.worktreePath = pipelineRow.worktree_path;
   if (pipelineRow.branch) pipeline.branch = pipelineRow.branch;
+  if (pipelineRow.pid != null) pipeline.pid = pipelineRow.pid;
 
   return pipeline;
 }
@@ -188,9 +191,9 @@ export class SqliteStateProvider implements StateProvider {
     this.db.transaction(() => {
       // Insert pipeline row
       this.db.run(
-        `INSERT INTO pipelines (id, goal, status, branch, worktree_path, total_cost, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, pipeline.goal, pipeline.status, null, null, 0, now, now],
+        `INSERT INTO pipelines (id, goal, status, branch, worktree_path, total_cost, pid, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, pipeline.goal, pipeline.status, null, null, 0, null, now, now],
       );
 
       // Insert stage rows
@@ -250,8 +253,8 @@ export class SqliteStateProvider implements StateProvider {
     this.db.transaction(() => {
       // Upsert pipeline row
       this.db.run(
-        `INSERT OR REPLACE INTO pipelines (id, goal, status, branch, worktree_path, total_cost, created_at, updated_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO pipelines (id, goal, status, branch, worktree_path, total_cost, pid, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           pipeline.id,
           pipeline.goal,
@@ -259,6 +262,7 @@ export class SqliteStateProvider implements StateProvider {
           pipeline.branch ?? null,
           pipeline.worktreePath ?? null,
           pipeline.totalCost,
+          pipeline.pid ?? null,
           pipeline.createdAt,
           pipeline.updatedAt,
           pipeline.completedAt ?? null,
@@ -361,4 +365,47 @@ export class SqliteStateProvider implements StateProvider {
     }
     return gates;
   }
+}
+
+// ── Stale Pipeline Detection ─────────────────────────────────
+
+/** Default TTL for stale pipeline detection: 2 hours without stage progress. */
+const STALE_PIPELINE_TTL_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Mark stale pipelines as failed.
+ *
+ * Two detection strategies (mirrors markStaleTasks):
+ * 1. PID liveness: Pipelines whose process has died are marked failed immediately.
+ * 2. TTL-based: Running pipelines with no stage progress for >2 hours are marked failed.
+ *
+ * Only affects pipelines in non-terminal states (running, pending, paused_at_gate).
+ */
+export function markStalePipelines(db: Database, ttlMs: number = STALE_PIPELINE_TTL_MS): void {
+  const now = new Date().toISOString();
+  const cutoff = new Date(Date.now() - ttlMs).toISOString();
+
+  // Strategy 1: PID liveness check for active pipelines with a PID
+  const activeWithPid = db.query(
+    `SELECT id, pid FROM pipelines WHERE status IN ('running', 'pending', 'paused_at_gate') AND pid IS NOT NULL`,
+  ).all() as Array<{ id: string; pid: number }>;
+
+  for (const row of activeWithPid) {
+    try {
+      // Signal 0: check if process exists without killing it
+      process.kill(row.pid, 0);
+    } catch {
+      // Process is dead — mark pipeline as failed
+      db.run(
+        `UPDATE pipelines SET status = 'failed', updated_at = ?, completed_at = ? WHERE id = ? AND status IN ('running', 'pending', 'paused_at_gate')`,
+        [now, now, row.id],
+      );
+    }
+  }
+
+  // Strategy 2: TTL-based — running pipelines with no update for >ttlMs
+  db.run(
+    `UPDATE pipelines SET status = 'failed', updated_at = ?, completed_at = ? WHERE status IN ('running', 'paused_at_gate') AND updated_at < ?`,
+    [now, now, cutoff],
+  );
 }

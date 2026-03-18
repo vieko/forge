@@ -115,6 +115,8 @@ export interface Pipeline {
   worktreePath?: string;
   /** Git branch name created for the worktree (e.g. forge-<id>) */
   branch?: string;
+  /** PID of the process running this pipeline (for stale detection) */
+  pid?: number;
 }
 
 // ── Pipeline Events (discriminated union) ────────────────────
@@ -183,6 +185,18 @@ export interface PipelineCancelledEvent extends PipelineEventBase {
   stage?: StageName;
 }
 
+/** Emitted when workspace setup hooks complete successfully. */
+export interface WorkspaceSetupEvent extends PipelineEventBase {
+  type: 'workspace_setup';
+  output: string;
+}
+
+/** Emitted when workspace teardown hooks complete successfully. */
+export interface WorkspaceTeardownEvent extends PipelineEventBase {
+  type: 'workspace_teardown';
+  output: string;
+}
+
 /** Discriminated union of all pipeline event types. */
 export type PipelineEvent =
   | StageStartEvent
@@ -192,7 +206,9 @@ export type PipelineEvent =
   | GateAdvanceEvent
   | PipelineCompleteEvent
   | PipelineFailedEvent
-  | PipelineCancelledEvent;
+  | PipelineCancelledEvent
+  | WorkspaceSetupEvent
+  | WorkspaceTeardownEvent;
 
 // ── User-Facing Options ──────────────────────────────────────
 

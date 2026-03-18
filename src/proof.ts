@@ -1,10 +1,11 @@
 import type { ProofOptions, ForgeResult, ProofManifest } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
+import { resolveWorkingDir, resolveConfig, resolveSession, saveResult, execAsync } from './utils.js';
 import { DIM, RESET, BOLD, CMD, showBanner, printRunSummary } from './display.js';
 import { runQuery } from './core.js';
 import { resolveSpecDir, resolveSpecFile } from './specs.js';
+import { getDb, getWorktree, transitionWorktreeStatus } from './db.js';
 
 // ── Constants ────────────────────────────────────────────────
 
@@ -203,6 +204,7 @@ function buildBatchPrompt(
   outputDir: string,
   testConvention: TestConvention,
   additionalContext?: string,
+  worktreeDiff?: string,
 ): string {
   // Build the spec listing
   const specSections = specFiles.map(file => {
@@ -234,7 +236,15 @@ Write real, executable test files that verify the acceptance criteria.
 
 ${specSections}
 
-${additionalContext ? `## Additional Context\n\n${additionalContext}\n` : ''}## Instructions
+${additionalContext ? `## Additional Context\n\n${additionalContext}\n` : ''}${worktreeDiff ? `## Worktree Diff Scope
+
+This proof is scoped to changes introduced by a specific worktree branch. Only generate tests that verify the changes shown in this diff. Do NOT generate comprehensive tests for the full codebase -- focus narrowly on the code paths affected by these changes.
+
+\`\`\`diff
+${worktreeDiff}
+\`\`\`
+
+` : ''}## Instructions
 
 ### 1. Study the project's existing tests
 
@@ -319,11 +329,69 @@ export async function runProof(options: ProofOptions): Promise<void> {
     showBanner('DEFINE OUTCOMES ▲ VERIFY RESULTS');
   }
 
+  // ── Worktree resolution ────────────────────────────────────
+  // When --worktree <id> is provided, resolve the worktree from the registry
+  // and scope proof generation to changes introduced by that worktree's branch.
+  let worktreeId: string | undefined;
+  let resolvedCwd = options.cwd;
+  let resolvedPersistDir = options.persistDir;
+  let worktreeDiff: string | undefined;
+
+  if (options.worktreeId) {
+    const mainDir = await resolveWorkingDir(options.cwd);
+    const db = getDb(mainDir);
+    if (!db) {
+      throw new Error('Database unavailable -- cannot resolve worktree');
+    }
+
+    const worktreeRow = getWorktree(db, options.worktreeId);
+    if (!worktreeRow) {
+      throw new Error(`Worktree not found: ${options.worktreeId}`);
+    }
+
+    worktreeId = worktreeRow.id;
+
+    // Point proof generation at the worktree's filesystem path
+    resolvedCwd = worktreeRow.worktree_path;
+
+    // Results persist to the main repo DB, not the worktree's .forge/
+    resolvedPersistDir = resolvedPersistDir || mainDir;
+
+    // Transition worktree status: complete/audited -> proofing
+    transitionWorktreeStatus(db, worktreeId, 'proofing');
+
+    // Get the diff between the worktree branch and main for scoped test generation
+    try {
+      const { stdout } = await execAsync(
+        `git diff main...${worktreeRow.branch}`,
+        { cwd: worktreeRow.worktree_path, maxBuffer: 10 * 1024 * 1024 },
+      );
+      if (stdout.trim()) {
+        worktreeDiff = stdout.trim();
+      }
+    } catch {
+      // Diff failure is non-fatal -- fall back to unscoped proof
+      if (!quiet) {
+        console.log(`${DIM}[worktree]${RESET} Could not compute diff for branch ${worktreeRow.branch}, proceeding without scope\n`);
+      }
+    }
+
+    if (!quiet) {
+      console.log(`${DIM}[worktree]${RESET} ${worktreeRow.id} -> ${worktreeRow.worktree_path}`);
+      console.log(`${DIM}[worktree]${RESET} branch: ${worktreeRow.branch}`);
+      if (worktreeDiff) {
+        const diffLines = worktreeDiff.split('\n').length;
+        console.log(`${DIM}[worktree]${RESET} diff: ${diffLines} lines (scoped to branch changes)`);
+      }
+      console.log(`${DIM}[worktree]${RESET} persist -> ${resolvedPersistDir}\n`);
+    }
+  }
+
   // Resolve and validate working directory
-  const workingDir = await resolveWorkingDir(options.cwd);
+  const workingDir = await resolveWorkingDir(resolvedCwd);
 
   // Persistence base: original repo when in a worktree, otherwise workingDir
-  const persistBase = options.persistDir || workingDir;
+  const persistBase = resolvedPersistDir || workingDir;
 
   // Load config and merge with defaults (CLI flags override config)
   const resolved = await resolveConfig(workingDir, {
@@ -332,7 +400,7 @@ export async function runProof(options: ProofOptions): Promise<void> {
     maxBudgetUsd,
     defaultModel: 'sonnet',
     defaultMaxTurns: 100,
-    defaultMaxBudgetUsd: 5.00,
+    defaultMaxBudgetUsd: 10.00,
   });
   const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd } = resolved;
 
@@ -371,64 +439,79 @@ export async function runProof(options: ProofOptions): Promise<void> {
   let totalDuration = 0;
   let totalTestFiles = 0;
 
-  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
-    const batch = batches[batchIdx];
+  try {
+    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+      const batch = batches[batchIdx];
 
-    if (!quiet) {
-      if (batches.length > 1) {
-        console.log(`${DIM}[forge]${RESET} Generating tests: batch ${BOLD}${batchIdx + 1}/${batches.length}${RESET} (${batch.length} spec${batch.length > 1 ? 's' : ''})\n`);
-      } else {
-        console.log(`${DIM}[forge]${RESET} Generating tests for ${BOLD}${specFiles.length}${RESET} spec${specFiles.length > 1 ? 's' : ''}\n`);
+      if (!quiet) {
+        if (batches.length > 1) {
+          console.log(`${DIM}[forge]${RESET} Generating tests: batch ${BOLD}${batchIdx + 1}/${batches.length}${RESET} (${batch.length} spec${batch.length > 1 ? 's' : ''})\n`);
+        } else {
+          console.log(`${DIM}[forge]${RESET} Generating tests for ${BOLD}${specFiles.length}${RESET} spec${specFiles.length > 1 ? 's' : ''}\n`);
+        }
       }
+
+      // Build the prompt for this batch (include worktree diff for scoped generation)
+      const prompt = buildBatchPrompt(batch, specContents, outputDir, testConvention, options.prompt, worktreeDiff);
+
+      const startTime = new Date();
+
+      if (!quiet && isFork && effectiveResume) {
+        console.log(`${DIM}[forge]${RESET} Forking from: ${DIM}${effectiveResume}${RESET}`);
+      }
+
+      const qr = await runQuery({
+        prompt,
+        workingDir,
+        persistDir: persistBase !== workingDir ? persistBase : undefined,
+        model: effectiveModel,
+        maxTurns: effectiveMaxTurns,
+        maxBudgetUsd: effectiveMaxBudgetUsd,
+        verbose,
+        quiet,
+        silent: false,
+        auditLogExtra: { type: 'proof', spec: batch.length === 1 ? batch[0] : `batch-${batchIdx + 1}` },
+        sessionExtra: { type: 'proof', ...(isFork && { forkedFrom: options.fork }) },
+        resume: effectiveResume,
+        forkSession: isFork,
+      });
+
+      const endTime = new Date();
+      const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
+
+      const forgeResult: ForgeResult = {
+        startedAt: startTime.toISOString(),
+        completedAt: endTime.toISOString(),
+        durationSeconds,
+        status: 'success',
+        costUsd: qr.costUsd,
+        specPath: singleFile ? path.join(resolvedSpecDir, specFiles[0]) : resolvedSpecDir,  // ForgeResult uses specPath (single path for result metadata)
+        prompt: '(proof)',
+        model: effectiveModel,
+        cwd: workingDir,
+        sessionId: qr.sessionId,
+        forkedFrom: isFork ? options.fork : undefined,
+        type: 'proof',
+      };
+
+      await saveResult(persistBase, forgeResult, qr.resultText);
+
+      totalCost += qr.costUsd ?? 0;
+      totalDuration += durationSeconds;
     }
 
-    // Build the prompt for this batch
-    const prompt = buildBatchPrompt(batch, specContents, outputDir, testConvention, options.prompt);
-
-    const startTime = new Date();
-
-    if (!quiet && isFork && effectiveResume) {
-      console.log(`${DIM}[forge]${RESET} Forking from: ${DIM}${effectiveResume}${RESET}`);
+    // Transition worktree to proofed on successful completion
+    if (worktreeId) {
+      const db = getDb(persistBase);
+      if (db) transitionWorktreeStatus(db, worktreeId, 'proofed');
     }
-
-    const qr = await runQuery({
-      prompt,
-      workingDir,
-      persistDir: persistBase !== workingDir ? persistBase : undefined,
-      model: effectiveModel,
-      maxTurns: effectiveMaxTurns,
-      maxBudgetUsd: effectiveMaxBudgetUsd,
-      verbose,
-      quiet,
-      silent: false,
-      auditLogExtra: { type: 'proof', spec: batch.length === 1 ? batch[0] : `batch-${batchIdx + 1}` },
-      sessionExtra: { type: 'proof', ...(isFork && { forkedFrom: options.fork }) },
-      resume: effectiveResume,
-      forkSession: isFork,
-    });
-
-    const endTime = new Date();
-    const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
-
-    const forgeResult: ForgeResult = {
-      startedAt: startTime.toISOString(),
-      completedAt: endTime.toISOString(),
-      durationSeconds,
-      status: 'success',
-      costUsd: qr.costUsd,
-      specPath: singleFile ? path.join(resolvedSpecDir, specFiles[0]) : resolvedSpecDir,  // ForgeResult uses specPath (single path for result metadata)
-      prompt: '(proof)',
-      model: effectiveModel,
-      cwd: workingDir,
-      sessionId: qr.sessionId,
-      forkedFrom: isFork ? options.fork : undefined,
-      type: 'proof',
-    };
-
-    await saveResult(persistBase, forgeResult, qr.resultText);
-
-    totalCost += qr.costUsd ?? 0;
-    totalDuration += durationSeconds;
+  } catch (error) {
+    // Transition worktree to failed on unexpected errors
+    if (worktreeId) {
+      const db = getDb(persistBase);
+      if (db) transitionWorktreeStatus(db, worktreeId, 'failed', error instanceof Error ? error.message : String(error));
+    }
+    throw error;
   }
 
   // Read manifest to report results

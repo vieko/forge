@@ -26,11 +26,11 @@ import { runProof as realRunProof } from './proof.js';
 import { runVerify as realRunVerify } from './proof-runner.js';
 import { resolveWorkingDir, ForgeError, sleep, createWorktree, commitWorktree, cleanupWorktree } from './utils.js';
 import { isInterrupted } from './abort.js';
-import { getConfig } from './config.js';
-import { resolveSetupCommands, resolveTeardownCommands, runWorkspaceHooks } from './workspace.js';
+import { setupWorktree, teardownWorktree } from './workspace.js';
+import { getDb } from './db.js';
 import { promises as fs } from 'fs';
 import path from 'path';
-import type { ForgeResult, ProofManifest } from './types.js';
+import type { ProofManifest } from './types.js';
 
 // ── Constants ────────────────────────────────────────────────
 
@@ -133,33 +133,19 @@ function propagateArtifacts(pipeline: Pipeline, currentStage: StageName): void {
 }
 
 /**
- * Scan .forge/results/ for result summaries created after `sinceMs`
- * and return the total cost. Uses file modification time for filtering.
+ * Query the runs table for total cost of runs created after `sinceMs`.
+ * Falls back to 0 if the database is unavailable.
  */
-async function extractCostFromResults(cwd: string, sinceMs: number): Promise<number> {
-  const resultsBase = path.join(cwd, '.forge', 'results');
-  let dirs: string[];
-  try {
-    dirs = await fs.readdir(resultsBase);
-  } catch {
-    return 0;
-  }
+function extractCostFromRuns(cwd: string, sinceMs: number): number {
+  const db = getDb(cwd);
+  if (!db) return 0;
 
-  let total = 0;
-  for (const dir of dirs) {
-    try {
-      const summaryPath = path.join(resultsBase, dir, 'summary.json');
-      const stat = await fs.stat(summaryPath);
-      if (stat.mtimeMs < sinceMs) continue;
-      const summary: ForgeResult = JSON.parse(
-        await fs.readFile(summaryPath, 'utf-8'),
-      );
-      if (summary.costUsd) total += summary.costUsd;
-    } catch {
-      continue;
-    }
-  }
-  return total;
+  const sinceIso = new Date(sinceMs).toISOString();
+  const row = db.query(
+    'SELECT COALESCE(SUM(costUsd), 0) as totalCost FROM runs WHERE createdAt >= ?',
+  ).get(sinceIso) as { totalCost: number } | null;
+
+  return row?.totalCost ?? 0;
 }
 
 /** List .md files in a directory, sorted alphabetically. */
@@ -177,7 +163,7 @@ async function scanMdFiles(dir: string): Promise<string[]> {
 /**
  * Creates an ExecutionProvider that wraps the existing forge
  * functions (runDefine, runForge, runAudit, runProof, runVerify)
- * without modifying them. Extracts cost from .forge/results/ and
+ * without modifying them. Extracts cost from the DB runs table and
  * artifacts from the filesystem after each call.
  */
 export function createDefaultExecutionProvider(): ExecutionProvider {
@@ -201,7 +187,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
       });
 
       const persistBase = options.persistDir || cwd;
-      const cost = await extractCostFromResults(persistBase, before);
+      const cost = extractCostFromRuns(persistBase, before);
       const specs = await scanMdFiles(outputDir);
 
       return {
@@ -237,7 +223,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
         verbose: options.verbose,
       });
 
-      const cost = await extractCostFromResults(persistBase, before);
+      const cost = extractCostFromRuns(persistBase, before);
 
       return {
         cost,
@@ -268,7 +254,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
         fix: true,
       });
 
-      const cost = await extractCostFromResults(persistBase, before);
+      const cost = extractCostFromRuns(persistBase, before);
 
       // Check for remediation specs produced by the audit fix loop
       const remediationDir = path.join(resolvedSpecDir, 'remediation');
@@ -310,7 +296,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
         verbose: options.verbose,
       });
 
-      const cost = await extractCostFromResults(persistBase, before);
+      const cost = extractCostFromRuns(persistBase, before);
 
       // Read manifest to get accurate proof count
       let proofCount = 0;
@@ -352,7 +338,7 @@ export function createDefaultExecutionProvider(): ExecutionProvider {
         quiet: options.quiet,
       });
 
-      const cost = await extractCostFromResults(persistBase, before);
+      const cost = extractCostFromRuns(persistBase, before);
 
       return {
         cost,
@@ -457,6 +443,11 @@ export async function runPipeline(
     pipeline = await stateProvider.createPipeline(options);
   }
 
+  // ── Record process PID for stale pipeline detection ────────
+  pipeline.pid = process.pid;
+  pipeline.updatedAt = new Date().toISOString();
+  await stateProvider.savePipeline(pipeline);
+
   // ── Apply user gate overrides ──────────────────────────────
   if (options.gates) {
     for (const [key, type] of Object.entries(options.gates)) {
@@ -510,49 +501,47 @@ export async function runPipeline(
     }
 
     // ── Run workspace setup hooks ─────────────────────────────
-    const config = getConfig(originalCwd);
-    const setupCommands = await resolveSetupCommands(worktreePath, config);
+    const setupResult = await setupWorktree(worktreePath, originalCwd, { quiet: options.quiet });
 
-    if (setupCommands.length > 0) {
-      if (!options.quiet) {
-        console.log(`\x1b[2m[forge]\x1b[0m Running workspace setup (${setupCommands.length} command${setupCommands.length > 1 ? 's' : ''})...`);
+    if (setupResult && !setupResult.success) {
+      // Setup failed -- mark pipeline and first stage as failed, then clean up worktree
+      const errorMsg = `Workspace setup failed: ${setupResult.failedCommand}\n${setupResult.output}`;
+      pipeline.status = 'failed';
+      pipeline.stages[0].status = 'failed';
+      pipeline.updatedAt = new Date().toISOString();
+      await stateProvider.savePipeline(pipeline);
+
+      await events.publish({
+        type: 'pipeline_failed',
+        pipelineId: pipeline.id,
+        timestamp: new Date().toISOString(),
+        stage: 'define',
+        error: errorMsg,
+      });
+
+      // Best-effort worktree cleanup after setup failure
+      try {
+        await cleanupWorktree(worktreePath, originalCwd);
+      } catch {
+        // Best effort
       }
 
-      const setupResult = await runWorkspaceHooks(
-        setupCommands,
-        worktreePath,
-        config.setupTimeout,
-        options.quiet,
-      );
+      return pipeline;
+    }
 
-      if (!setupResult.success) {
-        // Setup failed -- mark pipeline as failed and clean up worktree
-        const errorMsg = `Workspace setup failed: ${setupResult.failedCommand}\n${setupResult.output}`;
-        pipeline.status = 'failed';
-        pipeline.updatedAt = new Date().toISOString();
-        await stateProvider.savePipeline(pipeline);
+    if (setupResult) {
+      // Persist setup output for debugging (truncate to 10KB)
+      const MAX_HOOK_OUTPUT = 10 * 1024;
+      const setupOutput = setupResult.output.length > MAX_HOOK_OUTPUT
+        ? setupResult.output.slice(0, MAX_HOOK_OUTPUT) + '\n... (truncated)'
+        : setupResult.output;
 
-        await events.publish({
-          type: 'pipeline_failed',
-          pipelineId: pipeline.id,
-          timestamp: new Date().toISOString(),
-          stage: 'define',
-          error: errorMsg,
-        });
-
-        // Best-effort worktree cleanup after setup failure
-        try {
-          await cleanupWorktree(worktreePath, originalCwd);
-        } catch {
-          // Best effort
-        }
-
-        return pipeline;
-      }
-
-      if (!options.quiet) {
-        console.log(`\x1b[2m[forge]\x1b[0m Workspace setup complete`);
-      }
+      await events.publish({
+        type: 'workspace_setup',
+        pipelineId: pipeline.id,
+        timestamp: new Date().toISOString(),
+        output: setupOutput,
+      });
     }
   } else if (pipeline.worktreePath) {
     // Resuming: verify the worktree still exists
@@ -567,6 +556,49 @@ export async function runPipeline(
         pipeline.branch = branch;
         pipeline.updatedAt = new Date().toISOString();
         await stateProvider.savePipeline(pipeline);
+
+        // Run workspace setup hooks in the recreated worktree
+        const setupResult = await setupWorktree(worktreePath, originalCwd, { quiet: options.quiet });
+
+        if (setupResult && !setupResult.success) {
+          const errorMsg = `Workspace setup failed on resume: ${setupResult.failedCommand}\n${setupResult.output}`;
+          pipeline.status = 'failed';
+          pipeline.stages[0].status = 'failed';
+          pipeline.updatedAt = new Date().toISOString();
+          await stateProvider.savePipeline(pipeline);
+
+          await events.publish({
+            type: 'pipeline_failed',
+            pipelineId: pipeline.id,
+            timestamp: new Date().toISOString(),
+            stage: 'define',
+            error: errorMsg,
+          });
+
+          // Best-effort worktree cleanup after setup failure
+          try {
+            await cleanupWorktree(worktreePath, originalCwd);
+          } catch {
+            // Best effort
+          }
+
+          return pipeline;
+        }
+
+        if (setupResult) {
+          // Persist setup output for debugging (truncate to 10KB)
+          const MAX_HOOK_OUTPUT = 10 * 1024;
+          const setupOutput = setupResult.output.length > MAX_HOOK_OUTPUT
+            ? setupResult.output.slice(0, MAX_HOOK_OUTPUT) + '\n... (truncated)'
+            : setupResult.output;
+
+          await events.publish({
+            type: 'workspace_setup',
+            pipelineId: pipeline.id,
+            timestamp: new Date().toISOString(),
+            output: setupOutput,
+          });
+        }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         pipeline.status = 'failed';
@@ -889,26 +921,23 @@ export async function runPipeline(
           }
         }
 
-        // Run teardown hooks before removing the worktree
+        // Run teardown hooks and clean up the worktree
         try {
-          const teardownConfig = getConfig(originalCwd);
-          const teardownCommands = resolveTeardownCommands(teardownConfig);
+          const teardownResult = await teardownWorktree(pipeline.worktreePath, originalCwd, { quiet: options.quiet });
 
-          if (teardownCommands.length > 0) {
-            if (!options.quiet) {
-              console.log(`\x1b[2m[forge]\x1b[0m Running workspace teardown (${teardownCommands.length} command${teardownCommands.length > 1 ? 's' : ''})...`);
-            }
+          if (teardownResult) {
+            // Persist teardown output for debugging (truncate to 10KB)
+            const MAX_TEARDOWN_OUTPUT = 10 * 1024;
+            const teardownOutput = teardownResult.output.length > MAX_TEARDOWN_OUTPUT
+              ? teardownResult.output.slice(0, MAX_TEARDOWN_OUTPUT) + '\n... (truncated)'
+              : teardownResult.output;
 
-            const teardownResult = await runWorkspaceHooks(
-              teardownCommands,
-              pipeline.worktreePath,
-              teardownConfig.setupTimeout,
-              options.quiet,
-            );
-
-            if (!teardownResult.success && !options.quiet) {
-              console.log(`\x1b[2m[forge]\x1b[0m Teardown warning: ${teardownResult.failedCommand}`);
-            }
+            await events.publish({
+              type: 'workspace_teardown',
+              pipelineId: pipeline.id,
+              timestamp: new Date().toISOString(),
+              output: teardownOutput,
+            });
           }
         } catch {
           // Best effort — don't fail the pipeline on teardown error

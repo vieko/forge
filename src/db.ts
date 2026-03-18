@@ -3,11 +3,12 @@
 // Lazy-initialized SQLite database using bun:sqlite with WAL mode.
 // Provides schema versioning with sequential migrations.
 // The database is local-only (.forge/forge.db) and gitignored.
-// All tables are derived indexes — filesystem state remains authoritative.
+// The sessions table is the primary store for session metadata.
+// The runs table is the primary store for run results.
 
 import { Database } from 'bun:sqlite';
 import path from 'path';
-import { promises as fs } from 'fs';
+import { promises as fs, statSync, mkdirSync } from 'fs';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -204,6 +205,103 @@ export const migrations: Migration[] = [
       db.run('CREATE INDEX IF NOT EXISTS idx_tasks_source ON tasks(source)');
     },
   },
+
+  // Version 8: Add pid column to pipelines table for stale pipeline detection
+  {
+    version: 8,
+    up: (db: Database) => {
+      db.run(`ALTER TABLE pipelines ADD COLUMN pid INTEGER`);
+    },
+  },
+
+  // Version 9: spec_entries and spec_runs tables — DB-primary spec lifecycle tracking
+  {
+    version: 9,
+    up: (db: Database) => {
+      db.run(`
+        CREATE TABLE IF NOT EXISTS spec_entries (
+          id TEXT PRIMARY KEY,
+          spec TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL DEFAULT 'pending',
+          source TEXT NOT NULL DEFAULT 'file',
+          work_group_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+      `);
+      db.run('CREATE INDEX IF NOT EXISTS idx_spec_entries_status ON spec_entries(status)');
+      db.run('CREATE INDEX IF NOT EXISTS idx_spec_entries_work_group_id ON spec_entries(work_group_id)');
+
+      db.run(`
+        CREATE TABLE IF NOT EXISTS spec_runs (
+          id TEXT PRIMARY KEY,
+          spec_entry_id TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          timestamp TEXT NOT NULL,
+          status TEXT NOT NULL,
+          cost_usd REAL,
+          duration_seconds REAL,
+          num_turns INTEGER,
+          verify_attempts INTEGER,
+          FOREIGN KEY (spec_entry_id) REFERENCES spec_entries(id)
+        )
+      `);
+      db.run('CREATE INDEX IF NOT EXISTS idx_spec_runs_spec_entry_id ON spec_runs(spec_entry_id)');
+      db.run('CREATE INDEX IF NOT EXISTS idx_spec_runs_run_id ON spec_runs(run_id)');
+    },
+  },
+
+  // Version 10: worktrees table — registry for worktree lifecycle tracking
+  //
+  // NOTE: Migration versions 10 and 11 are defined here, but the worktrees
+  // table (v10) was the last migration before the consolidations guard (v11).
+  {
+    version: 10,
+    up: (db: Database) => {
+      db.run(`
+        CREATE TABLE IF NOT EXISTS worktrees (
+          id TEXT PRIMARY KEY,
+          work_group_id TEXT,
+          spec_path TEXT NOT NULL,
+          spec_paths TEXT NOT NULL DEFAULT '[]',
+          branch TEXT NOT NULL,
+          worktree_path TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'created' CHECK (
+            status IN (
+              'created', 'running', 'complete', 'failed',
+              'auditing', 'audited', 'proofing', 'proofed',
+              'ready', 'paused', 'merging', 'merge_failed', 'merged', 'cleaned'
+            )
+          ),
+          linear_issue_id TEXT,
+          pid INTEGER,
+          task_id TEXT,
+          session_id TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+      `);
+      db.run('CREATE INDEX IF NOT EXISTS idx_worktrees_status ON worktrees(status)');
+      db.run('CREATE INDEX IF NOT EXISTS idx_worktrees_work_group_id ON worktrees(work_group_id)');
+      db.run('CREATE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(branch)');
+      db.run('CREATE INDEX IF NOT EXISTS idx_worktrees_task_id ON worktrees(task_id)');
+    },
+  },
+
+  // Version 11: consolidations table — PID-based concurrency guard for forge consolidate
+  {
+    version: 11,
+    up: (db: Database) => {
+      db.run(`
+        CREATE TABLE IF NOT EXISTS consolidations (
+          work_group_id TEXT PRIMARY KEY,
+          pid INTEGER NOT NULL,
+          started_at TEXT NOT NULL
+        )
+      `);
+    },
+  },
 ];
 
 // ── Schema initialization ────────────────────────────────────
@@ -277,10 +375,10 @@ export function getDb(workingDir: string): Database | null {
     // Ensure .forge/ directory exists (sync for simplicity — getDb is lazy)
     const forgeDir = path.join(workingDir, '.forge');
     try {
-      const stat = require('fs').statSync(forgeDir);
-      if (!stat.isDirectory()) return null;
+      const st = statSync(forgeDir);
+      if (!st.isDirectory()) return null;
     } catch {
-      require('fs').mkdirSync(forgeDir, { recursive: true });
+      mkdirSync(forgeDir, { recursive: true });
     }
 
     const db = new Database(resolved);
@@ -304,7 +402,7 @@ export function getDb(workingDir: string): Database | null {
   } catch (err) {
     // Graceful degradation: warn and return null
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[forge] SQLite unavailable, falling back to filesystem: ${message}`);
+    console.warn(`[forge] SQLite unavailable: ${message}`);
     return null;
   }
 }
@@ -396,7 +494,7 @@ export interface RunRow {
 
 /**
  * Insert a run into the runs table. Uses INSERT OR IGNORE so
- * backfill is idempotent (duplicate IDs are silently skipped).
+ * duplicate IDs are silently skipped (idempotent).
  */
 export function insertRun(db: Database, row: RunRow): void {
   db.run(
@@ -560,78 +658,6 @@ export function queryStatusRuns(db: Database): StatusRunRow[] {
   return rows;
 }
 
-/**
- * Backfill existing .forge/results/ summary.json files into the runs table.
- * Idempotent — uses INSERT OR IGNORE so duplicates are silently skipped.
- * Called on first DB access when the runs table is empty.
- */
-export async function backfillRuns(db: Database, workingDir: string): Promise<number> {
-  const resultsBase = path.join(workingDir, '.forge', 'results');
-
-  let dirs: string[];
-  try {
-    dirs = await fs.readdir(resultsBase);
-  } catch {
-    return 0;
-  }
-
-  let count = 0;
-  for (const dir of dirs) {
-    try {
-      const content = await fs.readFile(
-        path.join(resultsBase, dir, 'summary.json'),
-        'utf-8',
-      );
-      const summary = JSON.parse(content) as Record<string, unknown>;
-
-      insertRun(db, {
-        id: dir, // timestamp directory name
-        specPath: (summary.specPath as string) || null,
-        model: (summary.model as string) || 'unknown',
-        status: (summary.status as string) || 'error_execution',
-        costUsd: (summary.costUsd as number) ?? null,
-        durationSeconds: (summary.durationSeconds as number) || 0,
-        numTurns: (summary.numTurns as number) ?? null,
-        toolCalls: (summary.toolCalls as number) ?? null,
-        batchId: (summary.runId as string) || null,
-        type: (summary.type as string) || null,
-        prompt: (summary.prompt as string) || '',
-        cwd: (summary.cwd as string) || workingDir,
-        sessionId: (summary.sessionId as string) || null,
-        error: (summary.error as string) || null,
-        createdAt: (summary.startedAt as string) || new Date().toISOString(),
-      });
-      count++;
-    } catch {
-      continue;
-    }
-  }
-
-  return count;
-}
-
-/**
- * Ensure the runs table is populated. If the table is empty but
- * filesystem results exist, run the backfill migration.
- * Returns the database instance (or null if unavailable).
- */
-export async function getDbWithBackfill(workingDir: string): Promise<Database | null> {
-  const db = getDb(workingDir);
-  if (!db) return null;
-
-  try {
-    // Check if runs table exists and is empty
-    const row = db.query('SELECT COUNT(*) as count FROM runs').get() as { count: number };
-    if (row.count === 0) {
-      await backfillRuns(db, workingDir);
-    }
-  } catch {
-    // Table might not exist yet if migration hasn't run — that shouldn't happen
-    // since getDb runs migrations, but handle gracefully
-  }
-
-  return db;
-}
 
 // ── Sessions table helpers ────────────────────────────────────
 
@@ -650,7 +676,7 @@ export interface SessionRow {
 
 /**
  * Insert a session row when a session starts.
- * Uses INSERT OR IGNORE so backfill is idempotent.
+ * Uses INSERT OR IGNORE so duplicate IDs are silently skipped (idempotent).
  */
 export function insertSession(db: Database, row: {
   id: string;
@@ -730,144 +756,6 @@ export function queryAllSessions(db: Database, limit?: number): SessionRow[] {
   ).all() as SessionRow[];
 }
 
-/**
- * Backfill sessions from existing .forge/results/ and .forge/sessions/ data.
- * Reads summary.json for completed sessions and events.jsonl first lines
- * for richer metadata (commandType, specPath from session_start event).
- * Idempotent via INSERT OR IGNORE.
- */
-export async function backfillSessions(db: Database, workingDir: string): Promise<number> {
-  let count = 0;
-
-  // Phase 1: Backfill from .forge/results/*/summary.json (completed sessions)
-  const resultsBase = path.join(workingDir, '.forge', 'results');
-  try {
-    const dirs = await fs.readdir(resultsBase);
-    for (const dir of dirs) {
-      try {
-        const content = await fs.readFile(
-          path.join(resultsBase, dir, 'summary.json'),
-          'utf-8',
-        );
-        const summary = JSON.parse(content) as Record<string, unknown>;
-        const sessionId = summary.sessionId as string | undefined;
-        if (!sessionId) continue;
-
-        // Try to enrich from events.jsonl first line (has commandType, specPath)
-        let commandType: string | null = null;
-        let specPathFromEvent: string | null = null;
-        const eventsPath = path.join(workingDir, '.forge', 'sessions', sessionId, 'events.jsonl');
-        try {
-          const eventsRaw = await fs.readFile(eventsPath, 'utf-8');
-          const firstNewline = eventsRaw.indexOf('\n');
-          const firstLine = firstNewline > 0 ? eventsRaw.substring(0, firstNewline) : eventsRaw.trim();
-          if (firstLine) {
-            const startEvent = JSON.parse(firstLine) as Record<string, unknown>;
-            if (startEvent.type === 'session_start') {
-              commandType = (startEvent.commandType as string) || null;
-              specPathFromEvent = (startEvent.specPath as string) || null;
-            }
-          }
-        } catch {
-          // events.jsonl not available — use summary.json fields
-        }
-
-        insertSession(db, {
-          id: sessionId,
-          specPath: specPathFromEvent ?? (summary.specPath as string) ?? null,
-          pipelineId: null, // Not available in historical data
-          commandType: commandType ?? (summary.type as string) ?? null,
-          model: (summary.model as string) ?? null,
-          startedAt: (summary.startedAt as string) || new Date().toISOString(),
-        });
-
-        // Update with completion data
-        updateSession(db, sessionId, {
-          status: (summary.status as string) || 'error_execution',
-          costUsd: (summary.costUsd as number) ?? null,
-          endedAt: (summary.completedAt as string) || new Date().toISOString(),
-        });
-
-        count++;
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    // No results directory
-  }
-
-  // Phase 2: Backfill from .forge/sessions/ directories (may include sessions without results)
-  const sessionsBase = path.join(workingDir, '.forge', 'sessions');
-  try {
-    const sessionDirs = await fs.readdir(sessionsBase);
-    for (const sid of sessionDirs) {
-      const eventsPath = path.join(sessionsBase, sid, 'events.jsonl');
-      try {
-        const eventsRaw = await fs.readFile(eventsPath, 'utf-8');
-
-        // Parse first line for session_start metadata
-        const firstNewline = eventsRaw.indexOf('\n');
-        const firstLine = firstNewline > 0 ? eventsRaw.substring(0, firstNewline) : eventsRaw.trim();
-        if (!firstLine) continue;
-
-        const startEvent = JSON.parse(firstLine) as Record<string, unknown>;
-        if (startEvent.type !== 'session_start') continue;
-
-        insertSession(db, {
-          id: sid,
-          specPath: (startEvent.specPath as string) || null,
-          pipelineId: null,
-          commandType: (startEvent.commandType as string) || null,
-          model: (startEvent.model as string) || null,
-          startedAt: (startEvent.timestamp as string) || new Date().toISOString(),
-        });
-
-        // Parse last line for session_end
-        const trimmed = eventsRaw.trimEnd();
-        const lastNewline = trimmed.lastIndexOf('\n');
-        const lastLine = lastNewline >= 0 ? trimmed.substring(lastNewline + 1) : trimmed;
-        if (lastLine && lastLine !== firstLine) {
-          try {
-            const endEvent = JSON.parse(lastLine) as Record<string, unknown>;
-            if (endEvent.type === 'session_end') {
-              updateSession(db, sid, {
-                status: (endEvent.status as string) || 'error_execution',
-                costUsd: (endEvent.costUsd as number) ?? null,
-                endedAt: (endEvent.timestamp as string) || new Date().toISOString(),
-              });
-            }
-          } catch {
-            // Last line not valid JSON — session may still be running
-          }
-        }
-
-        count++;
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    // No sessions directory
-  }
-
-  return count;
-}
-
-/**
- * Ensure the sessions table is populated. If the table is empty but
- * filesystem data exists, run the backfill.
- */
-export async function ensureSessionsBackfill(db: Database, workingDir: string): Promise<void> {
-  try {
-    const row = db.query('SELECT COUNT(*) as count FROM sessions').get() as { count: number };
-    if (row.count === 0) {
-      await backfillSessions(db, workingDir);
-    }
-  } catch {
-    // Table might not exist — handle gracefully
-  }
-}
 
 // ── Gitignore helper ─────────────────────────────────────────
 
@@ -1187,4 +1075,578 @@ export function claimTask(db: Database, taskId: string, pid: number): boolean {
     | { status: string; pid: number | null }
     | null;
   return row?.status === 'running' && row?.pid === pid;
+}
+
+// ── Spec Entries table helpers ────────────────────────────────
+
+/** Row shape for the spec_entries table. */
+export interface SpecEntryRow {
+  id: string;
+  spec: string;
+  status: string;
+  source: string;
+  work_group_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Insert a spec entry. Uses INSERT OR IGNORE so duplicate IDs are silently skipped.
+ */
+export function insertSpecEntry(db: Database, entry: {
+  id: string;
+  spec: string;
+  status?: string;
+  source?: string;
+  work_group_id?: string | null;
+}): void {
+  const now = new Date().toISOString();
+  db.run(
+    `INSERT OR IGNORE INTO spec_entries (id, spec, status, source, work_group_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      entry.id,
+      entry.spec,
+      entry.status ?? 'pending',
+      entry.source ?? 'file',
+      entry.work_group_id ?? null,
+      now,
+      now,
+    ],
+  );
+}
+
+/**
+ * Get a spec entry by its ID. Returns null if not found.
+ */
+export function getSpecEntry(db: Database, id: string): SpecEntryRow | null {
+  return db.query('SELECT * FROM spec_entries WHERE id = ?').get(id) as SpecEntryRow | null;
+}
+
+/**
+ * Get a spec entry by its spec path. Returns null if not found.
+ */
+export function getSpecEntryByPath(db: Database, specPath: string): SpecEntryRow | null {
+  return db.query('SELECT * FROM spec_entries WHERE spec = ?').get(specPath) as SpecEntryRow | null;
+}
+
+/**
+ * Update a spec entry's status. Refreshes updated_at.
+ */
+export function updateSpecEntryStatus(db: Database, id: string, status: string): void {
+  const now = new Date().toISOString();
+  db.run(
+    'UPDATE spec_entries SET status = ?, updated_at = ? WHERE id = ?',
+    [status, now, id],
+  );
+}
+
+/**
+ * List spec entries with optional status filter.
+ * Ordered by created_at ASC (registration order).
+ */
+export function listSpecEntries(db: Database, filter?: { status?: string; work_group_id?: string }): SpecEntryRow[] {
+  const conditions: string[] = [];
+  const params: string[] = [];
+
+  if (filter?.status) {
+    conditions.push('status = ?');
+    params.push(filter.status);
+  }
+  if (filter?.work_group_id) {
+    conditions.push('work_group_id = ?');
+    params.push(filter.work_group_id);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  return db.query(
+    `SELECT * FROM spec_entries ${whereClause} ORDER BY created_at ASC`,
+  ).all(...params) as SpecEntryRow[];
+}
+
+/**
+ * List spec entries for a given work group ID.
+ * Ordered by created_at ASC (registration order).
+ */
+export function listSpecEntriesByWorkGroup(db: Database, workGroupId: string): SpecEntryRow[] {
+  return db.query(
+    'SELECT * FROM spec_entries WHERE work_group_id = ? ORDER BY created_at ASC',
+  ).all(workGroupId) as SpecEntryRow[];
+}
+
+/**
+ * Delete a spec entry by its ID. Also deletes associated spec_runs (cascade).
+ */
+export function deleteSpecEntry(db: Database, id: string): void {
+  db.run('DELETE FROM spec_runs WHERE spec_entry_id = ?', [id]);
+  db.run('DELETE FROM spec_entries WHERE id = ?', [id]);
+}
+
+
+// ── Spec Runs table helpers ──────────────────────────────────
+
+/** Row shape for the spec_runs table. */
+export interface SpecRunRow {
+  id: string;
+  spec_entry_id: string;
+  run_id: string;
+  timestamp: string;
+  status: string;
+  cost_usd: number | null;
+  duration_seconds: number | null;
+  num_turns: number | null;
+  verify_attempts: number | null;
+}
+
+/**
+ * Insert a spec run. Uses INSERT OR IGNORE so duplicate IDs are silently skipped.
+ */
+export function insertSpecRun(db: Database, run: {
+  id: string;
+  spec_entry_id: string;
+  run_id: string;
+  timestamp: string;
+  status: string;
+  cost_usd?: number | null;
+  duration_seconds?: number | null;
+  num_turns?: number | null;
+  verify_attempts?: number | null;
+}): void {
+  db.run(
+    `INSERT OR IGNORE INTO spec_runs (id, spec_entry_id, run_id, timestamp, status, cost_usd, duration_seconds, num_turns, verify_attempts)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      run.id,
+      run.spec_entry_id,
+      run.run_id,
+      run.timestamp,
+      run.status,
+      run.cost_usd ?? null,
+      run.duration_seconds ?? null,
+      run.num_turns ?? null,
+      run.verify_attempts ?? null,
+    ],
+  );
+}
+
+/**
+ * Get all runs for a spec entry, ordered by timestamp DESC (most recent first).
+ */
+export function getSpecRunsByEntry(db: Database, specEntryId: string): SpecRunRow[] {
+  return db.query(
+    'SELECT * FROM spec_runs WHERE spec_entry_id = ? ORDER BY timestamp DESC',
+  ).all(specEntryId) as SpecRunRow[];
+}
+
+/**
+ * Get the latest run for a spec entry. Returns null if no runs exist.
+ */
+export function getLatestSpecRun(db: Database, specEntryId: string): SpecRunRow | null {
+  return db.query(
+    'SELECT * FROM spec_runs WHERE spec_entry_id = ? ORDER BY timestamp DESC LIMIT 1',
+  ).get(specEntryId) as SpecRunRow | null;
+}
+
+// ── Worktrees table helpers ──────────────────────────────────
+
+/** Valid status values for a worktree. */
+export type WorktreeStatus =
+  | 'created'
+  | 'running'
+  | 'complete'
+  | 'failed'
+  | 'auditing'
+  | 'audited'
+  | 'proofing'
+  | 'proofed'
+  | 'ready'
+  | 'paused'
+  | 'merging'
+  | 'merge_failed'
+  | 'merged'
+  | 'cleaned';
+
+/** Row shape for the worktrees table. */
+export interface WorktreeRow {
+  id: string;
+  work_group_id: string | null;
+  spec_path: string;
+  spec_paths: string;   // JSON array of spec paths
+  branch: string;
+  worktree_path: string;
+  status: WorktreeStatus;
+  linear_issue_id: string | null;
+  pid: number | null;
+  task_id: string | null;
+  session_id: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Insert a worktree into the worktrees table.
+ * Uses INSERT OR IGNORE so duplicate IDs are silently skipped (idempotent).
+ */
+export function insertWorktree(db: Database, worktree: {
+  id: string;
+  work_group_id?: string | null;
+  spec_path: string;
+  spec_paths?: string[];
+  branch: string;
+  worktree_path: string;
+  status?: WorktreeStatus;
+  linear_issue_id?: string | null;
+  pid?: number | null;
+  task_id?: string | null;
+  session_id?: string | null;
+  error?: string | null;
+}): void {
+  const now = new Date().toISOString();
+  db.run(
+    `INSERT OR IGNORE INTO worktrees
+      (id, work_group_id, spec_path, spec_paths, branch, worktree_path, status, linear_issue_id, pid, task_id, session_id, error, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      worktree.id,
+      worktree.work_group_id ?? null,
+      worktree.spec_path,
+      JSON.stringify(worktree.spec_paths ?? []),
+      worktree.branch,
+      worktree.worktree_path,
+      worktree.status ?? 'created',
+      worktree.linear_issue_id ?? null,
+      worktree.pid ?? null,
+      worktree.task_id ?? null,
+      worktree.session_id ?? null,
+      worktree.error ?? null,
+      now,
+      now,
+    ],
+  );
+}
+
+/**
+ * Get a worktree by its ID. Returns null if not found.
+ */
+export function getWorktree(db: Database, id: string): WorktreeRow | null {
+  return db.query('SELECT * FROM worktrees WHERE id = ?').get(id) as WorktreeRow | null;
+}
+
+/**
+ * Get a worktree by its filesystem path. Returns null if not found.
+ */
+export function getWorktreeByPath(db: Database, worktreePath: string): WorktreeRow | null {
+  return db.query(
+    'SELECT * FROM worktrees WHERE worktree_path = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+  ).get(worktreePath) as WorktreeRow | null;
+}
+
+/**
+ * Get a worktree by its branch name. Returns null if not found.
+ */
+export function getWorktreeByBranch(db: Database, branch: string): WorktreeRow | null {
+  return db.query(
+    'SELECT * FROM worktrees WHERE branch = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+  ).get(branch) as WorktreeRow | null;
+}
+
+/**
+ * Update a worktree's status. Optionally set error message (cleared on non-error transitions).
+ * Refreshes updated_at timestamp.
+ *
+ * NOTE: Prefer `transitionWorktreeStatus()` for enforced lifecycle transitions.
+ * This low-level function bypasses the state machine and should only be used
+ * for initial setup or tests that need direct status control.
+ */
+export function updateWorktreeStatus(db: Database, id: string, status: WorktreeStatus, error?: string | null): void {
+  const now = new Date().toISOString();
+  db.run(
+    'UPDATE worktrees SET status = ?, error = ?, updated_at = ? WHERE id = ?',
+    [status, error ?? null, now, id],
+  );
+}
+
+/**
+ * Update a worktree's spec_paths JSON array.
+ * Used after spec discovery to record all individual spec file paths.
+ */
+export function updateWorktreeSpecPaths(db: Database, id: string, specPaths: string[]): void {
+  const now = new Date().toISOString();
+  db.run(
+    'UPDATE worktrees SET spec_paths = ?, updated_at = ? WHERE id = ?',
+    [JSON.stringify(specPaths), now, id],
+  );
+}
+
+// ── Worktree State Machine ──────────────────────────────────
+
+/**
+ * Valid status transitions for the worktree lifecycle.
+ *
+ * The lifecycle is user-paced: forge run sets `complete`, user triggers
+ * audit which sets `auditing`/`audited`, etc.
+ *
+ * Transitions:
+ *   created   -> running, failed (setup failure)
+ *   running   -> complete, failed
+ *   complete  -> auditing, proofing (skip audit), ready (skip audit+proof)
+ *   failed    -> created (retry -- resets to beginning of lifecycle)
+ *   auditing  -> audited, failed
+ *   audited   -> proofing
+ *   proofing  -> proofed, failed
+ *   proofed   -> ready
+ *   ready     -> merging
+ *   merging   -> merged, merge_failed (type-check failure), paused (git conflict)
+ *   paused    -> merging (resume after manual fix)
+ *   merge_failed -> ready (retry consolidation)
+ *   merged    -> cleaned
+ *   cleaned   -> (terminal)
+ */
+const VALID_TRANSITIONS: Record<WorktreeStatus, WorktreeStatus[]> = {
+  created:      ['running', 'failed'],
+  running:      ['complete', 'failed'],
+  complete:     ['auditing', 'proofing', 'ready'],
+  failed:       ['created'],
+  auditing:     ['audited', 'failed'],
+  audited:      ['proofing', 'ready'],
+  proofing:     ['proofed', 'failed'],
+  proofed:      ['ready'],
+  ready:        ['merging'],
+  merging:      ['merged', 'merge_failed', 'paused'],
+  paused:       ['merging'],
+  merge_failed: ['ready'],
+  merged:       ['cleaned'],
+  cleaned:      [],
+};
+
+/**
+ * Transition a worktree to a new status with state machine enforcement.
+ *
+ * Validates that the transition from the current status to `newStatus`
+ * is allowed by the lifecycle state machine. Throws an error on invalid
+ * transitions. Updates `updated_at` on every transition.
+ *
+ * Logs the transition to stderr for audit trail (captured in session
+ * stream.log when running inside a forge session).
+ *
+ * Returns the previous status for logging/audit purposes.
+ *
+ * @throws Error if the worktree is not found or the transition is invalid.
+ */
+export function transitionWorktreeStatus(
+  db: Database,
+  id: string,
+  newStatus: WorktreeStatus,
+  error?: string | null,
+): { previousStatus: WorktreeStatus } {
+  const row = getWorktree(db, id);
+  if (!row) {
+    throw new Error(`Worktree not found: ${id}`);
+  }
+
+  const currentStatus = row.status;
+  const allowed = VALID_TRANSITIONS[currentStatus];
+
+  if (!allowed || !allowed.includes(newStatus)) {
+    throw new Error(
+      `Invalid worktree transition: ${currentStatus} -> ${newStatus} ` +
+      `(allowed from ${currentStatus}: ${allowed?.length ? allowed.join(', ') : 'none'})`
+    );
+  }
+
+  const now = new Date().toISOString();
+  db.run(
+    'UPDATE worktrees SET status = ?, error = ?, updated_at = ? WHERE id = ?',
+    [newStatus, error ?? null, now, id],
+  );
+
+  // Log transition for session audit trail
+  const errorSuffix = error ? ` (${error})` : '';
+  console.error(`[forge] worktree ${id}: ${currentStatus} -> ${newStatus}${errorSuffix}`);
+
+  return { previousStatus: currentStatus };
+}
+
+/**
+ * Get the valid transitions from a given worktree status.
+ * Useful for UI display and validation feedback.
+ */
+export function getValidTransitions(status: WorktreeStatus): WorktreeStatus[] {
+  return VALID_TRANSITIONS[status] ?? [];
+}
+
+/**
+ * List all worktrees, optionally filtered by status.
+ * Ordered by created_at DESC (newest first).
+ */
+export function listWorktrees(db: Database, status?: WorktreeStatus): WorktreeRow[] {
+  if (status) {
+    return db.query(
+      'SELECT * FROM worktrees WHERE status = ? ORDER BY created_at DESC, rowid DESC',
+    ).all(status) as WorktreeRow[];
+  }
+  return db.query(
+    'SELECT * FROM worktrees ORDER BY created_at DESC, rowid DESC',
+  ).all() as WorktreeRow[];
+}
+
+/**
+ * Get all worktrees belonging to a work group.
+ * Ordered by created_at ASC (oldest first, preserving creation order).
+ */
+export function getWorktreesByWorkGroup(db: Database, workGroupId: string): WorktreeRow[] {
+  return db.query(
+    'SELECT * FROM worktrees WHERE work_group_id = ? ORDER BY created_at ASC',
+  ).all(workGroupId) as WorktreeRow[];
+}
+
+/**
+ * Update a task's params JSON.
+ * Used by the executor to store worktree path after creation.
+ * Refreshes updatedAt as heartbeat.
+ */
+export function updateTaskParams(db: Database, id: string, params: Record<string, unknown>): void {
+  const now = new Date().toISOString();
+  db.run(
+    'UPDATE tasks SET params = ?, updatedAt = ? WHERE id = ?',
+    [JSON.stringify(params), now, id],
+  );
+}
+
+/**
+ * Update a worktree's PID (executor process managing it).
+ * Refreshes updated_at.
+ */
+export function updateWorktreePid(db: Database, id: string, pid: number): void {
+  const now = new Date().toISOString();
+  db.run(
+    'UPDATE worktrees SET pid = ?, updated_at = ? WHERE id = ?',
+    [pid, now, id],
+  );
+}
+
+/**
+ * Link a worktree to a task (executor-dispatched).
+ * Sets the task_id and refreshes updated_at.
+ */
+export function linkWorktreeTask(db: Database, id: string, taskId: string): void {
+  const now = new Date().toISOString();
+  db.run(
+    'UPDATE worktrees SET task_id = ?, updated_at = ? WHERE id = ?',
+    [taskId, now, id],
+  );
+}
+
+/**
+ * Link a worktree to an SDK session.
+ * Sets the session_id and refreshes updated_at.
+ */
+export function linkWorktreeSession(db: Database, id: string, sessionId: string): void {
+  const now = new Date().toISOString();
+  db.run(
+    'UPDATE worktrees SET session_id = ?, updated_at = ? WHERE id = ?',
+    [sessionId, now, id],
+  );
+}
+
+/**
+ * Query sessions associated with a worktree, ordered by startedAt ASC.
+ *
+ * Association resolved via two paths:
+ * 1. Direct link: worktrees.session_id matches sessions.id
+ * 2. Task-based: sessions joined through tasks where tasks.cwd = worktree.worktree_path
+ *
+ * Returns deduplicated sessions sorted chronologically (oldest first) so the
+ * watch command can tail them in order.
+ */
+export function querySessionsByWorktree(db: Database, worktreeId: string): SessionRow[] {
+  return db.query(`
+    SELECT DISTINCT s.* FROM sessions s
+    WHERE s.id IN (
+      -- Path 1: direct worktree.session_id link
+      SELECT w.session_id FROM worktrees w
+      WHERE w.id = ? AND w.session_id IS NOT NULL
+      UNION
+      -- Path 2: sessions linked through tasks running in the worktree path
+      SELECT t.sessionId FROM tasks t
+      JOIN worktrees w ON w.id = ? AND t.cwd = w.worktree_path
+      WHERE t.sessionId IS NOT NULL
+    )
+    ORDER BY s.startedAt ASC
+  `).all(worktreeId, worktreeId) as SessionRow[];
+}
+
+// ── Consolidation concurrency guard ──────────────────────────
+
+/** Row shape for the consolidations table. */
+export interface ConsolidationRow {
+  work_group_id: string;
+  pid: number;
+  started_at: string;
+}
+
+/**
+ * Check if a PID is alive (process exists).
+ * Uses signal 0 which checks existence without sending a signal.
+ */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Acquire the consolidation lock for a work group.
+ *
+ * Returns `{ acquired: true }` if the lock was taken.
+ * Returns `{ acquired: false, activePid }` if another live process holds the lock.
+ * Clears stale locks (dead PID) before acquiring.
+ */
+export function acquireConsolidationLock(
+  db: Database,
+  workGroupId: string,
+): { acquired: true } | { acquired: false; activePid: number } {
+  const existing = db.query(
+    'SELECT * FROM consolidations WHERE work_group_id = ?',
+  ).get(workGroupId) as ConsolidationRow | null;
+
+  if (existing) {
+    if (isPidAlive(existing.pid)) {
+      // Another live process is consolidating this work group
+      return { acquired: false, activePid: existing.pid };
+    }
+    // Stale PID -- clear and proceed
+    db.run('DELETE FROM consolidations WHERE work_group_id = ?', [workGroupId]);
+  }
+
+  const now = new Date().toISOString();
+  db.run(
+    'INSERT INTO consolidations (work_group_id, pid, started_at) VALUES (?, ?, ?)',
+    [workGroupId, process.pid, now],
+  );
+
+  return { acquired: true };
+}
+
+/**
+ * Release the consolidation lock for a work group.
+ * Only deletes if the lock is held by the current process (safety check).
+ */
+export function releaseConsolidationLock(db: Database, workGroupId: string): void {
+  db.run(
+    'DELETE FROM consolidations WHERE work_group_id = ? AND pid = ?',
+    [workGroupId, process.pid],
+  );
+}
+
+/**
+ * Release all consolidation locks held by the current process.
+ * Called during Ctrl-C shutdown to clean up any in-progress consolidations.
+ */
+export function releaseAllConsolidationLocks(db: Database): void {
+  db.run('DELETE FROM consolidations WHERE pid = ?', [process.pid]);
 }

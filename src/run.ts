@@ -1,16 +1,17 @@
 import type { ForgeOptions, ForgeResult, MonorepoContext } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
 import { ForgeError, resolveWorkingDir, resolveConfig, resolveSession, saveResult } from './utils.js';
 import { DIM, RESET, CMD, BOLD, printRunSummary } from './display.js';
 import { runVerification, detectMonorepo, determineAffectedPackages } from './verify.js';
 import { runQuery, streamLogAppend } from './core.js';
-import { withManifestLock, findOrCreateEntry, updateEntryStatus, specKey, pipeSpecId, resolveSpecSource } from './specs.js';
-import { getDb, insertCliTask, updateTaskStatus, updateTaskSessionId, cancelTask } from './db.js';
+import { parseScope } from './deps.js';
+import { withSpecTransaction, findOrCreateEntry, updateEntryStatus, specKey, pipeSpecId, resolveSpecSource } from './specs.js';
 import { isInterrupted } from './abort.js';
+import type { TaskContext } from './task-context.js';
+import { NoopTaskContext } from './task-context.js';
 
 /**
  * Count tool calls from audit.jsonl for a specific session.
@@ -90,9 +91,13 @@ export function isApiErrorResult(resultText: string): boolean {
   return false;
 }
 
-export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string; _resultDir?: string; _taskId?: string; _parentTaskId?: string }): Promise<ForgeResult> {
-  const { prompt, specPath, specContent, cwd, model, planModel, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir, _taskId, _parentTaskId } = options;
+export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string; _resultDir?: string; taskContext?: TaskContext }): Promise<ForgeResult> {
+  const { prompt, specPath, specContent, cwd, model, planModel, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir } = options;
   const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
+
+  // TaskContext: callers provide the appropriate implementation.
+  // Falls back to NoopTaskContext when none provided (e.g. bare CLI without DB).
+  const taskContext = options.taskContext ?? new NoopTaskContext();
 
   // Resolve and validate working directory
   const workingDir = await resolveWorkingDir(cwd);
@@ -109,26 +114,6 @@ export async function runSingleSpec(options: ForgeOptions & { specContent?: stri
   });
   const { model: effectiveModel, maxTurns: effectiveMaxTurns, maxBudgetUsd: effectiveMaxBudgetUsd, config } = resolved;
 
-  // ── CLI Task tracking ──────────────────────────────────────
-  // Insert a task record so CLI runs are visible in TUI, status, and stats.
-  // Use provided _taskId (from batch parent) or generate one.
-  const taskId = _taskId || crypto.randomUUID();
-  const db = getDb(resultDir);
-  if (db) {
-    try {
-      insertCliTask(db, {
-        id: taskId,
-        command: 'run',
-        description: prompt,
-        specPath: specPath ?? null,
-        cwd: workingDir,
-        parentTaskId: _parentTaskId ?? null,
-      });
-    } catch {
-      // Best effort — don't block execution if task insert fails
-    }
-  }
-
   // Read spec content if provided (and not already passed)
   let finalSpecContent: string | undefined = specContent;
   if (!finalSpecContent && specPath) {
@@ -140,14 +125,18 @@ export async function runSingleSpec(options: ForgeOptions & { specContent?: stri
   }
 
   // Detect monorepo and determine affected packages
+  // Parse optional scope from spec frontmatter for explicit package targeting
+  const specScope = finalSpecContent ? parseScope(finalSpecContent) : undefined;
+
   let monorepoContext: MonorepoContext | null = null;
   try {
     monorepoContext = await detectMonorepo(workingDir);
     if (monorepoContext) {
-      const affected = determineAffectedPackages(monorepoContext, specPath, finalSpecContent, workingDir);
+      const affected = determineAffectedPackages(monorepoContext, specPath, finalSpecContent, workingDir, specScope);
       monorepoContext = { ...monorepoContext, affected };
       if (!quiet && affected.length > 0) {
-        console.log(`${DIM}[forge]${RESET} Monorepo (${monorepoContext.type}): scoping to ${affected.join(', ')}`);
+        const scopeNote = specScope ? ` (scope: ${specScope})` : '';
+        console.log(`${DIM}[forge]${RESET} Monorepo (${monorepoContext.type}): scoping to ${affected.join(', ')}${scopeNote}`);
       } else if (!quiet && monorepoContext) {
         console.log(`${DIM}[forge]${RESET} Monorepo (${monorepoContext.type}): no affected packages detected, using unscoped verification`);
       }
@@ -292,12 +281,8 @@ Do not use emojis in your output.`;
     const durationSeconds = (endTime.getTime() - startTime.getTime()) / 1000;
 
     // Link session ID to task record
-    if (db && qr.sessionId) {
-      try {
-        updateTaskSessionId(db, taskId, qr.sessionId);
-      } catch {
-        // Best effort
-      }
+    if (qr.sessionId) {
+      taskContext.linkSession(qr.sessionId);
     }
 
     // Run verification (unless dry-run or plan-only)
@@ -385,17 +370,17 @@ ${verification.errors}
 forge run --resume ${qr.sessionId} "fix verification errors"
 \`\`\``;
 
-          const errorResultsDir = await saveResult(resultDir, forgeResult, errorResultText);
+          await saveResult(resultDir, forgeResult, errorResultText);
 
           // Update spec manifest on failure
           const failSpecId = specPath ? specKey(specPath, resultDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
           if (failSpecId) {
-            await withManifestLock(resultDir, (manifest) => {
+            await withSpecTransaction(resultDir, (manifest) => {
               const entry = findOrCreateEntry(manifest, failSpecId, resolveSpecSource(finalSpecContent, specPath));
               entry.runs.push({
                 runId: _runId || forgeResult.startedAt,
                 timestamp: forgeResult.startedAt,
-                resultPath: path.relative(resultDir, errorResultsDir),
+
                 status: 'failed',
                 costUsd: forgeResult.costUsd,
                 durationSeconds: forgeResult.durationSeconds,
@@ -407,14 +392,10 @@ forge run --resume ${qr.sessionId} "fix verification errors"
           }
 
           // Update task record on failure
-          if (db) {
-            try {
-              if (isInterrupted()) {
-                cancelTask(db, taskId);
-              } else {
-                updateTaskStatus(db, taskId, 'failed', 1);
-              }
-            } catch { /* best effort */ }
+          if (isInterrupted()) {
+            taskContext.cancel();
+          } else {
+            taskContext.updateStatus('failed', 1);
           }
 
           throw new ForgeError(`Verification failed after ${maxVerifyAttempts} attempts`, forgeResult);
@@ -460,17 +441,17 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       };
 
       const overriddenText = `${qr.resultText}\n\n${note}`;
-      const errorResultsDir = await saveResult(resultDir, overrideResult, overriddenText);
+      await saveResult(resultDir, overrideResult, overriddenText);
 
       // Update spec manifest as failed
       const failSpecId = specPath ? specKey(specPath, resultDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
       if (failSpecId) {
-        await withManifestLock(resultDir, (manifest) => {
+        await withSpecTransaction(resultDir, (manifest) => {
           const entry = findOrCreateEntry(manifest, failSpecId, resolveSpecSource(finalSpecContent, specPath));
           entry.runs.push({
             runId: _runId || overrideResult.startedAt,
             timestamp: overrideResult.startedAt,
-            resultPath: path.relative(resultDir, errorResultsDir),
+            resultPath: '',
             status: 'failed',
             costUsd: overrideResult.costUsd,
             durationSeconds: overrideResult.durationSeconds,
@@ -482,11 +463,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       }
 
       // Update task record on API error override
-      if (db) {
-        try {
-          updateTaskStatus(db, taskId, 'failed', 1);
-        } catch { /* best effort */ }
-      }
+      taskContext.updateStatus('failed', 1);
 
       throw new ForgeError(note, overrideResult);
     }
@@ -517,7 +494,7 @@ forge run --resume ${qr.sessionId} "fix verification errors"
       logPath: qr.logPath,
     };
 
-    const resultsDir = await saveResult(resultDir, forgeResult, qr.resultText);
+    await saveResult(resultDir, forgeResult, qr.resultText);
 
     // Save plan document to .forge/plans/ for plan-only runs
     if (planOnly) {
@@ -543,12 +520,12 @@ ${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0,
     // Update spec manifest on success
     const successSpecId = specPath ? specKey(specPath, resultDir) : (finalSpecContent ? pipeSpecId(finalSpecContent) : undefined);
     if (successSpecId) {
-      await withManifestLock(resultDir, (manifest) => {
+      await withSpecTransaction(resultDir, (manifest) => {
         const entry = findOrCreateEntry(manifest, successSpecId, resolveSpecSource(finalSpecContent, specPath));
         entry.runs.push({
           runId: _runId || forgeResult.startedAt,
           timestamp: forgeResult.startedAt,
-          resultPath: path.relative(resultDir, resultsDir),
+          resultPath: '',
           status: 'passed',
           costUsd: forgeResult.costUsd,
           durationSeconds: forgeResult.durationSeconds,
@@ -562,8 +539,8 @@ ${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0,
     if (_silent) {
       // Silent: no output at all (parallel mode)
     } else if (quiet) {
-      // Quiet mode: just show results path
-      console.log(resultsDir);
+      // Quiet mode: just show session ID
+      console.log(qr.sessionId || forgeResult.startedAt);
     } else {
       // Display result (full, no truncation)
       console.log('\n---\nResult:\n');
@@ -571,7 +548,6 @@ ${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0,
 
       // Display summary
       printRunSummary({ durationSeconds, costUsd: qr.costUsd, sessionId: qr.sessionId });
-      console.log(`  Results:  ${DIM}${resultsDir}${RESET}`);
       if (qr.sessionId) {
         console.log(`  Resume:   ${CMD}forge run --resume ${qr.sessionId} "continue"${RESET}`);
         console.log(`  Fork:     ${CMD}forge run --fork ${qr.sessionId} "try different approach"${RESET}`);
@@ -609,21 +585,12 @@ ${specPath ? `spec: ${path.basename(specPath)}` : `prompt: ${prompt.substring(0,
     }
 
     // Update task record on success
-    if (db) {
-      try {
-        updateTaskStatus(db, taskId, 'completed', 0);
-      } catch { /* best effort */ }
-    }
+    taskContext.updateStatus('completed', 0);
 
     return forgeResult;
   }
 
   // All verification attempts exhausted — should not normally reach here
-  // Update task record
-  if (db) {
-    try {
-      updateTaskStatus(db, taskId, 'failed', 1);
-    } catch { /* best effort */ }
-  }
+  taskContext.updateStatus('failed', 1);
   throw new ForgeError('Verification failed after all attempts');
 }

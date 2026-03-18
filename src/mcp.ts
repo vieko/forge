@@ -20,10 +20,8 @@ import crypto from 'crypto';
 import path from 'path';
 import { promises as fs } from 'fs';
 import { loadManifest, findUntrackedSpecs } from './specs.js';
-import { loadSummaries, aggregateRuns, computeSpecStats, computeModelStats, filterSince } from './stats.js';
 import {
   getDb,
-  getDbWithBackfill,
   queryStatusRuns,
   queryAggregateStats,
   querySpecStats,
@@ -32,8 +30,13 @@ import {
   getTaskById,
   markStaleTasks,
   getActiveTaskByCommandAndCwd,
+  listWorktrees,
+  getWorktreesByWorkGroup,
+  getWorktree,
+  querySessionsByWorktree,
 } from './db.js';
-import { FileSystemStateProvider } from './pipeline-state.js';
+import type { WorktreeRow, WorktreeStatus } from './db.js';
+import { SqliteStateProvider, markStalePipelines } from './db-pipeline-state.js';
 import type { Pipeline, GateKey } from './pipeline-types.js';
 import { isExecutorRunning, ensureExecutorRunning } from './executor.js';
 
@@ -104,8 +107,9 @@ server.registerTool('forge_specs', {
       const groups = new Map<string, typeof entries>();
       for (const e of entries) {
         const dir = e.spec.includes('/') ? path.dirname(e.spec) : '.';
-        if (!groups.has(dir)) groups.set(dir, []);
-        groups.get(dir)!.push(e);
+        const group = groups.get(dir) ?? [];
+        group.push(e);
+        groups.set(dir, group);
       }
 
       const dirSummary = [...groups.entries()].map(([dir, items]) => ({
@@ -152,8 +156,9 @@ function groupStatusRows(rows: { specPath?: string | null; status: string; costU
   const groups = new Map<string, typeof rows>();
   for (const s of rows) {
     const key = s.batchId || s.startedAt;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(s);
+    const group = groups.get(key) ?? [];
+    group.push(s);
+    groups.set(key, group);
   }
 
   const sorted = [...groups.entries()].sort((a, b) => {
@@ -192,39 +197,18 @@ server.registerTool('forge_status', {
   try {
     const workingDir = path.resolve(cwd);
 
-    // Try DB first
-    let dbRows: { specPath: string | null; status: string; costUsd: number | null; durationSeconds: number; model: string; numTurns: number | null; batchId: string | null; startedAt: string }[] | null = null;
-    try {
-      const db = await getDbWithBackfill(workingDir);
-      if (db) {
-        dbRows = queryStatusRuns(db);
-      }
-    } catch {
-      // Fall through to filesystem
+    // Read exclusively from DB
+    const db = getDb(workingDir);
+    if (!db) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ runs: [], message: 'No results found. (Database unavailable)' }) }] };
     }
 
-    if (dbRows && dbRows.length > 0) {
-      const result = groupStatusRows(dbRows, all, count);
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ runs: result }, null, 2) }] };
-    }
-
-    // Fallback: filesystem
-    const summaries = await loadSummaries(workingDir);
-    if (summaries.length === 0) {
+    const dbRows = queryStatusRuns(db);
+    if (dbRows.length === 0) {
       return { content: [{ type: 'text' as const, text: JSON.stringify({ runs: [], message: 'No results found.' }) }] };
     }
 
-    const fsRows = summaries.map(s => ({
-      specPath: s.specPath || null,
-      status: s.status,
-      costUsd: s.costUsd ?? null,
-      durationSeconds: s.durationSeconds,
-      model: s.model,
-      numTurns: s.numTurns ?? null,
-      batchId: s.runId || null,
-      startedAt: s.startedAt,
-    }));
-    const result = groupStatusRows(fsRows, all, count);
+    const result = groupStatusRows(dbRows, all, count);
     return { content: [{ type: 'text' as const, text: JSON.stringify({ runs: result }, null, 2) }] };
   } catch (err) {
     return {
@@ -266,66 +250,111 @@ server.registerTool('forge_stats', {
   try {
     const workingDir = path.resolve(cwd);
 
-    // Try DB first
-    try {
-      const db = await getDbWithBackfill(workingDir);
-      if (db) {
-        if (by_spec) {
-          const rows = querySpecStats(db, since);
-          const specStats = rows.map(r => ({
-            spec: r.specPath,
-            runs: r.runs,
-            passed: r.passed,
-            avgCost: r.avgCost,
-            avgDuration: r.avgDuration,
-          }));
-          return { content: [{ type: 'text' as const, text: JSON.stringify({ by_spec: specStats }, null, 2) }] };
-        }
-
-        if (by_model) {
-          const rows = queryModelStatsDb(db, since);
-          return { content: [{ type: 'text' as const, text: JSON.stringify({ by_model: rows }, null, 2) }] };
-        }
-
-        const row = queryAggregateStats(db, since);
-        if (row.total === 0) {
-          const msg = since ? `No runs found since ${since}.` : 'No runs found.';
-          return { content: [{ type: 'text' as const, text: JSON.stringify({ message: msg }) }] };
-        }
-
-        return { content: [{ type: 'text' as const, text: JSON.stringify(formatAggregateResponse(row), null, 2) }] };
-      }
-    } catch {
-      // Fall through to filesystem
-    }
-
-    // Fallback: filesystem
-    let summaries = await loadSummaries(workingDir);
-
-    if (summaries.length === 0) {
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ message: 'No runs found.' }) }] };
-    }
-
-    if (since) {
-      summaries = filterSince(summaries, since);
-      if (summaries.length === 0) {
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ message: `No runs found since ${since}.` }) }] };
-      }
+    // Read exclusively from DB
+    const db = getDb(workingDir);
+    if (!db) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ message: 'No runs found. (Database unavailable)' }) }] };
     }
 
     if (by_spec) {
-      const manifest = await loadManifest(workingDir);
-      const specStats = computeSpecStats(manifest);
+      const rows = querySpecStats(db, since);
+      const specStats = rows.map(r => ({
+        spec: r.specPath,
+        runs: r.runs,
+        passed: r.passed,
+        avgCost: r.avgCost,
+        avgDuration: r.avgDuration,
+      }));
       return { content: [{ type: 'text' as const, text: JSON.stringify({ by_spec: specStats }, null, 2) }] };
     }
 
     if (by_model) {
-      const modelStats = computeModelStats(summaries);
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ by_model: modelStats }, null, 2) }] };
+      const rows = queryModelStatsDb(db, since);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ by_model: rows }, null, 2) }] };
     }
 
-    const stats = aggregateRuns(summaries);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(formatAggregateResponse(stats), null, 2) }] };
+    const row = queryAggregateStats(db, since);
+    if (row.total === 0) {
+      const msg = since ? `No runs found since ${since}.` : 'No runs found.';
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ message: msg }) }] };
+    }
+
+    return { content: [{ type: 'text' as const, text: JSON.stringify(formatAggregateResponse(row), null, 2) }] };
+  } catch (err) {
+    return {
+      content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+      isError: true,
+    };
+  }
+});
+
+// ── Fast tool: forge_worktrees ────────────────────────────────
+
+server.registerTool('forge_worktrees', {
+  description: 'List worktrees with status, spec, branch, and path. Returns structured JSON with worktree entries. Supports filtering by work_group_id and status. Fast — no SDK call.',
+  inputSchema: {
+    cwd: z.string().describe('Working directory (target repo)'),
+    work_group_id: z.string().optional().describe('Filter by work group ID'),
+    status: z.string().optional().describe('Filter by worktree status (e.g. created, running, complete, failed, merged, cleaned)'),
+  },
+}, async ({ cwd, work_group_id, status }) => {
+  try {
+    const workingDir = path.resolve(cwd);
+    const db = getDb(workingDir);
+    if (!db) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Database unavailable. Ensure .forge directory exists.' }) }],
+        isError: true,
+      };
+    }
+
+    let worktrees: WorktreeRow[];
+    if (work_group_id) {
+      worktrees = getWorktreesByWorkGroup(db, work_group_id);
+      // Apply status filter on top of work_group_id filter
+      if (status) {
+        worktrees = worktrees.filter(w => w.status === status);
+      }
+    } else if (status) {
+      worktrees = listWorktrees(db, status as WorktreeStatus);
+    } else {
+      worktrees = listWorktrees(db);
+    }
+
+    const entries = worktrees.map(w => ({
+      id: w.id,
+      work_group_id: w.work_group_id,
+      spec_path: w.spec_path,
+      spec_paths: JSON.parse(w.spec_paths),
+      branch: w.branch,
+      worktree_path: w.worktree_path,
+      status: w.status,
+      linear_issue_id: w.linear_issue_id,
+      task_id: w.task_id,
+      session_id: w.session_id,
+      error: w.error,
+      created_at: w.created_at,
+      updated_at: w.updated_at,
+    }));
+
+    // Summary counts
+    const allWorktrees = work_group_id ? worktrees : listWorktrees(db);
+    const summary = {
+      total: allWorktrees.length,
+      created: allWorktrees.filter(w => w.status === 'created').length,
+      running: allWorktrees.filter(w => w.status === 'running').length,
+      complete: allWorktrees.filter(w => w.status === 'complete').length,
+      failed: allWorktrees.filter(w => w.status === 'failed').length,
+      merged: allWorktrees.filter(w => w.status === 'merged').length,
+      cleaned: allWorktrees.filter(w => w.status === 'cleaned').length,
+    };
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify({ worktrees: entries, summary }, null, 2),
+      }],
+    };
   } catch (err) {
     return {
       content: [{ type: 'text' as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
@@ -346,8 +375,15 @@ server.registerTool('forge_start', {
     model: z.string().optional().describe('Model to use (opus, sonnet, or full model ID)'),
     spec_path: z.string().optional().describe('Spec file or directory path (required for run, audit, proof)'),
     extra_args: z.array(z.string()).optional().describe('Additional CLI arguments (e.g. ["--fix", "--sequential"])'),
+    max_turns: z.number().optional().describe('Maximum agent turns (default varies by command)'),
+    max_budget: z.number().optional().describe('Maximum budget in USD (default varies by command)'),
+    plan_only: z.boolean().optional().describe('Plan only mode — create tasks without implementing (run command only)'),
+    worktree: z.boolean().optional().describe('Create an isolated git worktree for this task'),
+    worktree_id: z.string().optional().describe('Run inside an existing worktree (by worktree ID from forge_worktrees)'),
+    isolate: z.boolean().optional().describe('Enable worktree-per-spec isolation mode — each spec runs in its own worktree'),
+    in_place: z.boolean().optional().describe('Skip automatic worktree creation for spec-dir runs. No effect on single-spec MCP runs (which already run in-place). Incompatible with worktree and isolate.'),
   },
-}, async ({ command, description, cwd, output_dir, model, spec_path, extra_args }) => {
+}, async ({ command, description, cwd, output_dir, model, spec_path, extra_args, max_turns, max_budget, plan_only, worktree, worktree_id, isolate, in_place }) => {
   try {
     const workingDir = path.resolve(cwd);
     const db = getDb(workingDir);
@@ -376,14 +412,36 @@ server.registerTool('forge_start', {
     // Clean up stale tasks via SQL
     markStaleTasks(db, TASK_TTL_MS);
 
+    // Validate incompatible flags
+    if (in_place && worktree) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: '--in-place cannot be used with worktree' }) }],
+        isError: true,
+      };
+    }
+    if (in_place && isolate) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: '--in-place cannot be used with --isolate' }) }],
+        isError: true,
+      };
+    }
+
     const taskId = crypto.randomBytes(8).toString('hex');
 
-    // Store structured parameters for the executor to dispatch
+    // Store structured parameters for the executor to dispatch.
+    // Typed params are preferred over extraArgs for commonly used options.
     const params: Record<string, unknown> = {
       specPath: spec_path || null,
       outputDir: output_dir || null,
       model: model || null,
       extraArgs: extra_args || [],
+      ...(max_turns !== undefined && { maxTurns: max_turns }),
+      ...(max_budget !== undefined && { maxBudgetUsd: max_budget }),
+      ...(plan_only !== undefined && { planOnly: plan_only }),
+      ...(worktree !== undefined && { worktree }),
+      ...(worktree_id !== undefined && { worktreeId: worktree_id }),
+      ...(isolate !== undefined && { isolate }),
+      ...(in_place !== undefined && { inPlace: in_place }),
     };
 
     // Insert task with status 'pending' — executor picks it up
@@ -507,7 +565,9 @@ server.registerTool('forge_task', {
   // Enrich pipeline tasks with stage-level progress
   if (task.command === 'forge pipeline') {
     try {
-      const provider = new FileSystemStateProvider(task.cwd);
+      const pipelineDb = getDb(task.cwd);
+      if (!pipelineDb) throw new Error('Database unavailable');
+      const provider = new SqliteStateProvider(pipelineDb);
       const active = await provider.loadActivePipeline();
       if (active) {
         const currentStage = active.stages.find(s => s.status === 'running');
@@ -534,6 +594,35 @@ server.registerTool('forge_task', {
     }
   }
 
+  // Enrich with worktree info when task is associated with a worktree
+  try {
+    const taskDb = getDb(task.cwd);
+    if (taskDb) {
+      // Check task params for worktreeId
+      const taskParams: Record<string, unknown> = JSON.parse(task.params || '{}');
+      const worktreeId = taskParams.worktreeId as string | undefined;
+
+      let worktreeRow: WorktreeRow | null = null;
+      if (worktreeId) {
+        worktreeRow = getWorktree(taskDb, worktreeId);
+      }
+      // Fallback: check if any worktree references this task_id
+      if (!worktreeRow) {
+        const rows = taskDb.query(
+          'SELECT * FROM worktrees WHERE task_id = ? LIMIT 1',
+        ).all(task_id) as WorktreeRow[];
+        worktreeRow = rows[0] ?? null;
+      }
+      if (worktreeRow) {
+        result.worktree_id = worktreeRow.id;
+        result.worktree_path = worktreeRow.worktree_path;
+        result.worktree_status = worktreeRow.status;
+      }
+    }
+  } catch {
+    // Worktree info unavailable — continue with basic task info
+  }
+
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
   };
@@ -547,8 +636,9 @@ server.registerTool('forge_watch', {
     cwd: z.string().describe('Working directory (target repo where forge is running)'),
     lines: z.number().optional().describe('Number of recent lines to return (default: 40, max: 200)'),
     task_id: z.string().optional().describe('Task ID from forge_start — uses its cwd to find the session log'),
+    worktree_id: z.string().optional().describe('Worktree ID — scope log following to sessions associated with this worktree'),
   },
-}, async ({ cwd, lines, task_id }) => {
+}, async ({ cwd, lines, task_id, worktree_id }) => {
   try {
     // If task_id provided, use the task's cwd and sessionId directly
     let workingDir = path.resolve(cwd);
@@ -567,7 +657,24 @@ server.registerTool('forge_watch', {
       }
     }
 
-    // If we have a sessionId (from task), construct path directly — skip latest-session.json
+    // If worktree_id provided, find the latest session associated with it
+    if (worktree_id && !sessionId) {
+      const wtDb = getDb(workingDir);
+      if (wtDb) {
+        const wtSessions = querySessionsByWorktree(wtDb, worktree_id);
+        // querySessionsByWorktree returns ASC order — pick the last (most recent)
+        if (wtSessions.length > 0) {
+          sessionId = wtSessions[wtSessions.length - 1].id;
+        }
+        // Also check if the worktree has a different working directory
+        const wtRow = getWorktree(wtDb, worktree_id);
+        if (wtRow) {
+          workingDir = wtRow.worktree_path;
+        }
+      }
+    }
+
+    // If we have a sessionId (from task or worktree), construct path directly — skip latest-session.json
     if (sessionId) {
       logPath = path.join(workingDir, '.forge', 'sessions', sessionId, 'stream.log');
     } else {
@@ -701,8 +808,25 @@ server.registerTool('forge_pipeline', {
 }, async ({ cwd }) => {
   try {
     const workingDir = cwd ? path.resolve(cwd) : process.cwd();
-    const provider = new FileSystemStateProvider(workingDir);
-    const pipeline = await provider.loadActivePipeline();
+    const pipelineDb = getDb(workingDir);
+    if (!pipelineDb) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: 'Database unavailable' }) }],
+        isError: true,
+      };
+    }
+
+    // Clean up stale pipelines before reading state
+    markStalePipelines(pipelineDb);
+
+    const provider = new SqliteStateProvider(pipelineDb);
+    let pipeline = await provider.loadActivePipeline();
+
+    // Fall back to most recent pipeline (including completed/failed/cancelled)
+    if (!pipeline) {
+      const all = await provider.listPipelines();
+      if (all.length > 0) pipeline = all[0];
+    }
 
     if (!pipeline) {
       return {
