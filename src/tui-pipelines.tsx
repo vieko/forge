@@ -16,9 +16,9 @@ import {
   setOrToggleTuiFilterToken as setOrToggleFilterToken,
 } from './tui-filter.js';
 import {
+  type ConfirmDialogController,
   DialogConfirm,
   FilterBar,
-  HelpOverlay,
   ToastOverlay,
   useConfirmDialog,
   useToast,
@@ -162,12 +162,15 @@ function PipelineStageRow({ stage, pipeline, selected, maxWidth }: { stage: Stag
   );
 }
 
-export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilterChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
+export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilterChange, onFilterModeChange, showHelp, onShowHelpChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
   cwd: string;
   initialIndex?: number;
   onSelect: (p: Pipeline | null, index: number) => void;
   onActivate: (p: Pipeline, index: number) => void;
   onFilterChange?: (query: string) => void;
+  onFilterModeChange?: (active: boolean) => void;
+  showHelp: boolean;
+  onShowHelpChange: (visible: boolean) => void;
   onQuit: () => void;
   onTabSwitch: (index: number) => void;
   showFooter?: boolean;
@@ -175,7 +178,6 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
 }) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
-  const [showHelp, setShowHelp] = useState(false);
   const [filterMode, setFilterMode] = useState(false);
   const [filterQuery, setFilterQuery] = useState('');
   const { width } = useTerminalDimensions();
@@ -186,6 +188,10 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
   useEffect(() => {
     onFilterChange?.(filterQuery);
   }, [filterQuery, onFilterChange]);
+
+  useEffect(() => {
+    onFilterModeChange?.(filterMode);
+  }, [filterMode, onFilterModeChange]);
 
   const pipelineDb = useMemo(() => getDb(cwd), [cwd]);
   const dbProvider = useMemo(
@@ -292,7 +298,7 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
       }
     }
     if (showHelp) {
-      if (key.name === '?' || key.name === 'escape') setShowHelp(false);
+      if (key.name === '?' || key.name === 'escape') onShowHelpChange(false);
       return;
     }
     if (key.name === 'escape' && filterQuery.trim()) {
@@ -306,7 +312,7 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
     }
 
     if (key.name === 'q') { onQuit(); return; }
-    if (key.name === '?') { setShowHelp(true); return; }
+    if (key.name === '?') { onShowHelpChange(true); return; }
     if (key.name === '/') { setFilterMode(true); return; }
     if (key.name === 'f') { setFilterQuery(q => setOrToggleFilterToken(q, 'status', 'failed')); return; }
     if (key.name === 'a') { setFilterQuery(q => setOrToggleFilterToken(q, 'status', 'active')); return; }
@@ -342,7 +348,7 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
         </text>
       </box>
 
-      {(filterMode || filterQuery.trim()) ? <FilterBar query={filterQuery} /> : null}
+      {showFooter && (filterMode || filterQuery.trim()) ? <FilterBar query={filterQuery} /> : null}
 
       <scrollbox key={`pl-${visiblePipelines.length}-${runningCount}-${filterQuery}`} ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1 }}>
         {visiblePipelines.length === 0 ? (
@@ -369,27 +375,12 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
           <text fg={THEME.textMuted}>[j/k] navigate  [g/G] top/end  [/] filter  [f] failed  [a] active  [?] help  [enter] view  [n] new  [tab] next tab  [q] quit</text>
         </box>
       ) : null}
-      <HelpOverlay
-        title="Pipelines Help"
-        visible={showHelp}
-        lines={[
-          '[j/k] move selection',
-          '[g/G] jump top or bottom',
-          '[/] filter current list',
-          '[f] toggle failed filter',
-          '[a] toggle active filter',
-          '[enter] open interactive pipeline detail',
-          '[n] start a new pipeline',
-          '[tab] next tab',
-          '[q] quit',
-        ]}
-      />
       <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
     </box>
   );
 }
 
-export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions, onBack, onQuit, onTabSwitch, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false }: {
+export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions, onBack, onQuit, onTabSwitch, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false, confirmDialog }: {
   pipeline: Pipeline;
   cwd: string;
   onSelectStageSessions: (sessionIds: string[]) => void;
@@ -403,6 +394,7 @@ export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSe
   activeMatchIndex?: number;
   onSearchMatchCountChange?: (count: number) => void;
   inputLocked?: boolean;
+  confirmDialog?: ConfirmDialogController;
 }) {
   const [selectedStageIndex, setSelectedStageIndex] = useState(0);
   const [pipeline, setPipeline] = useState(initialPipeline);
@@ -414,7 +406,8 @@ export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSe
     [detailDb],
   );
 
-  const dialog = useConfirmDialog();
+  const localDialog = useConfirmDialog();
+  const dialog = confirmDialog ?? localDialog;
   const toast = useToast();
 
   const prevStatusRef = useRef(pipeline.status);
@@ -714,11 +707,13 @@ export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSe
         ))}
       </box>
 
-      <DialogConfirm
-        prompt={dialog.prompt}
-        visible={dialog.visible}
-        onRespond={dialog.respond}
-      />
+      {!confirmDialog ? (
+        <DialogConfirm
+          prompt={dialog.prompt}
+          visible={dialog.visible}
+          onRespond={dialog.respond}
+        />
+      ) : null}
 
       <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
 

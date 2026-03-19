@@ -12,9 +12,9 @@ export const TUI_THEME = {
   backgroundWeak: '#212631',
   backgroundStrong: '#1b1f27',
   backgroundStronger: '#171b23',
-  borderWeak: '#323848',
-  border: '#4a5164',
-  borderStrong: '#6a7390',
+  borderWeak: '#4d556b',
+  border: '#6a7390',
+  borderStrong: '#8c97ba',
   selection: '#424967',
   subtle: '#2d3444',
 } as const;

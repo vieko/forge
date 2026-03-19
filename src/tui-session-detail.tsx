@@ -489,7 +489,7 @@ function SessionSummaryView({ session, summary, searchQuery, activeMatchIndex, o
   const filePerLine = allSearch.perLine.slice(fileStart, fileStart + summary.fileOps.length);
 
   return (
-    <box flexDirection="column" style={{ paddingTop: 1 }}>
+    <box flexDirection="column">
       {summary.finalResult ? (
         <box style={{ paddingLeft: 1, paddingTop: 1 }}>
           <text>

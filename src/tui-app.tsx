@@ -5,12 +5,12 @@ import type { Pipeline } from './pipeline-types.js';
 import type { SpecEntry } from './types.js';
 import type { ExecutorInfo, SessionInfo } from './tui-common.js';
 import type { TaskRow, WorktreeRow } from './db.js';
-import { getActiveTasks, getDb } from './db.js';
+import { getActiveTasks, getDb, getRecentCompletedTasks } from './db.js';
 import { useDbPoll } from './tui-db.js';
-import { CommandPaletteOverlay, GlobalFooter, GlobalStatusBar, MasterDetailLayout, TabBar, type TuiTab } from './tui-ui.js';
+import { CommandPaletteOverlay, DialogConfirm, GlobalFooter, GlobalInputBar, GlobalStatusBar, HelpOverlay, MasterDetailLayout, TabBar, type TuiTab, useConfirmDialog } from './tui-ui.js';
 import { TUI_THEME as THEME } from './tui-theme.js';
 import { SessionDetail } from './tui-session-detail.js';
-import { SessionsList } from './tui-sessions-list.js';
+import { SessionsList, TasksModal } from './tui-sessions-list.js';
 import { SpecDetail, SpecsList } from './tui-specs.js';
 import { PipelineDetail, PipelinesList } from './tui-pipelines.js';
 import { WorktreeDetail, WorktreesList } from './tui-worktrees.js';
@@ -43,22 +43,33 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
   const [specsListIndex, setSpecsListIndex] = useState(0);
   const [specsView, setSpecsView] = useState<'list' | 'detail' | 'runDetail'>('list');
   const [selectedSpecEntry, setSelectedSpecEntry] = useState<SpecEntry | null>(null);
+  const [specsShowHelp, setSpecsShowHelp] = useState(false);
   const [selectedRunSession, setSelectedRunSession] = useState<SessionInfo | null>(null);
   const [pipelineListIndex, setPipelineListIndex] = useState(0);
   const [pipelineView, setPipelineView] = useState<'list' | 'detail' | 'stageSession'>('list');
   const [selectedPipeline, setSelectedPipeline] = useState<Pipeline | null>(null);
+  const [pipelineShowHelp, setPipelineShowHelp] = useState(false);
   const [stageSessionInfo, setStageSessionInfo] = useState<SessionInfo | null>(null);
   const [worktreesListIndex, setWorktreesListIndex] = useState(0);
   const [selectedWorktree, setSelectedWorktree] = useState<WorktreeRow | null>(null);
+  const [worktreesShowHelp, setWorktreesShowHelp] = useState(false);
   const [worktreeFilter, setWorktreeFilter] = useState<WorktreeRow | null>(null);
   const [executor, setExecutor] = useState<ExecutorInfo>({ state: 'stopped', runningCount: 0, pendingCount: 0 });
   const [activeTasks, setActiveTasks] = useState<TaskRow[]>([]);
   const [selectedTask, setSelectedTask] = useState<TaskRow | null>(null);
+  const [sessionsShowTasks, setSessionsShowTasks] = useState(false);
+  const [sessionsShowHistory, setSessionsShowHistory] = useState(false);
+  const [sessionsShowHelp, setSessionsShowHelp] = useState(false);
+  const [sessionsTaskSelectedIndex, setSessionsTaskSelectedIndex] = useState(0);
   const [db, setDb] = useState<Database | null>(null);
   const [sessionsFilterQuery, setSessionsFilterQuery] = useState('');
+  const [sessionsFilterActive, setSessionsFilterActive] = useState(false);
   const [specsFilterQuery, setSpecsFilterQuery] = useState('');
+  const [specsFilterActive, setSpecsFilterActive] = useState(false);
   const [pipelinesFilterQuery, setPipelinesFilterQuery] = useState('');
+  const [pipelinesFilterActive, setPipelinesFilterActive] = useState(false);
   const [worktreesFilterQuery, setWorktreesFilterQuery] = useState('');
+  const [worktreesFilterActive, setWorktreesFilterActive] = useState(false);
   const [detailSearchActive, setDetailSearchActive] = useState(false);
   const [detailSearchQuery, setDetailSearchQuery] = useState('');
   const [detailSearchMatchCount, setDetailSearchMatchCount] = useState(0);
@@ -67,6 +78,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
   const [commandPaletteQuery, setCommandPaletteQuery] = useState('');
   const [commandPaletteIndex, setCommandPaletteIndex] = useState(0);
   const dbInitRef = useRef(false);
+  const pipelineConfirmDialog = useConfirmDialog();
 
   useEffect(() => {
     if (dbInitRef.current) return;
@@ -104,6 +116,16 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
     return sessions.filter(s => allowedIds.has(s.sessionId));
   }, [sessions, worktreeFilter, db]);
 
+  const sessionHistoryTasks = useMemo(() => {
+    if (!sessionsShowHistory || !db) return [];
+    return getRecentCompletedTasks(db, 60 * 60 * 1000);
+  }, [sessionsShowHistory, db, dbVersion]);
+
+  const sessionModalTasks = useMemo(
+    () => [...activeTasks, ...sessionHistoryTasks],
+    [activeTasks, sessionHistoryTasks],
+  );
+
   useEffect(() => {
     if (filteredSessions.length === 0) {
       setSelectedSession(null);
@@ -128,6 +150,13 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
     return worktreesFilterQuery;
   })();
 
+  const currentFilterActive = (() => {
+    if (activeTab === 'sessions') return sessionsFilterActive;
+    if (activeTab === 'specs') return specsFilterActive;
+    if (activeTab === 'pipeline') return pipelinesFilterActive;
+    return worktreesFilterActive;
+  })();
+
   const hasCurrentDetail = (() => {
     if (activeTab === 'sessions') return !!selectedSession;
     if (activeTab === 'specs') return !!selectedSpecEntry || !!selectedRunSession;
@@ -135,7 +164,11 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
     return !!selectedWorktree;
   })();
 
-  const overlayLocked = detailSearchActive || commandPaletteActive;
+  const overlayLocked = detailSearchActive || commandPaletteActive || pipelineConfirmDialog.visible;
+  const listHelpActive = (activeTab === 'sessions' && sessionsShowHelp)
+    || (activeTab === 'specs' && specsShowHelp)
+    || (activeTab === 'pipeline' && pipelineShowHelp)
+    || (activeTab === 'worktrees' && worktreesShowHelp);
 
   useEffect(() => {
     if (detailSearchMatchCount === 0) {
@@ -220,9 +253,13 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
   };
 
   useKeyboard((key) => {
+    if ((activeTab === 'sessions' && sessionsShowTasks) || listHelpActive) {
+      return;
+    }
+
     if (commandPaletteActive) {
       const next = nextTuiInputValue(commandPaletteQuery, key);
-      if (key.name === ':' || (key.name === 'p' && key.ctrl)) {
+      if (key.name === ':' || key.name === 'escape') {
         setCommandPaletteActive(false);
         setCommandPaletteQuery('');
         setCommandPaletteIndex(0);
@@ -233,6 +270,14 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
         return;
       }
       if (key.name === 'down') {
+        setCommandPaletteIndex(i => Math.min(Math.max(0, visibleCommandItems.length - 1), i + 1));
+        return;
+      }
+      if (key.ctrl && key.name === 'p') {
+        setCommandPaletteIndex(i => Math.max(0, i - 1));
+        return;
+      }
+      if (key.ctrl && key.name === 'n') {
         setCommandPaletteIndex(i => Math.min(Math.max(0, visibleCommandItems.length - 1), i + 1));
         return;
       }
@@ -302,18 +347,53 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
     return '[j/k] move  [g/G] ends  [/] filter  [ctrl+f] detail  [:] commands  [f] failed  [a] active  [?] help  [tab] tabs  [q] quit  [enter] open  [r] rerun  [m] ready';
   })();
 
-  const globalStatusText = (() => {
-    if (detailSearchActive) {
-      const counter = detailSearchQuery.trim() ? `  ${detailSearchMatchCount === 0 ? '0' : detailSearchMatchIndex + 1}/${detailSearchMatchCount}` : '';
-      return `detail search: ${detailSearchQuery || '(type to search current detail pane)'}${counter}`;
+  const executorHeader = (() => {
+    if (executor.state === 'running') {
+      const total = executor.runningCount + executor.pendingCount;
+      return {
+        text: `executor: running (${total} task${total !== 1 ? 's' : ''})`,
+        color: THEME.success,
+      };
     }
+    if (executor.state === 'idle') {
+      return { text: 'executor: idle', color: THEME.textMuted };
+    }
+    return { text: 'executor: stopped', color: THEME.warning };
+  })();
+
+  const globalStatusText = (() => {
+    if (detailSearchActive || currentFilterActive || currentFilterQuery.trim()) return '';
     if (commandPaletteActive) return `command palette: ${commandPaletteQuery || '(type a command)'}`;
-    if (activeTab === 'sessions' && sessionsFilterQuery.trim()) return `filter: ${sessionsFilterQuery}`;
-    if (activeTab === 'specs' && specsFilterQuery.trim()) return `filter: ${specsFilterQuery}`;
-    if (activeTab === 'pipeline' && pipelinesFilterQuery.trim()) return `filter: ${pipelinesFilterQuery}`;
-    if (activeTab === 'worktrees' && worktreesFilterQuery.trim()) return `filter: ${worktreesFilterQuery}`;
     return '';
   })();
+
+  const renderFooterInput = () => {
+    if (detailSearchActive) {
+      const countText = detailSearchQuery.trim()
+        ? `${detailSearchMatchCount === 0 ? '0' : detailSearchMatchIndex + 1}/${detailSearchMatchCount}`
+        : undefined;
+      return (
+        <GlobalInputBar
+          prefix="search>"
+          value={detailSearchQuery}
+          placeholder="type to search current detail pane"
+          countText={countText}
+        />
+      );
+    }
+
+    if (currentFilterActive || currentFilterQuery.trim()) {
+      return (
+        <GlobalInputBar
+          prefix="/"
+          value={currentFilterQuery}
+          placeholder="filter current list"
+        />
+      );
+    }
+
+    return <GlobalStatusBar text={globalStatusText} />;
+  };
 
   const FooterSpacer = () => (
     <box style={{ height: 1, flexShrink: 0 }}>
@@ -325,7 +405,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
     if (pipelineView === 'stageSession' && stageSessionInfo) {
       return (
         <box flexDirection="column">
-          <TabBar activeTab={activeTab} />
+          <TabBar activeTab={activeTab} statusText={executorHeader.text} statusColor={executorHeader.color} />
           <SessionDetail
             session={stageSessionInfo}
             onBack={() => setPipelineView('detail')}
@@ -344,7 +424,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
 
     return (
       <box flexDirection="column">
-        <TabBar activeTab={activeTab} />
+        <TabBar activeTab={activeTab} statusText={executorHeader.text} statusColor={executorHeader.color} />
         <MasterDetailLayout
           sidebarWidth={52}
           sidebar={(
@@ -354,6 +434,9 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
               showFooter={false}
               inputLocked={overlayLocked}
               onFilterChange={setPipelinesFilterQuery}
+              onFilterModeChange={setPipelinesFilterActive}
+              showHelp={pipelineShowHelp}
+              onShowHelpChange={setPipelineShowHelp}
               onSelect={(p, index) => {
                 setPipelineListIndex(index);
                 setSelectedPipeline(p);
@@ -407,6 +490,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
               activeMatchIndex={detailSearchMatchIndex}
               onSearchMatchCountChange={setDetailSearchMatchCount}
               inputLocked={overlayLocked}
+              confirmDialog={pipelineConfirmDialog}
             />
           ) : (
             <box flexDirection="column" style={{ padding: 1 }}>
@@ -415,8 +499,28 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
           )}
         />
         <FooterSpacer />
-        <GlobalStatusBar text={globalStatusText} />
+        {renderFooterInput()}
         <GlobalFooter text={splitFooterText} />
+        <HelpOverlay
+          title="Pipelines Help"
+          visible={pipelineShowHelp}
+          lines={[
+            '[j/k] move selection',
+            '[g/G] jump top or bottom',
+            '[/] filter current list',
+            '[f] toggle failed filter',
+            '[a] toggle active filter',
+            '[enter] open interactive pipeline detail',
+            '[n] start a new pipeline',
+            '[tab] next tab',
+            '[q] quit',
+          ]}
+        />
+        <DialogConfirm
+          prompt={pipelineConfirmDialog.prompt}
+          visible={pipelineConfirmDialog.visible}
+          onRespond={pipelineConfirmDialog.respond}
+        />
         <CommandPaletteOverlay visible={commandPaletteActive} query={commandPaletteQuery} items={visibleCommandItems} selectedIndex={commandPaletteIndex} />
       </box>
     );
@@ -425,7 +529,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
   if (activeTab === 'worktrees') {
     return (
       <box flexDirection="column">
-        <TabBar activeTab={activeTab} />
+        <TabBar activeTab={activeTab} statusText={executorHeader.text} statusColor={executorHeader.color} />
         <MasterDetailLayout
           sidebarWidth={52}
           sidebar={(
@@ -437,6 +541,9 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
               showFooter={false}
               inputLocked={overlayLocked}
               onFilterChange={setWorktreesFilterQuery}
+              onFilterModeChange={setWorktreesFilterActive}
+              showHelp={worktreesShowHelp}
+              onShowHelpChange={setWorktreesShowHelp}
               onSelect={(w, index) => {
                 setWorktreesListIndex(index);
                 setSelectedWorktree(w);
@@ -481,8 +588,26 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
           )}
         />
         <FooterSpacer />
-        <GlobalStatusBar text={globalStatusText} />
+        {renderFooterInput()}
         <GlobalFooter text={splitFooterText} />
+        <HelpOverlay
+          title="Worktrees Help"
+          visible={worktreesShowHelp}
+          lines={[
+            '[j/k] move selection',
+            '[g/G] jump top or bottom',
+            '[/] filter current list',
+            '[f] toggle failed filter',
+            '[a] toggle active filter',
+            '[enter] open worktree detail',
+            '[o] open worktree in tmux pane',
+            '[r] rerun selected worktree spec',
+            '[m] mark selected worktree ready',
+            '[s] filter sessions by worktree',
+            '[tab] next tab',
+            '[q] quit',
+          ]}
+        />
         <CommandPaletteOverlay visible={commandPaletteActive} query={commandPaletteQuery} items={visibleCommandItems} selectedIndex={commandPaletteIndex} />
       </box>
     );
@@ -492,7 +617,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
     if (specsView === 'runDetail' && selectedRunSession) {
       return (
         <box flexDirection="column">
-          <TabBar activeTab={activeTab} />
+          <TabBar activeTab={activeTab} statusText={executorHeader.text} statusColor={executorHeader.color} />
           <SessionDetail
             session={selectedRunSession}
             onBack={() => setSpecsView('detail')}
@@ -512,7 +637,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
     if (specsView === 'detail' && selectedSpecEntry) {
       return (
         <box flexDirection="column">
-          <TabBar activeTab={activeTab} />
+          <TabBar activeTab={activeTab} statusText={executorHeader.text} statusColor={executorHeader.color} />
           <SpecDetail
             entry={selectedSpecEntry}
             cwd={cwd}
@@ -539,7 +664,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
 
     return (
       <box flexDirection="column">
-        <TabBar activeTab={activeTab} />
+        <TabBar activeTab={activeTab} statusText={executorHeader.text} statusColor={executorHeader.color} />
         <MasterDetailLayout
           sidebarWidth={52}
           sidebar={(
@@ -549,6 +674,9 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
               showFooter={false}
               inputLocked={overlayLocked}
               onFilterChange={setSpecsFilterQuery}
+              onFilterModeChange={setSpecsFilterActive}
+              showHelp={specsShowHelp}
+              onShowHelpChange={setSpecsShowHelp}
               onSelect={(entry, index) => {
                 setSpecsListIndex(index);
                 setSelectedSpecEntry(entry);
@@ -588,8 +716,23 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
           )}
         />
         <FooterSpacer />
-        <GlobalStatusBar text={globalStatusText} />
+        {renderFooterInput()}
         <GlobalFooter text={splitFooterText} />
+        <HelpOverlay
+          title="Specs Help"
+          visible={specsShowHelp}
+          lines={[
+            '[j/k] move selection',
+            '[g/G] jump top or bottom',
+            '[/] filter current list',
+            '[f] toggle failed filter',
+            '[a] toggle pending filter',
+            '[enter] open full run history',
+            '[r] run selected pending or failed spec',
+            '[tab] next tab',
+            '[q] quit',
+          ]}
+        />
         <CommandPaletteOverlay visible={commandPaletteActive} query={commandPaletteQuery} items={visibleCommandItems} selectedIndex={commandPaletteIndex} />
       </box>
     );
@@ -598,7 +741,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
   if (view === 'detail' && selectedTask && !selectedSession) {
     return (
       <box flexDirection="column">
-        <TabBar activeTab={activeTab} />
+        <TabBar activeTab={activeTab} statusText={executorHeader.text} statusColor={executorHeader.color} />
         <TaskDetail
           task={selectedTask}
           onBack={() => { setSelectedTask(null); setView('list'); }}
@@ -610,7 +753,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
 
   return (
     <box flexDirection="column">
-      <TabBar activeTab={activeTab} />
+      <TabBar activeTab={activeTab} statusText={executorHeader.text} statusColor={executorHeader.color} />
       <MasterDetailLayout
         sidebarWidth={52}
         sidebar={(
@@ -621,6 +764,15 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
             showFooter={false}
             inputLocked={overlayLocked}
             onFilterChange={setSessionsFilterQuery}
+            onFilterModeChange={setSessionsFilterActive}
+            showTasks={sessionsShowTasks}
+            showHistory={sessionsShowHistory}
+            showHelp={sessionsShowHelp}
+            taskSelectedIndex={sessionsTaskSelectedIndex}
+            onShowTasksChange={setSessionsShowTasks}
+            onShowHistoryChange={setSessionsShowHistory}
+            onShowHelpChange={setSessionsShowHelp}
+            onTaskSelectedIndexChange={setSessionsTaskSelectedIndex}
             executor={executor}
             tasks={activeTasks}
             db={db}
@@ -662,8 +814,29 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
         )}
       />
       <FooterSpacer />
-      <GlobalStatusBar text={globalStatusText} />
+      {renderFooterInput()}
       <GlobalFooter text={splitFooterText} />
+      <HelpOverlay
+        title="Sessions Help"
+        visible={sessionsShowHelp}
+        lines={[
+          '[j/k] move selection',
+          '[g/G] jump top or bottom',
+          '[/] filter current list',
+          '[f] toggle failed filter',
+          '[a] toggle running filter',
+          '[t] open tasks modal',
+          '[e] start/stop executor',
+          '[tab] next tab',
+          '[q] quit',
+        ]}
+      />
+      <TasksModal
+        visible={activeTab === 'sessions' && sessionsShowTasks}
+        tasks={sessionModalTasks}
+        selectedIndex={sessionsTaskSelectedIndex}
+        showHistory={sessionsShowHistory}
+      />
       <CommandPaletteOverlay visible={commandPaletteActive} query={commandPaletteQuery} items={visibleCommandItems} selectedIndex={commandPaletteIndex} />
     </box>
   );

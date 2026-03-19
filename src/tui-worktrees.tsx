@@ -23,7 +23,7 @@ import {
   nextTuiFilterValue as nextFilterValue,
   setOrToggleTuiFilterToken as setOrToggleFilterToken,
 } from './tui-filter.js';
-import { FilterBar, HelpOverlay, ToastOverlay, useToast } from './tui-ui.js';
+import { FilterBar, ToastOverlay, useToast } from './tui-ui.js';
 import { formatDuration, formatRelativeTime, pad, padStart, truncate } from './tui-common.js';
 import { buildLineSearchData, renderHighlightedText } from './tui-search.js';
 
@@ -123,7 +123,7 @@ function WorktreeRowItem({ worktree, selected, maxWidth }: { worktree: WorktreeR
   );
 }
 
-export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onActivate, onFilterSessions, onFilterChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
+export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onActivate, onFilterSessions, onFilterChange, onFilterModeChange, showHelp, onShowHelpChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
   cwd: string;
   db: Database | null;
   dbVersion: number;
@@ -132,6 +132,9 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
   onActivate: (w: WorktreeRow, index: number) => void;
   onFilterSessions: (w: WorktreeRow) => void;
   onFilterChange?: (query: string) => void;
+  onFilterModeChange?: (active: boolean) => void;
+  showHelp: boolean;
+  onShowHelpChange: (visible: boolean) => void;
   onQuit: () => void;
   onTabSwitch: (index: number) => void;
   showFooter?: boolean;
@@ -139,7 +142,6 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
 }) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
   const [worktrees, setWorktrees] = useState<WorktreeRow[]>([]);
-  const [showHelp, setShowHelp] = useState(false);
   const [filterMode, setFilterMode] = useState(false);
   const [filterQuery, setFilterQuery] = useState('');
   const { width } = useTerminalDimensions();
@@ -150,6 +152,10 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
   useEffect(() => {
     onFilterChange?.(filterQuery);
   }, [filterQuery, onFilterChange]);
+
+  useEffect(() => {
+    onFilterModeChange?.(filterMode);
+  }, [filterMode, onFilterModeChange]);
 
   useEffect(() => {
     if (!db) return;
@@ -223,7 +229,7 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
       }
     }
     if (showHelp) {
-      if (key.name === '?' || key.name === 'escape') setShowHelp(false);
+      if (key.name === '?' || key.name === 'escape') onShowHelpChange(false);
       return;
     }
     if (key.name === 'escape' && filterQuery.trim()) {
@@ -237,7 +243,7 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
     }
 
     if (key.name === 'q') { onQuit(); return; }
-    if (key.name === '?') { setShowHelp(true); return; }
+    if (key.name === '?') { onShowHelpChange(true); return; }
     if (key.name === '/') { setFilterMode(true); return; }
     if (key.name === 'f') { setFilterQuery(prev => setOrToggleFilterToken(prev, 'status', 'failed')); return; }
     if (key.name === 'a') { setFilterQuery(prev => setOrToggleFilterToken(prev, 'status', 'active')); return; }
@@ -342,7 +348,7 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
         </text>
       </box>
 
-      {(filterMode || filterQuery.trim()) ? <FilterBar query={filterQuery} /> : null}
+      {showFooter && (filterMode || filterQuery.trim()) ? <FilterBar query={filterQuery} /> : null}
 
       <scrollbox ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1 }}>
         {visibleWorktrees.length === 0 ? (
@@ -363,25 +369,6 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
           </box>
         ))}
       </scrollbox>
-
-      <HelpOverlay
-        title="Worktrees Help"
-        visible={showHelp}
-        lines={[
-          '[j/k] move selection',
-          '[g/G] jump top or bottom',
-          '[/] filter current list',
-          '[f] toggle failed filter',
-          '[a] toggle active filter',
-          '[enter] open worktree detail',
-          '[o] open worktree in tmux pane',
-          '[r] rerun selected worktree spec',
-          '[m] mark selected worktree ready',
-          '[s] filter sessions by worktree',
-          '[tab] next tab',
-          '[q] quit',
-        ]}
-      />
 
       <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
 

@@ -14,7 +14,7 @@ import {
   nextTuiFilterValue as nextFilterValue,
   setOrToggleTuiFilterToken as setOrToggleFilterToken,
 } from './tui-filter.js';
-import { FilterBar, HelpOverlay, ToastOverlay, useToast } from './tui-ui.js';
+import { FilterBar, ToastOverlay, useToast } from './tui-ui.js';
 import { formatCost, formatDuration, formatRelativeTime, padStart, truncate } from './tui-common.js';
 import { buildLineSearchData, renderHighlightedText } from './tui-search.js';
 
@@ -85,20 +85,15 @@ function SpecRow({ row, selected, maxWidth }: { row: SpecDisplayRow; selected: b
   );
 }
 
-function SpecGroupHeader({ label }: { label: string }) {
-  return (
-    <box style={{ paddingLeft: 1, height: 1 }}>
-      <text fg={THEME.warning}>{label}</text>
-    </box>
-  );
-}
-
-export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
+export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterChange, onFilterModeChange, showHelp, onShowHelpChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
   cwd: string;
   initialIndex?: number;
   onSelect: (entry: SpecEntry | null, index: number) => void;
   onActivate: (entry: SpecEntry, index: number) => void;
   onFilterChange?: (query: string) => void;
+  onFilterModeChange?: (active: boolean) => void;
+  showHelp: boolean;
+  onShowHelpChange: (visible: boolean) => void;
   onQuit: () => void;
   onTabSwitch: (index: number) => void;
   showFooter?: boolean;
@@ -106,7 +101,6 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
 }) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
   const [manifest, setManifest] = useState<SpecManifest | null>(null);
-  const [showHelp, setShowHelp] = useState(false);
   const [filterMode, setFilterMode] = useState(false);
   const [filterQuery, setFilterQuery] = useState('');
   const { width } = useTerminalDimensions();
@@ -133,9 +127,13 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
     onFilterChange?.(filterQuery);
   }, [filterQuery, onFilterChange]);
 
-  const { displayRows, groupHeaderIndices } = (() => {
+  useEffect(() => {
+    onFilterModeChange?.(filterMode);
+  }, [filterMode, onFilterModeChange]);
+
+  const displayRows = (() => {
     if (!manifest || manifest.specs.length === 0) {
-      return { displayRows: [] as SpecDisplayRow[], groupHeaderIndices: new Set<number>() };
+      return [] as SpecDisplayRow[];
     }
 
     const baseRows: SpecDisplayRow[] = manifest.specs.map(entry => {
@@ -154,35 +152,16 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
         ))
       : baseRows;
 
-    const groups = new Map<SpecEntry['status'], SpecDisplayRow[]>();
-    for (const row of rows) {
-      const group = groups.get(row.statusGroup) ?? [];
-      group.push(row);
-      groups.set(row.statusGroup, group);
-    }
-
-    const sortedStatuses = [...groups.keys()].sort((a, b) => specStatusRank(a) - specStatusRank(b));
-    const result: SpecDisplayRow[] = [];
-    const headerIndices = new Set<number>();
-
-    for (const status of sortedStatuses) {
-      const groupRows = groups.get(status)!;
-      groupRows.sort((a, b) => {
-        const recency = b.entry.updatedAt.localeCompare(a.entry.updatedAt);
-        if (recency !== 0) return recency;
-        return a.filename.localeCompare(b.filename);
-      });
-      if (sortedStatuses.length > 1) {
-        headerIndices.add(result.length);
-        result.push({ entry: groupRows[0].entry, filename: '', statusGroup: status, totalCost: 0, totalDuration: 0 });
-      }
-      result.push(...groupRows);
-    }
-
-    return { displayRows: result, groupHeaderIndices: headerIndices };
+    return rows.sort((a, b) => {
+      const rank = specStatusRank(a.statusGroup) - specStatusRank(b.statusGroup);
+      if (rank !== 0) return rank;
+      const recency = b.entry.updatedAt.localeCompare(a.entry.updatedAt);
+      if (recency !== 0) return recency;
+      return a.filename.localeCompare(b.filename);
+    });
   })();
 
-  const selectableIndices = displayRows.map((_, i) => i).filter(i => !groupHeaderIndices.has(i));
+  const selectableIndices = displayRows.map((_, i) => i);
 
   useEffect(() => {
     if (selectableIndices.length > 0 && selectedIndex >= selectableIndices.length) {
@@ -194,9 +173,9 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
 
   useEffect(() => {
     const dispIdx = selectableIndices[selectedIndex];
-    if (dispIdx !== undefined && displayRows[dispIdx] && !groupHeaderIndices.has(dispIdx)) onSelect(displayRows[dispIdx].entry, selectedIndex);
+    if (dispIdx !== undefined && displayRows[dispIdx]) onSelect(displayRows[dispIdx].entry, selectedIndex);
     else onSelect(null, 0);
-  }, [selectedIndex, selectableIndices, displayRows, groupHeaderIndices]);
+  }, [selectedIndex, selectableIndices, displayRows]);
 
   useEffect(() => {
     const scroll = scrollRef.current;
@@ -228,7 +207,7 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
       }
     }
     if (showHelp) {
-      if (key.name === '?' || key.name === 'escape') setShowHelp(false);
+      if (key.name === '?' || key.name === 'escape') onShowHelpChange(false);
       return;
     }
     if (key.name === 'escape' && filterQuery.trim()) {
@@ -242,7 +221,7 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
     }
 
     if (key.name === 'q') return onQuit();
-    if (key.name === '?') return setShowHelp(true);
+    if (key.name === '?') return onShowHelpChange(true);
     if (key.name === '/') return setFilterMode(true);
     if (key.name === 'f') return setFilterQuery(prev => setOrToggleFilterToken(prev, 'status', 'failed'));
     if (key.name === 'a') return setFilterQuery(prev => setOrToggleFilterToken(prev, 'status', 'pending'));
@@ -257,12 +236,12 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
       setSelectedIndex(Math.max(0, selectableIndices.length - 1));
     } else if (key.name === 'return') {
       const dispIdx = selectableIndices[selectedIndex];
-      if (dispIdx !== undefined && displayRows[dispIdx] && !groupHeaderIndices.has(dispIdx)) {
+      if (dispIdx !== undefined && displayRows[dispIdx]) {
         onActivate(displayRows[dispIdx].entry, selectedIndex);
       }
     } else if (key.name === 'r') {
       const dispIdx = selectableIndices[selectedIndex];
-      if (dispIdx === undefined || !displayRows[dispIdx] || groupHeaderIndices.has(dispIdx)) return;
+      if (dispIdx === undefined || !displayRows[dispIdx]) return;
       const entry = displayRows[dispIdx].entry;
       if (entry.status !== 'pending' && entry.status !== 'failed') {
         toast.show('Spec is not pending or failed', THEME.textMuted);
@@ -289,23 +268,27 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
     }
   });
 
-  if (manifest === null) {
-    return <box flexDirection="column" style={{ padding: 1 }}><text fg={THEME.textMuted}>Loading specs...</text></box>;
-  }
+  const totalSpecs = selectableIndices.length;
 
-  if (manifest.specs.length === 0) {
+  if (manifest === null) {
     return (
-      <box flexDirection="column" style={{ padding: 1 }}>
-        <text fg={THEME.textStrong}>No specs found in {cwd}/.forge/specs.json</text>
-        <text> </text>
-        <text fg={THEME.textMuted}>Run a spec to start tracking lifecycle.</text>
-        <text> </text>
-        <text fg={THEME.textMuted}>[tab] next tab  [q] quit</text>
+      <box flexDirection="column" style={{ flexGrow: 1 }}>
+        <box style={{ paddingLeft: 1, paddingTop: 1, flexShrink: 0 }}>
+          <text fg={THEME.textMuted}>Loading specs...</text>
+        </box>
       </box>
     );
   }
 
-  const totalSpecs = selectableIndices.length;
+  if (manifest.specs.length === 0) {
+    return (
+      <box flexDirection="column" style={{ flexGrow: 1 }}>
+        <box style={{ paddingLeft: 1, paddingTop: 1, flexShrink: 0 }}>
+          <text fg={THEME.textStrong}>No specs found in {cwd}/.forge/specs.json</text>
+        </box>
+      </box>
+    );
+  }
 
   return (
     <box flexDirection="column" style={{ flexGrow: 1 }}>
@@ -316,7 +299,7 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
           <span fg={THEME.textMuted}>{totalSpecs} spec{totalSpecs !== 1 ? 's' : ''}</span>
         </text>
       </box>
-      {(filterMode || filterQuery.trim()) ? <FilterBar query={filterQuery} /> : null}
+      {showFooter && (filterMode || filterQuery.trim()) ? <FilterBar query={filterQuery} /> : null}
       <scrollbox ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1 }}>
         {manifest.specs.length > 0 && totalSpecs === 0 ? (
           <box style={{ paddingLeft: 1, paddingTop: 1 }}>
@@ -326,37 +309,17 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
               <text fg={THEME.textMuted}>Press [esc] to clear the filter.</text>
             </box>
           </box>
-        ) : displayRows.map((row, i) => {
-          if (groupHeaderIndices.has(i)) {
-            return <box key={`hdr-${row.statusGroup}`} id={`sp-${i}`}><SpecGroupHeader label={specStatusLabel(row.statusGroup)} /></box>;
-          }
-          return (
-            <box key={row.entry.spec} id={`sp-${i}`}>
-              <SpecRow row={row} selected={i === displayIndex} maxWidth={width} />
-            </box>
-          );
-        })}
+        ) : displayRows.map((row, i) => (
+          <box key={row.entry.spec} id={`sp-${i}`}>
+            <SpecRow row={row} selected={i === displayIndex} maxWidth={width} />
+          </box>
+        ))}
       </scrollbox>
       {showFooter ? (
         <box style={{ paddingLeft: 1, flexShrink: 0 }}>
           <text fg={THEME.textMuted}>[j/k] navigate  [g/G] top/end  [/] filter  [f] failed  [a] pending  [?] help  [enter] view  [r] run  [tab] next tab  [q] quit</text>
         </box>
       ) : null}
-      <HelpOverlay
-        title="Specs Help"
-        visible={showHelp}
-        lines={[
-          '[j/k] move selection',
-          '[g/G] jump top or bottom',
-          '[/] filter current list',
-          '[f] toggle failed filter',
-          '[a] toggle pending filter',
-          '[enter] open full run history',
-          '[r] run selected pending or failed spec',
-          '[tab] next tab',
-          '[q] quit',
-        ]}
-      />
       <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
     </box>
   );
@@ -456,7 +419,7 @@ export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitc
 
   return (
     <box flexDirection="column">
-      <box style={{ paddingLeft: 1, paddingTop: 1 }} flexDirection="column">
+      <box flexDirection="column" style={{ paddingLeft: 1, paddingTop: 1 }}>
         <text>
           <span fg={THEME.textMuted}>forge spec</span>
           {'  '}
@@ -464,18 +427,19 @@ export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitc
         </text>
         <text> </text>
         <text>
-          <span fg={THEME.textMuted}>Status  </span>
+          <span fg={THEME.textMuted}>Status    </span>
           <span fg={color}>{icon} </span>
           {renderHighlightedText(entry.status, lineRanges[1]?.ranges ?? [], color, THEME.searchMatch, lineRanges[1]?.activeRangeIndex ?? -1, THEME.background)}
-          {'    '}
-          <span fg={THEME.textMuted}>Source  </span>
+        </text>
+        <text>
+          <span fg={THEME.textMuted}>Source    </span>
           {renderHighlightedText(entry.source, lineRanges[2]?.ranges ?? [], THEME.text, THEME.searchMatch, lineRanges[2]?.activeRangeIndex ?? -1, THEME.background)}
         </text>
         <text>
-          <span fg={THEME.textMuted}>Created </span>
+          <span fg={THEME.textMuted}>Created   </span>
           {renderHighlightedText(createdLabel, lineRanges[3]?.ranges ?? [], THEME.text, THEME.searchMatch, lineRanges[3]?.activeRangeIndex ?? -1, THEME.background)}
           {'  '}
-          <span fg={THEME.textMuted}>Updated </span>
+          <span fg={THEME.textMuted}>Updated   </span>
           {renderHighlightedText(updatedLabel, lineRanges[4]?.ranges ?? [], THEME.text, THEME.searchMatch, lineRanges[4]?.activeRangeIndex ?? -1, THEME.background)}
         </text>
         <text> </text>
@@ -485,12 +449,11 @@ export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitc
             <span fg={THEME.textMuted}>{'  '}({scrollOffset + 1}-{Math.min(scrollOffset + maxVisible, runs.length)} of {runs.length})</span>
           ) : null}
         </text>
-      </box>
-      {runs.length === 0 ? (
-        <box style={{ paddingLeft: 1, paddingTop: 1 }}>
+        {runs.length === 0 ? (
           <text fg={THEME.textMuted}>No runs yet</text>
-        </box>
-      ) : (
+        ) : null}
+      </box>
+      {runs.length > 0 ? (
         <box flexDirection="column">
           {visibleRuns.map((run, i) => (
             <box
@@ -501,7 +464,7 @@ export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitc
             </box>
           ))}
         </box>
-      )}
+      ) : null}
       {showFooter ? (
         <box style={{ paddingLeft: 1, paddingTop: 1, height: 2 }}>
           <text fg={THEME.textMuted}>

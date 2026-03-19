@@ -19,7 +19,7 @@ import {
 import {
   FilterBar,
   DialogConfirm,
-  HelpOverlay,
+  OverlayFrame,
   ToastOverlay,
   useConfirmDialog,
   useToast,
@@ -68,27 +68,6 @@ function SessionRow({ session, selected, maxWidth }: { session: SessionInfo; sel
   );
 }
 
-function ExecutorStatusBar({ executor }: { executor: ExecutorInfo }) {
-  const stateColor =
-    executor.state === 'running' ? THEME.success
-    : executor.state === 'idle' ? THEME.textMuted
-    : THEME.warning;
-
-  let label = `executor: ${executor.state}`;
-  if (executor.state === 'running') {
-    const total = executor.runningCount + executor.pendingCount;
-    label = `executor: running (${total} task${total !== 1 ? 's' : ''})`;
-  }
-
-  return (
-    <box style={{ paddingLeft: 1, height: 1, flexShrink: 0 }}>
-      <text>
-        <span fg={stateColor}>{label}</span>
-      </text>
-    </box>
-  );
-}
-
 function TaskRow_({ task, selected, maxWidth }: { task: TaskRow; selected: boolean; maxWidth: number }) {
   const icon = taskStatusIcon(task.status);
   const color = taskStatusColor(task.status, THEME);
@@ -119,7 +98,7 @@ function TaskRow_({ task, selected, maxWidth }: { task: TaskRow; selected: boole
   );
 }
 
-function TasksModal({
+export function TasksModal({
   visible,
   tasks,
   selectedIndex,
@@ -133,7 +112,7 @@ function TasksModal({
   const { width } = useTerminalDimensions();
   if (!visible) return null;
 
-  const modalWidth = Math.max(56, Math.min(width - 6, 96));
+  const modalWidth = Math.max(64, Math.min(width - 12, 80));
   const selectedTask = tasks[selectedIndex] ?? null;
   const selectedColor = selectedTask ? taskStatusColor(selectedTask.status, THEME) : THEME.textMuted;
   const selectedIcon = selectedTask ? taskStatusIcon(selectedTask.status) : '-';
@@ -149,9 +128,8 @@ function TasksModal({
   }
 
   return (
-    <box flexDirection="column" style={{ paddingTop: 1, paddingLeft: 2 }}>
-      <text fg={THEME.border}>{'-'.repeat(modalWidth)}</text>
-      <box flexDirection="column" style={{ paddingLeft: 1, paddingRight: 1, width: modalWidth }}>
+    <OverlayFrame width={modalWidth} bordered={false}>
+      <box flexDirection="column" style={{ width: modalWidth - 2 }}>
         <text bold fg={THEME.textStrong}>Executor Tasks</text>
         <text fg={THEME.textMuted}>{showHistory ? 'running + recent history' : 'running + pending queue'}</text>
         <text> </text>
@@ -189,12 +167,11 @@ function TasksModal({
         <text> </text>
         <text fg={THEME.textMuted}>[j/k] navigate  [enter] open  [h] history  [t/esc] close</text>
       </box>
-      <text fg={THEME.border}>{'-'.repeat(modalWidth)}</text>
-    </box>
+    </OverlayFrame>
   );
 }
 
-export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db, worktreeFilter, onClearFilter, onSelect, onSelectTask, onFilterChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
+export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db, worktreeFilter, onClearFilter, onSelect, onSelectTask, onFilterChange, onFilterModeChange, showTasks, showHistory, showHelp, taskSelectedIndex, onShowTasksChange, onShowHistoryChange, onShowHelpChange, onTaskSelectedIndexChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
   sessions: SessionInfo[];
   cwd: string;
   initialIndex?: number;
@@ -206,18 +183,23 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
   onSelect: (s: SessionInfo | null, index: number) => void;
   onSelectTask: (task: TaskRow) => void;
   onFilterChange?: (query: string) => void;
+  onFilterModeChange?: (active: boolean) => void;
+  showTasks: boolean;
+  showHistory: boolean;
+  showHelp: boolean;
+  taskSelectedIndex: number;
+  onShowTasksChange: (visible: boolean) => void;
+  onShowHistoryChange: (visible: boolean | ((prev: boolean) => boolean)) => void;
+  onShowHelpChange: (visible: boolean) => void;
+  onTaskSelectedIndexChange: (index: number | ((prev: number) => number)) => void;
   onQuit: () => void;
   onTabSwitch: () => void;
   showFooter?: boolean;
   inputLocked?: boolean;
 }) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
-  const [showTasks, setShowTasks] = useState(false);
-  const [showHistory, setShowHistory] = useState(false);
-  const [showHelp, setShowHelp] = useState(false);
   const [filterMode, setFilterMode] = useState(false);
   const [filterQuery, setFilterQuery] = useState('');
-  const [taskSelectedIndex, setTaskSelectedIndex] = useState(0);
   const { width } = useTerminalDimensions();
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   const toast = useToast();
@@ -251,6 +233,10 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
   }, [filterQuery, onFilterChange]);
 
   useEffect(() => {
+    onFilterModeChange?.(filterMode);
+  }, [filterMode, onFilterModeChange]);
+
+  useEffect(() => {
     if (selectedIndex >= visibleSessions.length && visibleSessions.length > 0) {
       setSelectedIndex(visibleSessions.length - 1);
     }
@@ -263,9 +249,9 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
 
   useEffect(() => {
     if (taskSelectedIndex >= visibleTasks.length && visibleTasks.length > 0) {
-      setTaskSelectedIndex(visibleTasks.length - 1);
+      onTaskSelectedIndexChange(visibleTasks.length - 1);
     }
-  }, [visibleTasks.length, taskSelectedIndex]);
+  }, [visibleTasks.length, taskSelectedIndex, onTaskSelectedIndexChange]);
 
   useEffect(() => {
     const scroll = scrollRef.current;
@@ -322,33 +308,33 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
       }
     }
     if (showHelp) {
-      if (key.name === '?' || key.name === 'escape') setShowHelp(false);
+      if (key.name === '?' || key.name === 'escape') onShowHelpChange(false);
       return;
     }
 
     if (showTasks) {
       if (key.name === 't' || key.name === 'escape') {
-        setShowTasks(false);
+        onShowTasksChange(false);
         return;
       }
       if (key.name === 'h') {
-        setShowHistory(v => !v);
+        onShowHistoryChange(v => !v);
         return;
       }
       if (key.name === 'up' || key.name === 'k') {
-        setTaskSelectedIndex(i => Math.max(0, i - 1));
+        onTaskSelectedIndexChange(i => Math.max(0, i - 1));
         return;
       }
       if (key.name === 'down' || key.name === 'j') {
-        setTaskSelectedIndex(i => Math.min(visibleTasks.length - 1, i + 1));
+        onTaskSelectedIndexChange(i => Math.min(visibleTasks.length - 1, i + 1));
         return;
       }
       if (key.name === 'g' && !key.shift) {
-        setTaskSelectedIndex(0);
+        onTaskSelectedIndexChange(0);
         return;
       }
       if (key.name === 'G' || (key.name === 'g' && key.shift)) {
-        setTaskSelectedIndex(Math.max(0, visibleTasks.length - 1));
+        onTaskSelectedIndexChange(Math.max(0, visibleTasks.length - 1));
         return;
       }
       if (key.name === 'return' && visibleTasks[taskSelectedIndex]) {
@@ -369,13 +355,13 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
     }
 
     if (key.name === 'q') return onQuit();
-    if (key.name === '?') return setShowHelp(true);
+    if (key.name === '?') return onShowHelpChange(true);
     if (key.name === '/') return setFilterMode(true);
     if (key.name === 'f') return setFilterQuery(prev => setOrToggleFilterToken(prev, 'status', 'failed'));
     if (key.name === 'a') return setFilterQuery(prev => setOrToggleFilterToken(prev, 'status', 'running'));
     if (key.name === 'tab') return onTabSwitch();
     if (key.name === 't') {
-      setShowTasks(true);
+      onShowTasksChange(true);
       return;
     }
     if (key.name === 'e') return void handleExecutorToggle();
@@ -418,7 +404,7 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
         </text>
       </box>
 
-      {(filterMode || filterQuery.trim()) ? <FilterBar query={filterQuery} /> : null}
+      {showFooter && (filterMode || filterQuery.trim()) ? <FilterBar query={filterQuery} /> : null}
 
       <scrollbox key={`sl-${visibleSessions.length}-${visibleSessions.filter(s => s.isRunning).length}-${filterQuery}`} ref={(r: ScrollBoxRenderable) => { scrollRef.current = r; }} scrollbarOptions={{ visible: false }} style={{ flexGrow: 1 }}>
         {visibleSessions.length === 0 && visibleTasks.length === 0 ? (
@@ -440,35 +426,10 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
         ))}
       </scrollbox>
 
-      <ExecutorStatusBar executor={executor} />
-
       <DialogConfirm
         prompt={dialog.prompt}
         visible={dialog.visible}
         onRespond={dialog.respond}
-      />
-
-      <HelpOverlay
-        title="Sessions Help"
-        visible={showHelp}
-        lines={[
-          '[j/k] move selection',
-          '[g/G] jump top or bottom',
-          '[/] filter current list',
-          '[f] toggle failed filter',
-          '[a] toggle running filter',
-          '[t] open tasks modal',
-          '[e] start/stop executor',
-          '[tab] next tab',
-          '[q] quit',
-        ]}
-      />
-
-      <TasksModal
-        visible={showTasks}
-        tasks={visibleTasks}
-        selectedIndex={taskSelectedIndex}
-        showHistory={showHistory}
       />
 
       <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
