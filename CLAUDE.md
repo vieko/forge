@@ -301,6 +301,48 @@ depends: [auth-base.md]
 ---
 ```
 
+## Spec Lifecycle
+
+### Location
+- Default output: `specs/` relative to the target repo
+- Override with `-o <dir>` on `forge define` or `forge audit`
+- Remediation specs go in `remediation/` (or custom via `-o`), prefixed `r1-`, `r2-` per round
+- `.bonfire/specs/` is recognized as an alternate spec directory for smart dispatch
+
+### Commit rules
+- `forge define` does NOT auto-commit — specs are written to disk and registered in the manifest but left uncommitted for review
+- `forge run` commits only in worktree branches (on success). The main branch is never directly committed to by forge
+- `forge pipeline` creates its own worktree (`forge-<id>` branch) and commits at stage boundaries
+- `.forge/specs.json` (manifest) should be committed — it's in `.forge/.gitignore` as tracked
+- User decides when to commit spec files to their branch
+
+### Status progression
+```
+pending → running → passed / failed
+                      ↓
+              audited (forge audit clean pass)
+                      ↓
+              proofed (forge proof generated tests)
+                      ↓
+              verified (forge verify ran tests + created PR)
+```
+
+- `passed` = verification (build + test) succeeded
+- A spec is considered **done** when its PR merges to main
+- Completed spec files stay in place — no archival or movement. They serve as documentation
+- `forge specs --resolve` manually marks a spec as passed (for work done outside forge)
+
+### Ownership during pipeline
+- The pipeline process owns execution — TUI/MCP only mutate gates
+- Pipeline commits happen in the pipeline's worktree branch, never on main
+- Nested SDK guard (`CLAUDECODE=1`) prevents Claude Code from running SDK commands while a pipeline is active
+- User should not commit or create PRs for pipeline-managed work until the pipeline completes or is cancelled
+
+### Specs and PRs
+- Default: one PR per pipeline run (covers all specs in the pipeline)
+- `--isolate` mode: one worktree per spec, consolidated via `forge consolidate` into a single PR
+- Single-spec runs: one worktree, one branch, user creates PR manually or via `forge verify`
+
 ## Development
 
 ```bash
