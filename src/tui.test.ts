@@ -518,17 +518,32 @@ describe('specs list data', () => {
     expect(iconMap.running).toBe('>');
   });
 
-  test('directory grouping extracts parent dir from spec path', () => {
-    const specs = ['auth/login.md', 'auth/oauth.md', 'db/migrate.md', 'standalone.md'];
-    const groups = new Map<string, string[]>();
-    for (const spec of specs) {
-      const dir = spec.includes('/') ? path.dirname(spec) : '.';
-      if (!groups.has(dir)) groups.set(dir, []);
-      groups.get(dir)!.push(spec);
-    }
-    expect(groups.get('auth')).toHaveLength(2);
-    expect(groups.get('db')).toHaveLength(1);
-    expect(groups.get('.')).toHaveLength(1);
+  test('status grouping prioritizes running, failed, pending, then passed', () => {
+    const rank = (status: 'pending' | 'running' | 'passed' | 'failed') => {
+      switch (status) {
+        case 'running': return 0;
+        case 'failed': return 1;
+        case 'pending': return 2;
+        case 'passed': return 3;
+      }
+    };
+
+    const ordered = ['passed', 'pending', 'running', 'failed'].sort(
+      (a, b) => rank(a as 'pending' | 'running' | 'passed' | 'failed') - rank(b as 'pending' | 'running' | 'passed' | 'failed'),
+    );
+
+    expect(ordered).toEqual(['running', 'failed', 'pending', 'passed']);
+  });
+
+  test('specs within a status group sort by most recent update first', () => {
+    const entries = [
+      makeEntry({ spec: 'older.md', status: 'failed', updatedAt: '2026-01-01T00:00:00Z' }),
+      makeEntry({ spec: 'newer.md', status: 'failed', updatedAt: '2026-01-03T00:00:00Z' }),
+      makeEntry({ spec: 'middle.md', status: 'failed', updatedAt: '2026-01-02T00:00:00Z' }),
+    ];
+
+    const ordered = [...entries].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    expect(ordered.map(entry => entry.spec)).toEqual(['newer.md', 'middle.md', 'older.md']);
   });
 });
 
@@ -687,5 +702,52 @@ describe('tool block input and output rendering data', () => {
     // Toggle: pressing Enter removes from set (collapse)
     expandedSet.delete('tu-abc');
     expect(expandedSet.has('tu-abc')).toBe(false);
+  });
+});
+
+describe('session activity summarization', () => {
+  test('extracts file operations, bash commands, verification, and final result', async () => {
+    const { summarizeSessionActivity } = await import('./tui.js');
+    const events: SessionEvent[] = [
+      {
+        type: 'tool_call_start',
+        timestamp: '2026-03-01T00:00:00Z',
+        toolName: 'Read',
+        input: { file_path: 'src/app.ts' },
+      },
+      {
+        type: 'tool_call_start',
+        timestamp: '2026-03-01T00:00:01Z',
+        toolName: 'Bash',
+        input: { command: 'bun run typecheck' },
+      },
+      {
+        type: 'tool_call_result',
+        timestamp: '2026-03-01T00:00:02Z',
+        toolName: 'Bash',
+        output: 'Found 0 errors',
+      },
+      {
+        type: 'text_delta',
+        timestamp: '2026-03-01T00:00:03Z',
+        content: 'Implemented the requested change.',
+      },
+      {
+        type: 'session_end',
+        timestamp: '2026-03-01T00:00:04Z',
+        durationSeconds: 12,
+        costUsd: 0.42,
+        status: 'success',
+      },
+    ];
+
+    const blocks = groupEvents(events);
+    const summary = summarizeSessionActivity(blocks);
+
+    expect(summary.fileOps).toContain('Read src/app.ts');
+    expect(summary.bashCommands).toContain('bun run typecheck');
+    expect(summary.verification[0]).toContain('bun run typecheck');
+    expect(summary.finalResult).toContain('success');
+    expect(summary.finalText).toContain('Implemented the requested change.');
   });
 });

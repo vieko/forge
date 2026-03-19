@@ -164,28 +164,28 @@ describe('TUI: CLI command registration', () => {
 // ── Tab bar / view switcher ─────────────────────────────────
 
 describe('TUI: view switcher (tab bar)', () => {
-  test('tui.tsx contains Sessions and Specs tab labels', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
+  test('tui-app.tsx contains Sessions and Specs tab labels', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-app.tsx'), 'utf-8');
     expect(content).toContain('Sessions');
     expect(content).toContain('Specs');
   });
 
-  test('tui.tsx contains Pipeline tab label', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
+  test('tui-app.tsx contains Pipeline tab label', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-app.tsx'), 'utf-8');
     expect(content).toContain('Pipeline');
   });
 
-  test('tui.tsx tracks active tab state', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
+  test('tui-app.tsx tracks active tab state', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-app.tsx'), 'utf-8');
     // Should have tab state tracking
     expect(content).toMatch(/activeTab|tab|Tab/);
   });
 
-  test('tab key handler is registered', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
+  test('tab key handler is registered in app shell', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-app.tsx'), 'utf-8');
     // Should handle tab key for switching
     expect(content).toContain('tab');
-    expect(content).toContain('useKeyboard');
+    expect(content).toContain('nextTab');
   });
 });
 
@@ -324,28 +324,32 @@ describe('TUI: specs list view', () => {
     expect(loaded.specs).toHaveLength(3);
   });
 
-  test('entries grouped by parent directory', () => {
+  test('entries can be grouped by status priority', () => {
     const entries = [
-      makeEntry({ spec: 'auth/login.md' }),
-      makeEntry({ spec: 'auth/oauth.md' }),
-      makeEntry({ spec: 'db/migrate.md' }),
-      makeEntry({ spec: 'db/seed.md' }),
-      makeEntry({ spec: 'root-spec.md' }),
+      makeEntry({ spec: 'done.md', status: 'passed' }),
+      makeEntry({ spec: 'queued.md', status: 'pending' }),
+      makeEntry({ spec: 'active.md', status: 'running' }),
+      makeEntry({ spec: 'broken.md', status: 'failed' }),
     ];
 
-    // Group by directory
-    const groups = new Map<string, SpecEntry[]>();
+    const rank = (status: SpecEntry['status']) => {
+      switch (status) {
+        case 'running': return 0;
+        case 'failed': return 1;
+        case 'pending': return 2;
+        case 'passed': return 3;
+      }
+    };
+
+    const groups = new Map<SpecEntry['status'], SpecEntry[]>();
     for (const entry of entries) {
-      const dir = path.dirname(entry.spec);
-      const key = dir === '.' ? 'specs/' : dir + '/';
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push(entry);
+      const group = groups.get(entry.status) ?? [];
+      group.push(entry);
+      groups.set(entry.status, group);
     }
 
-    expect(groups.size).toBe(3);
-    expect(groups.get('auth/')!).toHaveLength(2);
-    expect(groups.get('db/')!).toHaveLength(2);
-    expect(groups.get('specs/')!).toHaveLength(1);
+    const orderedGroups = [...groups.keys()].sort((a, b) => rank(a) - rank(b));
+    expect(orderedGroups).toEqual(['running', 'failed', 'pending', 'passed']);
   });
 
   test('status icon mapping: + passed, x failed, - pending', () => {
@@ -478,34 +482,78 @@ describe('TUI: spec detail view', () => {
 // ── TUI component structure (source analysis) ──────────────
 
 describe('TUI: component structure', () => {
-  test('tui.tsx contains SessionsList component', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
+  test('tui-app.tsx composes SessionsList component', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-app.tsx'), 'utf-8');
     expect(content).toContain('SessionsList');
   });
 
-  test('tui.tsx contains SessionDetail component', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
+  test('tui-app.tsx composes SessionDetail component', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-app.tsx'), 'utf-8');
     expect(content).toContain('SessionDetail');
   });
 
-  test('tui.tsx contains SpecsList component', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
+  test('tui-app.tsx composes SpecsList component', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-app.tsx'), 'utf-8');
     expect(content).toContain('SpecsList');
   });
 
-  test('tui.tsx contains SpecDetail component', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
+  test('tui-app.tsx composes SpecDetail component', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-app.tsx'), 'utf-8');
     expect(content).toContain('SpecDetail');
   });
 
-  test('tui.tsx uses @opentui/react', async () => {
+  test('tui.tsx remains a thin entrypoint using @opentui/react', async () => {
     const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
     expect(content).toContain('@opentui/react');
+    expect(content).toContain('App');
+    expect(content).toContain('runTui');
   });
 
-  test('tui.tsx uses scrollbox component', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
+  test('Sessions list module owns scrollbox rendering', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-sessions-list.tsx'), 'utf-8');
     expect(content).toContain('scrollbox');
+  });
+
+  test('Pipelines module owns pipeline list/detail rendering', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-pipelines.tsx'), 'utf-8');
+    expect(content).toContain('PipelinesList');
+    expect(content).toContain('PipelineDetail');
+    expect(content).toContain('scrollbox');
+  });
+
+  test('Worktrees module owns worktree list/detail rendering', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-worktrees.tsx'), 'utf-8');
+    expect(content).toContain('WorktreesList');
+    expect(content).toContain('WorktreeDetail');
+    expect(content).toContain('scrollbox');
+  });
+
+  test('Specs module owns specs list/detail rendering', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-specs.tsx'), 'utf-8');
+    expect(content).toContain('SpecsList');
+    expect(content).toContain('SpecDetail');
+    expect(content).toContain('scrollbox');
+  });
+
+  test('Session detail module owns session activity/detail rendering', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-session-detail.tsx'), 'utf-8');
+    expect(content).toContain('SessionDetail');
+    expect(content).toContain('summarizeSessionActivity');
+  });
+
+  test('App shell owns cross-tab routing/state', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-app.tsx'), 'utf-8');
+    expect(content).toContain('function nextTab');
+    expect(content).toContain("activeTab === 'pipeline'");
+    expect(content).toContain("activeTab === 'worktrees'");
+    expect(content).toContain("activeTab === 'specs'");
+  });
+
+  test('Data helpers moved into tui-data.ts', async () => {
+    const content = await fs.readFile(path.join(import.meta.dirname, 'tui-data.ts'), 'utf-8');
+    expect(content).toContain('loadSessionsFromDb');
+    expect(content).toContain('loadSessionFromResult');
+    expect(content).toContain('getExecutorInfo');
   });
 });
 

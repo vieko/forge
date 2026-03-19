@@ -275,18 +275,18 @@ describe('TUI worktree detail: run status display', () => {
     const statuses = ['passed', 'success'];
     for (const status of statuses) {
       const icon = (status === 'passed' || status === 'success') ? '+' : 'x';
-      const color = (status === 'passed' || status === 'success') ? '#22c55e' : '#ef4444';
+      const color = (status === 'passed' || status === 'success') ? '#98c379' : '#e06c75';
       expect(icon).toBe('+');
-      expect(color).toBe('#22c55e');
+      expect(color).toBe('#98c379');
     }
   });
 
   test('failed runs get x icon with red color', () => {
     const status = 'failed';
     const icon = (status === 'passed' || status === 'success') ? '+' : 'x';
-    const color = (status === 'passed' || status === 'success') ? '#22c55e' : '#ef4444';
+    const color = (status === 'passed' || status === 'success') ? '#98c379' : '#e06c75';
     expect(icon).toBe('x');
-    expect(color).toBe('#ef4444');
+    expect(color).toBe('#e06c75');
   });
 
   test('cost formats as USD with 2 decimal places', () => {

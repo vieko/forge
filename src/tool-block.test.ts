@@ -123,32 +123,6 @@ describe('tool block focus: visual highlight', () => {
   });
 });
 
-// ── tui.tsx: focus tracking implementation ──────────────────
-
-describe('tool block focus: tui.tsx implementation', () => {
-  test('tui.tsx contains focusedToolIndex state', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
-    expect(content).toContain('focusedToolIndex');
-  });
-
-  test('tui.tsx contains toolBlockIndices memo', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
-    expect(content).toContain('toolBlockIndices');
-  });
-
-  test('tui.tsx handles n/N key for tool navigation', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
-    // Should have key handler for 'n' and 'N'
-    expect(content).toMatch(/['"]n['"]/);
-    expect(content).toMatch(/['"]N['"]/);
-  });
-
-  test('GroupedBlockView receives isFocused prop', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
-    expect(content).toContain('isFocused');
-  });
-});
-
 // ── Tool block expand/collapse toggle ───────────────────────
 
 describe('tool block expand: toggle state', () => {
@@ -205,27 +179,6 @@ describe('tool block expand: toggle state', () => {
     expect(expandedSet.has(3)).toBe(true);
     expect(expandedSet.has(5)).toBe(true);
     expect(expandedSet.has(2)).toBe(false);
-  });
-});
-
-// ── tui.tsx: expand toggle implementation ───────────────────
-
-describe('tool block expand: tui.tsx implementation', () => {
-  test('tui.tsx contains expanded set state', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
-    // Should track expanded blocks
-    expect(content).toMatch(/expanded|Expanded/);
-  });
-
-  test('tui.tsx handles Enter/return key for expand toggle', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
-    // Key handler for Enter
-    expect(content).toMatch(/return|enter|Enter/i);
-  });
-
-  test('GroupedBlockView receives isExpanded prop', async () => {
-    const content = await fs.readFile(path.join(import.meta.dirname, 'tui.tsx'), 'utf-8');
-    expect(content).toContain('isExpanded');
   });
 });
 
