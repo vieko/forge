@@ -164,7 +164,7 @@ forge watch -C ~/other-repo     # Different repo
 ## Architecture
 
 ```
-~14200 lines (source) + ~11750 lines (tests)
+~50000 lines (source, 51 files) + ~24700 lines (tests, 66 files)
 
 User Prompt
     ↓
@@ -206,10 +206,11 @@ src/
 ├── stats.ts         # showStats (aggregate run statistics)
 ├── proof-runner.ts   # forge verify (SDK agent: runs tests, fixes failures, creates PR)
 ├── pipeline.ts      # Pipeline orchestrator (stage loop, gate polling, single-writer model)
-├── pipeline-state.ts # FileSystemStateProvider (CRUD for pipeline.json, file locking)
+├── pipeline-state.ts # SqliteStateProvider (CRUD for pipelines table, DB locking)
 ├── pipeline-types.ts # Pipeline, Stage, Gate, PipelineEvent types, provider interfaces
 ├── pipeline-status.ts # CLI display for pipeline status
 ├── mcp.ts           # MCP server (8 tools, stdio transport, async task spawn, pipeline-aware forge_task)
+├── executor.ts      # Executor daemon: per-project, auto-spawn, idle timeout, stale cleanup, task dispatch
 ├── consolidate.ts   # forge consolidate: dep-order merge, incremental type-check, agent conflict resolution, PR
 ├── worktree-cli.ts  # forge worktree list/status/mark-ready/prune/repair CLI
 ├── worktree-limits.ts # disk quota + count enforcement
@@ -227,7 +228,7 @@ src/
 ├── stats.test.ts    # Tests for stats aggregation
 ├── pipeline.test.ts # Tests for pipeline orchestrator (state, gates, resume, artifacts)
 ├── mcp.test.ts      # Tests for MCP server (protocol-level via stdio client)
-└── + 11 proof-generated test files (775 tests total)
+└── + 52 proof-generated test files (1597 tests total across 66 files)
 
 .forge/
 ├── .gitignore    # Auto-created: tracks specs.json + pipeline.json
@@ -269,6 +270,7 @@ src/
 21. **Structured run logs** — `ForgeResult` includes `numTurns`, `toolCalls`, `toolBreakdown`, `verifyAttempts`, `retryAttempts`, `logPath` for post-run analysis
 22. **Stats** — `forge stats` aggregates across all runs: total cost, success rate, avg duration. `--by-spec` and `--by-model` breakdowns, `--since` date filter
 23. **Graceful Ctrl-C** — two-phase shutdown: first Ctrl-C aborts running SDK queries via `AbortController` and skips pending specs; second Ctrl-C force-exits. Batch summary shows cancelled specs with `--pending` hint
+24. **API error classification** — `classifyTerminalResult()` separates empty/no-cost responses (override to failed) from API errors in final response (override to failed). Legitimate work is never discarded by the override guard
 25. **Proof** — `forge proof` reads specs and the codebase, then generates real `.test.ts` files colocated with source (or in the project's test directory), a `manual.md` human checklist, and a `manifest.json` mapping specs to tests. Auto-detects test convention (colocated vs separate) and test framework (bun/vitest/jest). Supports multiple spec paths: `forge proof a.md b.md c.md`. `forge prove` is a backward-compatible alias.
 26. **Verify** — `forge verify` uses an Agent SDK query to run test files from the proof manifest, fix any failures, and create a GitHub PR. Full observability: sessions, events.jsonl, TUI drill-down, `forge watch` streaming. Agent ends with a summary: PR URL, title, and one-sentence description. Completes the pipeline: define -> run -> audit -> proof -> verify
 27. **Nested session guard** — SDK-invoking commands (`run`, `audit`, `define`, `review`, `proof`, `verify`, `specs --check`, `pipeline`) are blocked when running inside Claude Code (`CLAUDECODE=1`). Prints the command to copy. Bypass with `FORGE_ALLOW_NESTED=1` (for debugging only — the nested SDK limitation is real)
