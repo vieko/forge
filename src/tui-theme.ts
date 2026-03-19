@@ -4,6 +4,7 @@ export const TUI_THEME = {
   success: '#98c379',
   warning: '#e5c07b',
   error: '#e06c75',
+  searchMatch: '#ff79c6',
   text: '#abb2bf',
   textMuted: '#818899',
   textStrong: '#f6f7fb',

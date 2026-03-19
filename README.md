@@ -112,6 +112,8 @@ Project-level overrides in `.forge/config.json`:
 ## Read More
 
 - [The Orchestrator I Didn't Build](https://vieko.dev/outcomes)
+- [Execution Best Practices](docs/execution-best-practices.md)
+- [Testing Conventions](docs/testing-conventions.md)
 
 ## MCP Server
 

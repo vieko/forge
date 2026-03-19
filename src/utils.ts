@@ -4,6 +4,7 @@ import path from 'path';
 import os from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import crypto from 'crypto';
 import { getDb, insertRun, insertWorktree, getWorktreeByPath, updateWorktreeStatus } from './db.js';
 import { setupWorktree, teardownWorktree } from './workspace.js';
 import { checkWorktreeLimits, autoPruneMergedWorktrees } from './worktree-limits.js';
@@ -202,7 +203,7 @@ export function sleep(ms: number): Promise<void> {
  */
 export function generateWorkGroupId(): string {
   const timestamp = Math.floor(Date.now() / 1000);
-  const random = Math.random().toString(16).substring(2, 6);
+  const random = crypto.randomBytes(3).toString('hex');
   return `wg-${timestamp}-${random}`;
 }
 

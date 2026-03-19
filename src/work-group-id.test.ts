@@ -25,7 +25,7 @@ beforeEach(() => {
 describe('generateWorkGroupId', () => {
   test('generates ID with format wg-{timestamp}-{random}', () => {
     const id = generateWorkGroupId();
-    expect(id).toMatch(/^wg-\d+-[0-9a-f]{4}$/);
+    expect(id).toMatch(/^wg-\d+-[0-9a-f]{6}$/);
   });
 
   test('timestamp portion is current epoch seconds', () => {
@@ -39,10 +39,10 @@ describe('generateWorkGroupId', () => {
     expect(timestamp).toBeLessThanOrEqual(after);
   });
 
-  test('random suffix is 4 hex characters', () => {
+  test('random suffix is 6 hex characters', () => {
     const id = generateWorkGroupId();
     const suffix = id.split('-')[2];
-    expect(suffix).toMatch(/^[0-9a-f]{4}$/);
+    expect(suffix).toMatch(/^[0-9a-f]{6}$/);
   });
 
   test('generates unique IDs across calls', () => {
@@ -50,7 +50,7 @@ describe('generateWorkGroupId', () => {
     for (let i = 0; i < 100; i++) {
       ids.add(generateWorkGroupId());
     }
-    // With 4 hex chars of randomness, collisions should be extremely rare
+    // With 6 hex chars (16.7M possibilities), collisions are effectively impossible
     expect(ids.size).toBe(100);
   });
 

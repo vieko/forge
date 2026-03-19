@@ -5,7 +5,8 @@ import path from 'path';
 import os from 'os';
 import { setupHermeticGit, teardownHermeticGit } from './test-utils.js';
 import { parseScope } from './deps.js';
-import { detectVerification } from './verify.js';
+import { detectVerification, determineAffectedPackages } from './verify.js';
+import type { MonorepoContext } from './types.js';
 
 // ── Hermetic Git ─────────────────────────────────────────────
 
@@ -251,5 +252,22 @@ describe('scoped typecheck: per-merge scope isolation', () => {
     expect(scopes.find(s => s.name === 'api.md')!.scope).toBe('packages/api');
     expect(scopes.find(s => s.name === 'web.md')!.scope).toBe('packages/web');
     expect(scopes.find(s => s.name === 'root.md')!.scope).toBeUndefined();
+  });
+
+  test('merge scope resolves to package names before verification filters are built', () => {
+    const monorepo: MonorepoContext = {
+      type: 'pnpm',
+      packages: new Map([
+        ['packages/api', '@test/api'],
+        ['packages/web', '@test/web'],
+      ]),
+      affected: [],
+    };
+    const content = `---\nscope: packages/api\n---\n# API`;
+    const scope = parseScope(content);
+
+    const affected = determineAffectedPackages(monorepo, 'specs/api.md', content, tmpDir, scope);
+
+    expect(affected).toEqual(['@test/api']);
   });
 });

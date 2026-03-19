@@ -194,7 +194,7 @@ function TasksModal({
   );
 }
 
-export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db, worktreeFilter, onClearFilter, onSelect, onSelectTask, onFilterChange, onQuit, onTabSwitch, showFooter = true }: {
+export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db, worktreeFilter, onClearFilter, onSelect, onSelectTask, onFilterChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
   sessions: SessionInfo[];
   cwd: string;
   initialIndex?: number;
@@ -209,6 +209,7 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
   onQuit: () => void;
   onTabSwitch: () => void;
   showFooter?: boolean;
+  inputLocked?: boolean;
 }) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
   const [showTasks, setShowTasks] = useState(false);
@@ -305,6 +306,7 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
   };
 
   useKeyboard((key) => {
+    if (inputLocked) return;
     if (dialog.visible) return;
     if (filterMode) {
       const next = nextFilterValue(filterQuery, key);
@@ -359,6 +361,10 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
     if (key.name === 'escape' && filterQuery.trim()) {
       setFilterQuery('');
       setFilterMode(false);
+      return;
+    }
+
+    if (key.ctrl || key.meta) {
       return;
     }
 

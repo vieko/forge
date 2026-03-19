@@ -22,7 +22,7 @@ import { execAsync, resolveWorkingDir, resolveConfig, detectPackageManager } fro
 import type { PackageManager } from './utils.js';
 import { loadSpecDeps, topoSort, parseScope } from './deps.js';
 import type { SpecDep, DepLevel } from './deps.js';
-import { detectVerification, runVerification } from './verify.js';
+import { detectVerification, detectMonorepo, determineAffectedPackages, runVerification } from './verify.js';
 import { runQuery } from './core.js';
 import { DIM, RESET, BOLD, showBanner, createInlineSpinner } from './display.js';
 import { loadManifest } from './specs.js';
@@ -950,7 +950,34 @@ export async function runConsolidate(options: ConsolidateOptions): Promise<Conso
       console.log(`\n${BOLD}Verification${RESET}`);
     }
 
-    const verification = await runVerification(tmpDir, quiet);
+    // Collect affected packages from merged worktrees' spec scopes
+    const monorepo = await detectMonorepo(tmpDir);
+    if (monorepo) {
+      const affectedSet = new Set<string>();
+      for (const wtId of merged) {
+        const wt = readyWorktrees.find(w => w.id === wtId);
+        if (!wt) continue;
+        try {
+          const specFullPath = path.resolve(workingDir, wt.spec_path);
+          const content = await fs.readFile(specFullPath, 'utf-8');
+          const scope = parseScope(content);
+          const affected = determineAffectedPackages(monorepo, wt.spec_path, content, workingDir, scope);
+          for (const pkgName of affected) {
+            affectedSet.add(pkgName);
+          }
+        } catch {
+          // Best effort -- proceed without scope
+        }
+      }
+      if (affectedSet.size > 0) {
+        monorepo.affected = [...affectedSet];
+        if (!quiet) {
+          console.log(`${DIM}[forge]${RESET} Scoped to packages: ${monorepo.affected.join(', ')}`);
+        }
+      }
+    }
+
+    const verification = await runVerification(tmpDir, quiet, undefined, monorepo);
 
     if (!verification.passed) {
       if (!quiet) {

@@ -19,7 +19,7 @@ import path from 'path';
 import os from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { setupHermeticGit, teardownHermeticGit } from './test-utils.js';
+import { configureHermeticGitRepo, setupHermeticGit, teardownHermeticGit } from './test-utils.js';
 
 const execAsync = promisify(exec);
 
@@ -37,6 +37,7 @@ async function makeTmpDir(): Promise<string> {
   await fs.mkdir(path.join(dir, '.forge'), { recursive: true });
   // Initialize as git repo (worktree-first pipelines require git)
   await execAsync('git init', { cwd: dir });
+  await configureHermeticGitRepo(dir);
   await execAsync('git commit --allow-empty -m "init"', { cwd: dir });
   return dir;
 }
@@ -77,7 +78,7 @@ function createMockEvents(): EventProvider & { events: PipelineEvent[] } {
 
 describe('SqliteStateProvider', () => {
   beforeEach(async () => { tmpDir = await makeTmpDir(); });
-  afterEach(async () => { await fs.rm(tmpDir, { recursive: true, force: true }); });
+  afterEach(async () => { if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true }); });
 
   test('createPipeline writes and returns pipeline', async () => {
     const provider = new SqliteStateProvider(getTestDb());
@@ -192,7 +193,7 @@ describe('DEFAULT_GATES', () => {
 
 describe('gate configuration', () => {
   beforeEach(async () => { tmpDir = await makeTmpDir(); });
-  afterEach(async () => { await fs.rm(tmpDir, { recursive: true, force: true }); });
+  afterEach(async () => { if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true }); });
 
   test('gates use DEFAULT_GATES when no overrides', async () => {
     const provider = new SqliteStateProvider(getTestDb());
@@ -231,7 +232,7 @@ describe('gate configuration', () => {
 
 describe('runPipeline', () => {
   beforeEach(async () => { tmpDir = await makeTmpDir(); });
-  afterEach(async () => { await fs.rm(tmpDir, { recursive: true, force: true }); });
+  afterEach(async () => { if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true }); });
 
   test('runs all stages with auto gates', async () => {
     const provider = new SqliteStateProvider(getTestDb());

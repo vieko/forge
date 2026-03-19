@@ -16,6 +16,7 @@ import {
 } from './tui-filter.js';
 import { FilterBar, HelpOverlay, ToastOverlay, useToast } from './tui-ui.js';
 import { formatCost, formatDuration, formatRelativeTime, padStart, truncate } from './tui-common.js';
+import { buildLineSearchData, renderHighlightedText } from './tui-search.js';
 
 interface SpecDisplayRow {
   entry: SpecEntry;
@@ -92,7 +93,7 @@ function SpecGroupHeader({ label }: { label: string }) {
   );
 }
 
-export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterChange, onQuit, onTabSwitch, showFooter = true }: {
+export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
   cwd: string;
   initialIndex?: number;
   onSelect: (entry: SpecEntry | null, index: number) => void;
@@ -101,6 +102,7 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
   onQuit: () => void;
   onTabSwitch: (index: number) => void;
   showFooter?: boolean;
+  inputLocked?: boolean;
 }) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
   const [manifest, setManifest] = useState<SpecManifest | null>(null);
@@ -211,6 +213,7 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
   }, [displayIndex]);
 
   useKeyboard((key) => {
+    if (inputLocked) return;
     if (filterMode) {
       const next = nextFilterValue(filterQuery, key);
       if (next === '') {
@@ -233,6 +236,11 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
       setFilterMode(false);
       return;
     }
+
+    if (key.ctrl || key.meta) {
+      return;
+    }
+
     if (key.name === 'q') return onQuit();
     if (key.name === '?') return setShowHelp(true);
     if (key.name === '/') return setFilterMode(true);
@@ -381,7 +389,7 @@ function SpecRunRow({ run, selected, maxWidth }: { run: SpecRun; selected: boole
   );
 }
 
-export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitch, interactive = true, showFooter = true }: {
+export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitch, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false }: {
   entry: SpecEntry;
   cwd: string;
   onSelectRun: (run: SpecRun) => void;
@@ -390,6 +398,11 @@ export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitc
   onTabSwitch: () => void;
   interactive?: boolean;
   showFooter?: boolean;
+  searchQuery?: string;
+  searchActive?: boolean;
+  activeMatchIndex?: number;
+  onSearchMatchCountChange?: (count: number) => void;
+  inputLocked?: boolean;
 }) {
   const [selectedRunIndex, setSelectedRunIndex] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0);
@@ -408,7 +421,7 @@ export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitc
   }, [selectedRunIndex, scrollOffset, maxVisible]);
 
   useKeyboard((key) => {
-    if (!interactive) return;
+    if (!interactive || inputLocked) return;
     if (key.name === 'q') return onQuit();
     if (key.name === 'tab') return onTabSwitch();
     if (key.name === 'escape' || key.name === 'backspace') return onBack();
@@ -424,6 +437,22 @@ export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitc
   const icon = specStatusIcon(entry.status);
   const color = specStatusColor(entry.status);
   const visibleRuns = runs.slice(scrollOffset, scrollOffset + maxVisible);
+  const createdLabel = formatRelativeTime(entry.createdAt);
+  const updatedLabel = formatRelativeTime(entry.updatedAt);
+  const search = useMemo(() => buildLineSearchData([
+    entry.spec,
+    entry.status,
+    entry.source,
+    createdLabel,
+    updatedLabel,
+    ...runs.map(run => `${run.timestamp} ${run.status} ${run.runId} ${run.resultPath ?? ''}`),
+  ], searchActive ? searchQuery : '', activeMatchIndex), [entry.spec, entry.status, entry.source, createdLabel, updatedLabel, runs, searchQuery, searchActive, activeMatchIndex]);
+
+  useEffect(() => {
+    onSearchMatchCountChange?.(search.totalMatches);
+  }, [onSearchMatchCountChange, search.totalMatches]);
+
+  const lineRanges = search.perLine;
 
   return (
     <box flexDirection="column">
@@ -431,22 +460,23 @@ export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitc
         <text>
           <span fg={THEME.textMuted}>forge spec</span>
           {'  '}
-          <span fg={THEME.textStrong}>{entry.spec}</span>
+          {renderHighlightedText(entry.spec, lineRanges[0]?.ranges ?? [], THEME.textStrong, THEME.searchMatch, lineRanges[0]?.activeRangeIndex ?? -1, THEME.background)}
         </text>
         <text> </text>
         <text>
           <span fg={THEME.textMuted}>Status  </span>
-          <span fg={color}>{icon} {entry.status}</span>
+          <span fg={color}>{icon} </span>
+          {renderHighlightedText(entry.status, lineRanges[1]?.ranges ?? [], color, THEME.searchMatch, lineRanges[1]?.activeRangeIndex ?? -1, THEME.background)}
           {'    '}
           <span fg={THEME.textMuted}>Source  </span>
-          <span fg={THEME.text}>{entry.source}</span>
+          {renderHighlightedText(entry.source, lineRanges[2]?.ranges ?? [], THEME.text, THEME.searchMatch, lineRanges[2]?.activeRangeIndex ?? -1, THEME.background)}
         </text>
         <text>
           <span fg={THEME.textMuted}>Created </span>
-          <span fg={THEME.text}>{formatRelativeTime(entry.createdAt)}</span>
+          {renderHighlightedText(createdLabel, lineRanges[3]?.ranges ?? [], THEME.text, THEME.searchMatch, lineRanges[3]?.activeRangeIndex ?? -1, THEME.background)}
           {'  '}
           <span fg={THEME.textMuted}>Updated </span>
-          <span fg={THEME.text}>{formatRelativeTime(entry.updatedAt)}</span>
+          {renderHighlightedText(updatedLabel, lineRanges[4]?.ranges ?? [], THEME.text, THEME.searchMatch, lineRanges[4]?.activeRangeIndex ?? -1, THEME.background)}
         </text>
         <text> </text>
         <text>
@@ -463,7 +493,12 @@ export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitc
       ) : (
         <box flexDirection="column">
           {visibleRuns.map((run, i) => (
-            <SpecRunRow key={`${run.runId}-${run.timestamp}`} run={run} selected={scrollOffset + i === selectedRunIndex} maxWidth={width} />
+            <box
+              key={`${run.runId}-${run.timestamp}`}
+              style={{}}
+            >
+              <SpecRunRow run={run} selected={!searchActive && scrollOffset + i === selectedRunIndex} maxWidth={width} />
+            </box>
           ))}
         </box>
       )}

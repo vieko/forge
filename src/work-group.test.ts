@@ -22,7 +22,7 @@ beforeEach(() => {
 describe('generateWorkGroupId', () => {
   test('follows wg-{timestamp}-{random} format', () => {
     const id = generateWorkGroupId();
-    expect(id).toMatch(/^wg-\d+-[0-9a-f]{4}$/);
+    expect(id).toMatch(/^wg-\d+-[0-9a-f]{6}$/);
   });
 
   test('generates unique IDs', () => {
@@ -40,8 +40,8 @@ describe('generateWorkGroupId', () => {
 
   test('is short enough for directory and branch names', () => {
     const id = generateWorkGroupId();
-    // wg- + 10 digits + - + 4 hex = ~18 chars
-    expect(id.length).toBeLessThanOrEqual(20);
+    // wg- + 10 digits + - + 6 hex = ~20 chars
+    expect(id.length).toBeLessThanOrEqual(22);
     expect(id).not.toContain(' ');
     expect(id).not.toContain('/');
   });

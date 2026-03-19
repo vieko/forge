@@ -2,7 +2,7 @@ import { describe, test, expect } from 'bun:test';
 import { ForgeError, isTransientError } from './utils.js';
 import { formatElapsed, formatProgress } from './display.js';
 import { autoDetectConcurrency } from './parallel.js';
-import { countToolCalls } from './run.js';
+import { classifyTerminalResult, countToolCalls, isApiErrorResult } from './run.js';
 import type { ForgeResult } from './types.js';
 import { promises as fs } from 'fs';
 import path from 'path';
@@ -243,5 +243,67 @@ describe('countToolCalls', () => {
     const result = await countToolCalls(malformedPath, 'sess-X');
     expect(result.toolCalls).toBe(2);
     expect(result.toolBreakdown).toEqual({ Bash: 1, Read: 1 });
+  });
+});
+
+// ── isApiErrorResult ─────────────────────────────────────────
+
+describe('isApiErrorResult', () => {
+  test('returns false for empty string', () => {
+    expect(isApiErrorResult('')).toBe(false);
+  });
+
+  test('returns true when result starts with API Error:', () => {
+    expect(isApiErrorResult('API Error: 500 Internal Server Error')).toBe(true);
+  });
+
+  test('returns true when result starts with Internal Server Error', () => {
+    expect(isApiErrorResult('Internal Server Error')).toBe(true);
+  });
+
+  test('returns true when result starts with overloaded_error', () => {
+    expect(isApiErrorResult('overloaded_error')).toBe(true);
+  });
+
+  test('returns true for short response containing error pattern', () => {
+    expect(isApiErrorResult('Got: overloaded_error from API')).toBe(true);
+  });
+
+  test('returns false for long response mentioning error pattern', () => {
+    const longResult = 'I implemented error handling for the API. ' +
+      'The code now catches API Error: responses and retries them. ' +
+      'Here is the full implementation with tests and documentation that covers all edge cases. ' +
+      'The retry logic handles overloaded_error responses gracefully.';
+    expect(longResult.length).toBeGreaterThan(200);
+    expect(isApiErrorResult(longResult)).toBe(false);
+  });
+
+  test('returns false for legitimate agent output', () => {
+    expect(isApiErrorResult('I have implemented the feature as requested. All tests pass.')).toBe(false);
+  });
+});
+
+// ── classifyTerminalResult ──────────────────────────────────
+
+describe('classifyTerminalResult', () => {
+  test('fails empty response with no cost', () => {
+    expect(classifyTerminalResult('', 0)).toEqual({
+      overrideFailure: true,
+      note: '[forge] Result overridden to failed: empty response with no cost.',
+    });
+  });
+
+  test('fails API error response even after non-zero cost', () => {
+    expect(classifyTerminalResult('API Error: 500 Internal Server Error', 0.42)).toEqual({
+      overrideFailure: true,
+      note: '[forge] Result overridden to failed: API error in final response.',
+    });
+  });
+
+  test('preserves legitimate long output that mentions API errors', () => {
+    const longResult = 'I implemented retry handling for API failures. ' +
+      'The code now catches API Error: responses and logs overloaded_error events. ' +
+      'It also adds tests, updates the prompt flow, and documents the fallback behavior for operators.';
+    expect(classifyTerminalResult(longResult, 0.42)).toEqual({ overrideFailure: false });
   });
 });

@@ -25,6 +25,7 @@ import {
 } from './tui-filter.js';
 import { FilterBar, HelpOverlay, ToastOverlay, useToast } from './tui-ui.js';
 import { formatDuration, formatRelativeTime, pad, padStart, truncate } from './tui-common.js';
+import { buildLineSearchData, renderHighlightedText } from './tui-search.js';
 
 function isTmuxAvailable(): boolean {
   try {
@@ -122,7 +123,7 @@ function WorktreeRowItem({ worktree, selected, maxWidth }: { worktree: WorktreeR
   );
 }
 
-export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onActivate, onFilterSessions, onFilterChange, onQuit, onTabSwitch, showFooter = true }: {
+export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onActivate, onFilterSessions, onFilterChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
   cwd: string;
   db: Database | null;
   dbVersion: number;
@@ -134,6 +135,7 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
   onQuit: () => void;
   onTabSwitch: (index: number) => void;
   showFooter?: boolean;
+  inputLocked?: boolean;
 }) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
   const [worktrees, setWorktrees] = useState<WorktreeRow[]>([]);
@@ -206,6 +208,7 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
   }, [selectedIndex]);
 
   useKeyboard((key) => {
+    if (inputLocked) return;
     if (filterMode) {
       const next = nextFilterValue(filterQuery, key);
       if (next === '') {
@@ -228,6 +231,11 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
       setFilterMode(false);
       return;
     }
+
+    if (key.ctrl || key.meta) {
+      return;
+    }
+
     if (key.name === 'q') { onQuit(); return; }
     if (key.name === '?') { setShowHelp(true); return; }
     if (key.name === '/') { setFilterMode(true); return; }
@@ -386,7 +394,7 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
   );
 }
 
-export function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, onBack, onQuit, onTabSwitch, interactive = true, showFooter = true }: {
+export function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, onBack, onQuit, onTabSwitch, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false }: {
   worktree: WorktreeRow;
   cwd: string;
   db: Database | null;
@@ -396,6 +404,11 @@ export function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, 
   onTabSwitch: () => void;
   interactive?: boolean;
   showFooter?: boolean;
+  searchQuery?: string;
+  searchActive?: boolean;
+  activeMatchIndex?: number;
+  onSearchMatchCountChange?: (count: number) => void;
+  inputLocked?: boolean;
 }) {
   const [worktree, setWorktree] = useState(initialWorktree);
   const toast = useToast();
@@ -460,7 +473,7 @@ export function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, 
   }, [specRuns]);
 
   useKeyboard((key) => {
-    if (!interactive) return;
+    if (!interactive || inputLocked) return;
     if (key.name === 'q') { onQuit(); return; }
     if (key.name === 'tab') { onTabSwitch(); return; }
     if (key.name === 'escape' || key.name === 'backspace') { onBack(); return; }
@@ -528,9 +541,24 @@ export function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, 
 
   const icon = worktreeStatusIcon(worktree.status);
   const color = worktreeStatusColor(worktree.status);
+  const worktreeIdLabel = worktree.id.substring(0, 12);
   const specPaths: string[] = (() => {
     try { return JSON.parse(worktree.spec_paths); } catch { return []; }
   })();
+  const search = useMemo(() => buildLineSearchData([
+    worktreeIdLabel,
+    worktree.status,
+    worktree.spec_path,
+    worktree.branch,
+    worktree.worktree_path,
+    ...specPaths,
+    ...specRuns.map(run => `${run.status} ${run.timestamp} ${run.id}`),
+    ...(specContent ?? []),
+  ], searchActive ? searchQuery : '', activeMatchIndex), [worktreeIdLabel, worktree, specPaths, specRuns, specContent, searchQuery, searchActive, activeMatchIndex]);
+
+  useEffect(() => {
+    onSearchMatchCountChange?.(search.totalMatches);
+  }, [onSearchMatchCountChange, search.totalMatches]);
 
   return (
     <box flexDirection="column">
@@ -538,24 +566,25 @@ export function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, 
         <text>
           <span fg={THEME.textMuted}>forge worktree</span>
           {'  '}
-          <span fg={THEME.textStrong}>{worktree.id.substring(0, 12)}</span>
+          {renderHighlightedText(worktreeIdLabel, search.perLine[0]?.ranges ?? [], THEME.textStrong, THEME.searchMatch, search.perLine[0]?.activeRangeIndex ?? -1, THEME.background)}
         </text>
         <text> </text>
         <text>
           <span fg={THEME.textMuted}>Status    </span>
-          <span fg={color}>{icon} {worktree.status}</span>
+          <span fg={color}>{icon} </span>
+          {renderHighlightedText(worktree.status, search.perLine[1]?.ranges ?? [], color, THEME.searchMatch, search.perLine[1]?.activeRangeIndex ?? -1, THEME.background)}
         </text>
         <text>
           <span fg={THEME.textMuted}>Spec      </span>
-          <span fg={THEME.text}>{worktree.spec_path}</span>
+          {renderHighlightedText(worktree.spec_path, search.perLine[2]?.ranges ?? [], THEME.text, THEME.searchMatch, search.perLine[2]?.activeRangeIndex ?? -1, THEME.background)}
         </text>
         <text>
           <span fg={THEME.textMuted}>Branch    </span>
-          <span fg={THEME.text}>{worktree.branch}</span>
+          {renderHighlightedText(worktree.branch, search.perLine[3]?.ranges ?? [], THEME.text, THEME.searchMatch, search.perLine[3]?.activeRangeIndex ?? -1, THEME.background)}
         </text>
         <text>
           <span fg={THEME.textMuted}>Path      </span>
-          <span fg={THEME.text}>{worktree.worktree_path}</span>
+          {renderHighlightedText(worktree.worktree_path, search.perLine[4]?.ranges ?? [], THEME.text, THEME.searchMatch, search.perLine[4]?.activeRangeIndex ?? -1, THEME.background)}
         </text>
         <text>
           <span fg={THEME.textMuted}>Created   </span>
@@ -641,7 +670,9 @@ export function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, 
             <text> </text>
             <text bold fg={THEME.info}>Spec Content</text>
             {specContent.map((line, i) => (
-              <text key={i} fg={THEME.textMuted}>{line}</text>
+              <box key={i}>
+                <text>{renderHighlightedText(line, search.perLine[5 + specPaths.length + specRuns.length + i]?.ranges ?? [], THEME.textMuted, THEME.searchMatch, search.perLine[5 + specPaths.length + specRuns.length + i]?.activeRangeIndex ?? -1, THEME.background)}</text>
+              </box>
             ))}
             {specTotalLines > 20 ? (
               <text fg={THEME.textMuted}>... ({specTotalLines - 20} more lines)</text>

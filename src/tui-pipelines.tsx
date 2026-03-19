@@ -36,6 +36,7 @@ import {
   truncate,
 } from './tui-common.js';
 import { useDbPoll } from './tui-db.js';
+import { buildLineSearchData, renderHighlightedText } from './tui-search.js';
 
 function currentStageName(pipeline: Pipeline): string {
   const running = pipeline.stages.find(s => s.status === 'running');
@@ -161,7 +162,7 @@ function PipelineStageRow({ stage, pipeline, selected, maxWidth }: { stage: Stag
   );
 }
 
-export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilterChange, onQuit, onTabSwitch, showFooter = true }: {
+export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilterChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
   cwd: string;
   initialIndex?: number;
   onSelect: (p: Pipeline | null, index: number) => void;
@@ -170,6 +171,7 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
   onQuit: () => void;
   onTabSwitch: (index: number) => void;
   showFooter?: boolean;
+  inputLocked?: boolean;
 }) {
   const [selectedIndex, setSelectedIndex] = useState(initialIndex ?? 0);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
@@ -275,6 +277,7 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
   };
 
   useKeyboard((key) => {
+    if (inputLocked) return;
     if (filterMode) {
       const next = nextFilterValue(filterQuery, key);
       if (next === '') {
@@ -297,6 +300,11 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
       setFilterMode(false);
       return;
     }
+
+    if (key.ctrl || key.meta) {
+      return;
+    }
+
     if (key.name === 'q') { onQuit(); return; }
     if (key.name === '?') { setShowHelp(true); return; }
     if (key.name === '/') { setFilterMode(true); return; }
@@ -381,7 +389,7 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
   );
 }
 
-export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions, onBack, onQuit, onTabSwitch, interactive = true, showFooter = true }: {
+export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions, onBack, onQuit, onTabSwitch, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false }: {
   pipeline: Pipeline;
   cwd: string;
   onSelectStageSessions: (sessionIds: string[]) => void;
@@ -390,6 +398,11 @@ export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSe
   onTabSwitch: () => void;
   interactive?: boolean;
   showFooter?: boolean;
+  searchQuery?: string;
+  searchActive?: boolean;
+  activeMatchIndex?: number;
+  onSearchMatchCountChange?: (count: number) => void;
+  inputLocked?: boolean;
 }) {
   const [selectedStageIndex, setSelectedStageIndex] = useState(0);
   const [pipeline, setPipeline] = useState(initialPipeline);
@@ -583,7 +596,7 @@ export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSe
   };
 
   useKeyboard((key) => {
-    if (!interactive) return;
+    if (!interactive || inputLocked) return;
     if (dialog.visible) return;
 
     if (key.name === 'q') { onQuit(); return; }
@@ -623,6 +636,20 @@ export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSe
   const isActive = pipeline.status === 'running' || pipeline.status === 'paused_at_gate';
   const isPaused = pipeline.status === 'paused_at_gate';
   const isFailed = pipeline.status === 'failed';
+  const flowLine = renderPipelineDiagram(pipeline);
+  const goalLabel = truncate(pipeline.goal, 50);
+  const search = useMemo(() => buildLineSearchData([
+    goalLabel,
+    pipeline.status,
+    pipeline.id,
+    flowLine,
+    ...pipeline.stages.map(stage => `${stage.name} ${stage.status} ${stage.error ?? ''} ${(stage.sessions || []).join(' ')}`),
+    ...Object.entries(pipeline.gates).map(([key, gate]) => `${key} ${gate.type} ${gate.status}`),
+  ], searchActive ? searchQuery : '', activeMatchIndex), [goalLabel, pipeline, flowLine, searchQuery, searchActive, activeMatchIndex]);
+
+  useEffect(() => {
+    onSearchMatchCountChange?.(search.totalMatches);
+  }, [onSearchMatchCountChange, search.totalMatches]);
 
   const shortcuts: string[] = ['[j/k] navigate', '[enter] sessions'];
   if (isPaused) {
@@ -643,13 +670,14 @@ export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSe
         <text>
           <span fg={THEME.textMuted}>forge pipeline</span>
           {'  '}
-          <span fg={THEME.textStrong}>{truncate(pipeline.goal, 50)}</span>
+          {renderHighlightedText(goalLabel, search.perLine[0]?.ranges ?? [], THEME.textStrong, THEME.searchMatch, search.perLine[0]?.activeRangeIndex ?? -1, THEME.background)}
           {isActive ? <span fg={THEME.primary}>{'  '}(live)</span> : null}
         </text>
         <text> </text>
         <text>
           <span fg={THEME.textMuted}>Status  </span>
-          <span fg={color}>{icon} {pipeline.status}</span>
+          <span fg={color}>{icon} </span>
+          {renderHighlightedText(pipeline.status, search.perLine[1]?.ranges ?? [], color, THEME.searchMatch, search.perLine[1]?.activeRangeIndex ?? -1, THEME.background)}
           {'    '}
           <span fg={THEME.textMuted}>Cost  </span>
           <span fg={THEME.text}>{formatCost(pipeline.totalCost > 0 ? pipeline.totalCost : undefined)}</span>
@@ -666,7 +694,7 @@ export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSe
         </text>
         <text> </text>
         <text bold fg={THEME.info}>Flow</text>
-        <text fg={THEME.text}>{renderPipelineDiagram(pipeline)}</text>
+        <text>{renderHighlightedText(flowLine, search.perLine[3]?.ranges ?? [], THEME.text, THEME.searchMatch, search.perLine[3]?.activeRangeIndex ?? -1, THEME.background)}</text>
         <text> </text>
         <text fg={THEME.info}>Stages</text>
       </box>
@@ -674,12 +702,14 @@ export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSe
       <box flexDirection="column">
         {stages.map((stage, i) => (
           <box key={stage.name} id={`ps-${i}`}>
-            <PipelineStageRow
-              stage={stage}
-              pipeline={pipeline}
-              selected={i === selectedStageIndex}
-              maxWidth={width}
-            />
+            <box>
+              <PipelineStageRow
+                stage={stage}
+                pipeline={pipeline}
+                selected={!searchActive && i === selectedStageIndex}
+                maxWidth={width}
+              />
+            </box>
           </box>
         ))}
       </box>

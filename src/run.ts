@@ -91,6 +91,28 @@ export function isApiErrorResult(resultText: string): boolean {
   return false;
 }
 
+export function classifyTerminalResult(
+  resultText: string,
+  costUsd?: number,
+): { overrideFailure: boolean; note?: string } {
+  const emptyWithNoCost = (resultText || '').trim().length < 20 && (!costUsd || costUsd === 0);
+  if (emptyWithNoCost) {
+    return {
+      overrideFailure: true,
+      note: '[forge] Result overridden to failed: empty response with no cost.',
+    };
+  }
+
+  if (isApiErrorResult(resultText)) {
+    return {
+      overrideFailure: true,
+      note: '[forge] Result overridden to failed: API error in final response.',
+    };
+  }
+
+  return { overrideFailure: false };
+}
+
 export async function runSingleSpec(options: ForgeOptions & { specContent?: string; _silent?: boolean; _onActivity?: (detail: string) => void; _runId?: string; _specLabel?: string; _resultDir?: string; taskContext?: TaskContext }): Promise<ForgeResult> {
   const { prompt, specPath, specContent, cwd, model, planModel, maxTurns, maxBudgetUsd, planOnly = false, dryRun = false, verbose = false, quiet = false, _silent = false, _onActivity, _runId, _specLabel, _resultDir } = options;
   const { effectiveResume, isFork } = resolveSession(options.fork, options.resume);
@@ -407,10 +429,9 @@ forge run --resume ${qr.sessionId} "fix verification errors"
     }
 
     // Guard: detect API error in result text (bug #19 -- false-pass on 500 after verification)
-    const apiErrorDetected = isApiErrorResult(qr.resultText);
-    const emptyWithNoCost = (qr.resultText || '').trim().length < 20 && (!qr.costUsd || qr.costUsd === 0);
-    if (apiErrorDetected || emptyWithNoCost) {
-      const note = '[forge] Result overridden to failed: API error detected in response.';
+    const terminalResult = classifyTerminalResult(qr.resultText, qr.costUsd);
+    if (terminalResult.overrideFailure) {
+      const note = terminalResult.note!;
       if (!quiet) console.log(`\n${DIM}[forge]${RESET} \x1b[33m${note}\x1b[0m`);
       if (qr.logPath) streamLogAppend(qr.logPath, `Override: x ${note}`);
 

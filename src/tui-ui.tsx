@@ -2,6 +2,7 @@ import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { TUI_THEME as THEME } from './tui-theme.js';
+import type { CommandPaletteItem, DetailSearchMatch } from './tui-overlay-helpers.js';
 
 export type TuiTab = 'sessions' | 'specs' | 'pipeline' | 'worktrees';
 
@@ -214,6 +215,80 @@ export function GlobalFooter({ text }: { text: string }) {
   return (
     <box style={{ paddingLeft: 1, height: 1, flexShrink: 0 }}>
       <text fg={THEME.textMuted}>{text}</text>
+    </box>
+  );
+}
+
+export function DetailSearchOverlay({ visible, query, matches, scopeLabel }: {
+  visible: boolean;
+  query: string;
+  matches: DetailSearchMatch[];
+  scopeLabel: string;
+}) {
+  const { width } = useTerminalDimensions();
+  if (!visible) return null;
+
+  const boxWidth = Math.max(56, Math.min(width - 6, 100));
+
+  return (
+    <box flexDirection="column" style={{ paddingTop: 1, paddingLeft: 2 }}>
+      <text fg={THEME.border}>{'-'.repeat(boxWidth)}</text>
+      <box style={{ paddingLeft: 1, paddingRight: 1, width: boxWidth }} flexDirection="column">
+        <text bold fg={THEME.textStrong}>Detail Search</text>
+        <text fg={THEME.textMuted}>{scopeLabel}</text>
+        <text> </text>
+        <text>
+          <span fg={THEME.primary}>search&gt;</span>
+          <span fg={query ? THEME.textStrong : THEME.textMuted}>{' '}{query || 'type to search current detail pane'}</span>
+        </text>
+        <text> </text>
+        {query.trim() ? (
+          matches.length > 0 ? matches.map((match, i) => (
+            <text key={`detail-search-${i}`} fg={THEME.text}>{match.line}</text>
+          )) : <text fg={THEME.textMuted}>No matches</text>
+        ) : (
+          <text fg={THEME.textMuted}>Results will appear here as you type.</text>
+        )}
+        <text> </text>
+        <text fg={THEME.textMuted}>[ctrl+f / esc] close  [backspace] delete  [enter] keep query</text>
+      </box>
+      <text fg={THEME.border}>{'-'.repeat(boxWidth)}</text>
+    </box>
+  );
+}
+
+export function CommandPaletteOverlay({ visible, query, items, selectedIndex }: {
+  visible: boolean;
+  query: string;
+  items: CommandPaletteItem[];
+  selectedIndex: number;
+}) {
+  const { width } = useTerminalDimensions();
+  if (!visible) return null;
+
+  const boxWidth = Math.max(56, Math.min(width - 6, 90));
+
+  return (
+    <box flexDirection="column" style={{ paddingTop: 1, paddingLeft: 2 }}>
+      <text fg={THEME.border}>{'-'.repeat(boxWidth)}</text>
+      <box style={{ paddingLeft: 1, paddingRight: 1, width: boxWidth }} flexDirection="column">
+        <text bold fg={THEME.textStrong}>Command Palette</text>
+        <text> </text>
+        <text>
+          <span fg={THEME.primary}>command&gt;</span>
+          <span fg={query ? THEME.textStrong : THEME.textMuted}>{' '}{query || 'type a command'}</span>
+        </text>
+        <text> </text>
+        {items.length > 0 ? items.map((item, index) => (
+          <text key={item.id}>
+            <span fg={index === selectedIndex ? THEME.warning : THEME.textMuted}>{index === selectedIndex ? '>' : ' '}</span>
+            <span fg={index === selectedIndex ? THEME.textStrong : THEME.text}>{' '}{item.label}</span>
+          </text>
+        )) : <text fg={THEME.textMuted}>No matching commands</text>}
+        <text> </text>
+        <text fg={THEME.textMuted}>[up/down] navigate  [enter] run  [: / ctrl+p / esc] close</text>
+      </box>
+      <text fg={THEME.border}>{'-'.repeat(boxWidth)}</text>
     </box>
   );
 }
