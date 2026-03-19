@@ -945,6 +945,28 @@ export async function runConsolidate(options: ConsolidateOptions): Promise<Conso
       };
     }
 
+    // ── Re-run setup if merges changed dependency files ─────
+    try {
+      const { stdout: diffFiles } = await execAsync(
+        `git diff --name-only ${mainBranch}...HEAD`,
+        { cwd: tmpDir },
+      );
+      const depPatterns = ['package.json', 'pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'bun.lockb', 'Cargo.toml', 'Cargo.lock', 'go.mod', 'go.sum'];
+      const changedDeps = diffFiles.trim().split('\n').some(f => depPatterns.some(p => f.endsWith(p)));
+      if (changedDeps) {
+        if (!quiet) {
+          console.log(`\n${DIM}[forge]${RESET} Dependency files changed -- reinstalling`);
+        }
+        const reinstall = await setupWorktree(tmpDir, workingDir, { quiet });
+        if (reinstall && !reinstall.success) {
+          throw new Error(`Workspace re-setup failed: ${reinstall.failedCommand}`);
+        }
+      }
+    } catch (err) {
+      // Best effort -- verification will catch real failures
+      if (err instanceof Error && err.message.startsWith('Workspace re-setup')) throw err;
+    }
+
     // ── Full verification (build + test) ────────────────────
     if (!quiet) {
       console.log(`\n${BOLD}Verification${RESET}`);

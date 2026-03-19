@@ -357,6 +357,13 @@ export async function setupWorktree(
     if (!options?.quiet && skipped.length > 0) {
       console.log(`\x1b[2m[forge]\x1b[0m Skipped (not found in source): ${skipped.join(', ')}`);
     }
+    if (failed.length > 0) {
+      const msg = `Failed to link shared files: ${failed.join(', ')}`;
+      if (!options?.quiet) {
+        console.error(`\x1b[2m[forge]\x1b[0m \x1b[33m${msg}\x1b[0m`);
+      }
+      return { success: false, output: '', failedCommand: msg };
+    }
   }
 
   if (!options?.quiet && commands.length > 0) {

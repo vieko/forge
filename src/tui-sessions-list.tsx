@@ -205,6 +205,13 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
   const toast = useToast();
   const dialog = useConfirmDialog();
 
+  // Sync with parent-driven index resets (e.g. clearing worktree filter)
+  useEffect(() => {
+    if (initialIndex !== undefined && initialIndex !== selectedIndex) {
+      setSelectedIndex(initialIndex);
+    }
+  }, [initialIndex]);
+
   const historyTasks = useMemo(() => {
     if (!showHistory || !db) return [];
     return getRecentCompletedTasks(db, 60 * 60 * 1000);
