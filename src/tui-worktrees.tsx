@@ -123,7 +123,7 @@ function WorktreeRowItem({ worktree, selected, maxWidth }: { worktree: WorktreeR
   );
 }
 
-export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onActivate, onFilterSessions, onFilterChange, onFilterModeChange, showHelp, onShowHelpChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
+export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onActivate, onFilterSessions, onFilterChange, onFilterModeChange, showHelp, onShowHelpChange, onQuit, onTabSwitch, onTabSwitchBack, showFooter = true, inputLocked = false }: {
   cwd: string;
   db: Database | null;
   dbVersion: number;
@@ -137,6 +137,7 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
   onShowHelpChange: (visible: boolean) => void;
   onQuit: () => void;
   onTabSwitch: (index: number) => void;
+  onTabSwitchBack?: (index: number) => void;
   showFooter?: boolean;
   inputLocked?: boolean;
 }) {
@@ -247,6 +248,7 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
     if (key.name === '/') { setFilterMode(true); return; }
     if (key.name === 'f') { setFilterQuery(prev => setOrToggleFilterToken(prev, 'status', 'failed')); return; }
     if (key.name === 'a') { setFilterQuery(prev => setOrToggleFilterToken(prev, 'status', 'active')); return; }
+    if (key.name === 'tab' && key.shift) { onTabSwitchBack?.(selectedIndex); return; }
     if (key.name === 'tab') { onTabSwitch(selectedIndex); return; }
     if (key.name === 'up' || key.name === 'k') {
       setSelectedIndex(i => Math.max(0, i - 1));
@@ -374,14 +376,14 @@ export function WorktreesList({ cwd, db, dbVersion, initialIndex, onSelect, onAc
 
       {showFooter ? (
         <box style={{ paddingLeft: 1, flexShrink: 0 }}>
-          <text fg={THEME.textMuted}>[j/k] navigate  [g/G] top/end  [/] filter  [f] failed  [a] active  [?] help  [enter] view  {hasTmux ? '[o] open  ' : ''}[r] rerun  [m] ready  [s] sessions  [tab] next tab  [q] quit</text>
+          <text fg={THEME.textMuted}>[j/k] navigate  [g/G] top/end  [/] filter  [f] failed  [a] active  [?] help  [enter] view  {hasTmux ? '[o] open  ' : ''}[r] rerun  [m] ready  [s] sessions  [tab/shift+tab] tabs  [q] quit</text>
         </box>
       ) : null}
     </box>
   );
 }
 
-export function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, onBack, onQuit, onTabSwitch, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false }: {
+export function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, onBack, onQuit, onTabSwitch, onTabSwitchBack, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false }: {
   worktree: WorktreeRow;
   cwd: string;
   db: Database | null;
@@ -389,6 +391,7 @@ export function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, 
   onBack: () => void;
   onQuit: () => void;
   onTabSwitch: () => void;
+  onTabSwitchBack?: () => void;
   interactive?: boolean;
   showFooter?: boolean;
   searchQuery?: string;
@@ -462,6 +465,7 @@ export function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, 
   useKeyboard((key) => {
     if (!interactive || inputLocked) return;
     if (key.name === 'q') { onQuit(); return; }
+    if (key.name === 'tab' && key.shift) { onTabSwitchBack?.(); return; }
     if (key.name === 'tab') { onTabSwitch(); return; }
     if (key.name === 'escape' || key.name === 'backspace') { onBack(); return; }
     if (key.name === 'o') {
@@ -672,7 +676,7 @@ export function WorktreeDetail({ worktree: initialWorktree, cwd, db, dbVersion, 
 
       {showFooter ? (
         <box style={{ paddingLeft: 1, paddingTop: 1, height: 2 }}>
-          <text fg={THEME.textMuted}>[esc] back  {isTmuxAvailable() ? '[o] open  ' : ''}[r] rerun  [m] ready  [tab] next tab  [q] quit</text>
+          <text fg={THEME.textMuted}>[esc] back  {isTmuxAvailable() ? '[o] open  ' : ''}[r] rerun  [m] ready  [tab/shift+tab] tabs  [q] quit</text>
         </box>
       ) : null}
     </box>

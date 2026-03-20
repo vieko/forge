@@ -162,7 +162,7 @@ function PipelineStageRow({ stage, pipeline, selected, maxWidth }: { stage: Stag
   );
 }
 
-export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilterChange, onFilterModeChange, showHelp, onShowHelpChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
+export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilterChange, onFilterModeChange, showHelp, onShowHelpChange, onQuit, onTabSwitch, onTabSwitchBack, showFooter = true, inputLocked = false }: {
   cwd: string;
   initialIndex?: number;
   onSelect: (p: Pipeline | null, index: number) => void;
@@ -173,6 +173,7 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
   onShowHelpChange: (visible: boolean) => void;
   onQuit: () => void;
   onTabSwitch: (index: number) => void;
+  onTabSwitchBack?: (index: number) => void;
   showFooter?: boolean;
   inputLocked?: boolean;
 }) {
@@ -316,6 +317,7 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
     if (key.name === '/') { setFilterMode(true); return; }
     if (key.name === 'f') { setFilterQuery(q => setOrToggleFilterToken(q, 'status', 'failed')); return; }
     if (key.name === 'a') { setFilterQuery(q => setOrToggleFilterToken(q, 'status', 'active')); return; }
+    if (key.name === 'tab' && key.shift) { onTabSwitchBack?.(selectedIndex); return; }
     if (key.name === 'tab') { onTabSwitch(selectedIndex); return; }
     if (key.name === 'up' || key.name === 'k') {
       setSelectedIndex(i => Math.max(0, i - 1));
@@ -372,7 +374,7 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
 
       {showFooter ? (
         <box style={{ paddingLeft: 1, flexShrink: 0 }}>
-          <text fg={THEME.textMuted}>[j/k] navigate  [g/G] top/end  [/] filter  [f] failed  [a] active  [?] help  [enter] view  [n] new  [tab] next tab  [q] quit</text>
+          <text fg={THEME.textMuted}>[j/k] navigate  [g/G] top/end  [/] filter  [f] failed  [a] active  [?] help  [enter] view  [n] new  [tab/shift+tab] tabs  [q] quit</text>
         </box>
       ) : null}
       <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
@@ -380,13 +382,14 @@ export function PipelinesList({ cwd, initialIndex, onSelect, onActivate, onFilte
   );
 }
 
-export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions, onBack, onQuit, onTabSwitch, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false, confirmDialog }: {
+export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSessions, onBack, onQuit, onTabSwitch, onTabSwitchBack, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false, confirmDialog }: {
   pipeline: Pipeline;
   cwd: string;
   onSelectStageSessions: (sessionIds: string[]) => void;
   onBack: () => void;
   onQuit: () => void;
   onTabSwitch: () => void;
+  onTabSwitchBack?: () => void;
   interactive?: boolean;
   showFooter?: boolean;
   searchQuery?: string;
@@ -593,6 +596,7 @@ export function PipelineDetail({ pipeline: initialPipeline, cwd, onSelectStageSe
     if (dialog.visible) return;
 
     if (key.name === 'q') { onQuit(); return; }
+    if (key.name === 'tab' && key.shift) { onTabSwitchBack?.(); return; }
     if (key.name === 'tab') { onTabSwitch(); return; }
     if (key.name === 'escape' || key.name === 'backspace') { onBack(); return; }
     if (key.name === 'up' || key.name === 'k') {

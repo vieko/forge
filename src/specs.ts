@@ -887,8 +887,8 @@ export interface ShowSpecsOptions {
   reconcile?: boolean;
   prune?: boolean;
   add?: string | boolean;
-  resolve?: string;
-  unresolve?: string;
+  resolve?: string[];
+  unresolve?: string[];
   check?: boolean;
   summary?: boolean;
 }
@@ -935,7 +935,7 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
 
   // Resolve spec (mark as passed without running)
   if (options.resolve) {
-    const count = await resolveSpecs([options.resolve], workingDir);
+    const count = await resolveSpecs(options.resolve, workingDir);
     if (count > 0) {
       console.log(`${BOLD}Resolved ${count} spec(s) as passed${RESET}\n`);
     } else {
@@ -946,7 +946,7 @@ export async function showSpecs(options: ShowSpecsOptions): Promise<void> {
 
   // Unresolve spec (reset to pending)
   if (options.unresolve) {
-    const count = await unresolveSpecs([options.unresolve], workingDir);
+    const count = await unresolveSpecs(options.unresolve, workingDir);
     if (count > 0) {
       console.log(`${BOLD}Unresolved ${count} spec(s) → pending${RESET}\n`);
     } else {

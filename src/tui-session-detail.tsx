@@ -538,11 +538,12 @@ function SessionSummaryView({ session, summary, searchQuery, activeMatchIndex, o
   );
 }
 
-export function SessionDetail({ session, onBack, onQuit, onTabSwitch, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false }: {
+export function SessionDetail({ session, onBack, onQuit, onTabSwitch, onTabSwitchBack, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false }: {
   session: SessionInfo;
   onBack: () => void;
   onQuit: () => void;
   onTabSwitch: () => void;
+  onTabSwitchBack?: () => void;
   interactive?: boolean;
   showFooter?: boolean;
   searchQuery?: string;
@@ -576,6 +577,7 @@ export function SessionDetail({ session, onBack, onQuit, onTabSwitch, interactiv
   useKeyboard((key) => {
     if (!interactive || inputLocked) return;
     if (key.name === 'q') return onQuit();
+    if (key.name === 'tab' && key.shift) return onTabSwitchBack?.();
     if (key.name === 'tab') return onTabSwitch();
     if (key.name === 'escape' || key.name === 'backspace') return onBack();
 

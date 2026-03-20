@@ -34,6 +34,13 @@ export function nextTab(current: Tab): Tab {
   return 'sessions';
 }
 
+export function prevTab(current: Tab): Tab {
+  if (current === 'sessions') return 'worktrees';
+  if (current === 'specs') return 'sessions';
+  if (current === 'pipeline') return 'specs';
+  return 'pipeline';
+}
+
 export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
   const [activeTab, setActiveTab] = useState<Tab>('sessions');
   const [view, setView] = useState<'list' | 'detail'>('list');
@@ -141,6 +148,9 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
 
   const handleTabSwitch = () => {
     setActiveTab(t => nextTab(t));
+  };
+  const handleTabSwitchBack = () => {
+    setActiveTab(t => prevTab(t));
   };
 
   const currentFilterQuery = (() => {
@@ -336,15 +346,15 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
 
   const splitFooterText = (() => {
     if (activeTab === 'sessions') {
-      return '[j/k] move  [g/G] ends  [/] filter  [ctrl+f] detail  [:] commands  [f] failed  [a] running  [?] help  [tab] tabs  [q] quit  [t] tasks  [e] executor';
+      return '[j/k] move  [g/G] ends  [/] filter  [ctrl+f] detail  [:] commands  [f] failed  [a] running  [?] help  [tab/shift+tab] tabs  [q] quit  [t] tasks  [e] executor';
     }
     if (activeTab === 'specs') {
-      return '[j/k] move  [g/G] ends  [/] filter  [ctrl+f] detail  [:] commands  [f] failed  [a] pending  [?] help  [tab] tabs  [q] quit  [enter] open  [r] run';
+      return '[j/k] move  [g/G] ends  [/] filter  [ctrl+f] detail  [:] commands  [f] failed  [a] pending  [?] help  [tab/shift+tab] tabs  [q] quit  [enter] open  [r] run';
     }
     if (activeTab === 'pipeline') {
-      return '[j/k] move  [g/G] ends  [/] filter  [ctrl+f] detail  [:] commands  [f] failed  [a] active  [?] help  [tab] tabs  [q] quit  [enter] open  [n] new';
+      return '[j/k] move  [g/G] ends  [/] filter  [ctrl+f] detail  [:] commands  [f] failed  [a] active  [?] help  [tab/shift+tab] tabs  [q] quit  [enter] open  [n] new';
     }
-    return '[j/k] move  [g/G] ends  [/] filter  [ctrl+f] detail  [:] commands  [f] failed  [a] active  [?] help  [tab] tabs  [q] quit  [enter] open  [r] rerun  [m] ready';
+    return '[j/k] move  [g/G] ends  [/] filter  [ctrl+f] detail  [:] commands  [f] failed  [a] active  [?] help  [tab/shift+tab] tabs  [q] quit  [enter] open  [r] rerun  [m] ready';
   })();
 
   const executorHeader = (() => {
@@ -411,6 +421,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
             onBack={() => setPipelineView('detail')}
             onQuit={onQuit}
             onTabSwitch={handleTabSwitch}
+            onTabSwitchBack={handleTabSwitchBack}
             searchQuery={detailSearchQuery}
             searchActive={detailSearchActive}
             activeMatchIndex={detailSearchMatchIndex}
@@ -451,6 +462,10 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
                 setPipelineListIndex(index);
                 setActiveTab(nextTab('pipeline'));
               }}
+              onTabSwitchBack={(index) => {
+                setPipelineListIndex(index);
+                setActiveTab(prevTab('pipeline'));
+              }}
             />
           )}
           detail={selectedPipeline ? (
@@ -483,6 +498,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
               onBack={() => {}}
               onQuit={onQuit}
               onTabSwitch={handleTabSwitch}
+              onTabSwitchBack={handleTabSwitchBack}
               interactive={false}
               showFooter={false}
               searchQuery={detailSearchQuery}
@@ -512,7 +528,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
             '[a] toggle active filter',
             '[enter] open interactive pipeline detail',
             '[n] start a new pipeline',
-            '[tab] next tab',
+            '[tab/shift+tab] switch tabs',
             '[q] quit',
           ]}
         />
@@ -562,6 +578,10 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
                 setWorktreesListIndex(index);
                 setActiveTab(nextTab('worktrees'));
               }}
+              onTabSwitchBack={(index) => {
+                setWorktreesListIndex(index);
+                setActiveTab(prevTab('worktrees'));
+              }}
             />
           )}
           detail={selectedWorktree ? (
@@ -573,6 +593,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
               onBack={() => {}}
               onQuit={onQuit}
               onTabSwitch={handleTabSwitch}
+              onTabSwitchBack={handleTabSwitchBack}
               interactive={false}
               showFooter={false}
               searchQuery={detailSearchQuery}
@@ -604,7 +625,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
             '[r] rerun selected worktree spec',
             '[m] mark selected worktree ready',
             '[s] filter sessions by worktree',
-            '[tab] next tab',
+            '[tab/shift+tab] switch tabs',
             '[q] quit',
           ]}
         />
@@ -623,6 +644,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
             onBack={() => setSpecsView('detail')}
             onQuit={onQuit}
             onTabSwitch={handleTabSwitch}
+            onTabSwitchBack={handleTabSwitchBack}
             searchQuery={detailSearchQuery}
             searchActive={detailSearchActive}
             activeMatchIndex={detailSearchMatchIndex}
@@ -651,6 +673,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
             onBack={() => setSpecsView('list')}
             onQuit={onQuit}
             onTabSwitch={handleTabSwitch}
+            onTabSwitchBack={handleTabSwitchBack}
             searchQuery={detailSearchQuery}
             searchActive={detailSearchActive}
             activeMatchIndex={detailSearchMatchIndex}
@@ -691,6 +714,10 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
                 setSpecsListIndex(index);
                 setActiveTab(nextTab('specs'));
               }}
+              onTabSwitchBack={(index) => {
+                setSpecsListIndex(index);
+                setActiveTab(prevTab('specs'));
+              }}
             />
           )}
           detail={selectedSpecEntry ? (
@@ -701,6 +728,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
               onBack={() => {}}
               onQuit={onQuit}
               onTabSwitch={handleTabSwitch}
+              onTabSwitchBack={handleTabSwitchBack}
               interactive={false}
               showFooter={false}
               searchQuery={detailSearchQuery}
@@ -729,7 +757,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
             '[a] toggle pending filter',
             '[enter] open full run history',
             '[r] run selected pending or failed spec',
-            '[tab] next tab',
+            '[tab/shift+tab] switch tabs',
             '[q] quit',
           ]}
         />
@@ -791,6 +819,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
             }}
             onQuit={onQuit}
             onTabSwitch={handleTabSwitch}
+            onTabSwitchBack={handleTabSwitchBack}
           />
         )}
         detail={selectedSession ? (
@@ -799,6 +828,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
             onBack={() => {}}
             onQuit={onQuit}
             onTabSwitch={handleTabSwitch}
+            onTabSwitchBack={handleTabSwitchBack}
             interactive={false}
             showFooter={false}
             searchQuery={detailSearchQuery}
@@ -827,7 +857,7 @@ export function App({ cwd, onQuit }: { cwd: string; onQuit: () => void }) {
           '[a] toggle running filter',
           '[t] open tasks modal',
           '[e] start/stop executor',
-          '[tab] next tab',
+          '[tab/shift+tab] switch tabs',
           '[q] quit',
         ]}
       />

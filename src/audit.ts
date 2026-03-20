@@ -642,6 +642,8 @@ async function runAuditFixLoop(ctx: ResolvedAuditContext, options: AuditOptions)
         model: options.model,
         quiet: options.quiet,
         verbose: options.verbose,
+        // Audit without --worktree runs in-place — fixes should too
+        inPlace: !options.worktreeId,
       });
     } catch {
       fixFailed = true;

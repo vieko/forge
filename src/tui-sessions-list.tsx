@@ -171,7 +171,7 @@ export function TasksModal({
   );
 }
 
-export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db, worktreeFilter, onClearFilter, onSelect, onSelectTask, onFilterChange, onFilterModeChange, showTasks, showHistory, showHelp, taskSelectedIndex, onShowTasksChange, onShowHistoryChange, onShowHelpChange, onTaskSelectedIndexChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
+export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db, worktreeFilter, onClearFilter, onSelect, onSelectTask, onFilterChange, onFilterModeChange, showTasks, showHistory, showHelp, taskSelectedIndex, onShowTasksChange, onShowHistoryChange, onShowHelpChange, onTaskSelectedIndexChange, onQuit, onTabSwitch, onTabSwitchBack, showFooter = true, inputLocked = false }: {
   sessions: SessionInfo[];
   cwd: string;
   initialIndex?: number;
@@ -194,6 +194,7 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
   onTaskSelectedIndexChange: (index: number | ((prev: number) => number)) => void;
   onQuit: () => void;
   onTabSwitch: () => void;
+  onTabSwitchBack?: () => void;
   showFooter?: boolean;
   inputLocked?: boolean;
 }) {
@@ -366,6 +367,7 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
     if (key.name === '/') return setFilterMode(true);
     if (key.name === 'f') return setFilterQuery(prev => setOrToggleFilterToken(prev, 'status', 'failed'));
     if (key.name === 'a') return setFilterQuery(prev => setOrToggleFilterToken(prev, 'status', 'running'));
+    if (key.name === 'tab' && key.shift) return onTabSwitchBack?.();
     if (key.name === 'tab') return onTabSwitch();
     if (key.name === 't') {
       onShowTasksChange(true);
@@ -443,7 +445,7 @@ export function SessionsList({ sessions, cwd, initialIndex, executor, tasks, db,
 
       {showFooter ? (
         <box style={{ paddingLeft: 1, flexShrink: 0 }}>
-          <text fg={THEME.textMuted}>[j/k] navigate  [g/G] top/end  [/] filter  [f] failed  [a] running  [?] help  [t] tasks  [e] executor  [tab] next tab  [q] quit</text>
+          <text fg={THEME.textMuted}>[j/k] navigate  [g/G] top/end  [/] filter  [f] failed  [a] running  [?] help  [t] tasks  [e] executor  [tab/shift+tab] tabs  [q] quit</text>
         </box>
       ) : null}
     </box>

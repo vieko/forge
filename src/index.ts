@@ -504,8 +504,8 @@ program
   .option('--reconcile', 'Backfill manifest from DB run history')
   .option('--prune', 'Remove orphaned entries (file missing) from manifest')
   .option('--add [path]', 'Register untracked specs, or specific path/glob')
-  .option('--resolve <spec>', 'Mark a pending/failed spec as passed without running')
-  .option('--unresolve <spec>', 'Reset a spec back to pending (clears run history)')
+  .option('--resolve <spec...>', 'Mark a pending/failed spec as passed without running')
+  .option('--unresolve <spec...>', 'Reset a spec back to pending (clears run history)')
   .option('--check', 'Triage pending specs: auto-resolve already-implemented ones')
   .option('--summary', 'Show directory-level summary instead of individual specs')
   .action(async (options: {
@@ -518,8 +518,8 @@ program
     reconcile?: boolean;
     prune?: boolean;
     add?: string | boolean;
-    resolve?: string;
-    unresolve?: string;
+    resolve?: string[];
+    unresolve?: string[];
     check?: boolean;
     summary?: boolean;
   }) => {

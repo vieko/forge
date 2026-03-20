@@ -85,7 +85,7 @@ function SpecRow({ row, selected, maxWidth }: { row: SpecDisplayRow; selected: b
   );
 }
 
-export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterChange, onFilterModeChange, showHelp, onShowHelpChange, onQuit, onTabSwitch, showFooter = true, inputLocked = false }: {
+export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterChange, onFilterModeChange, showHelp, onShowHelpChange, onQuit, onTabSwitch, onTabSwitchBack, showFooter = true, inputLocked = false }: {
   cwd: string;
   initialIndex?: number;
   onSelect: (entry: SpecEntry | null, index: number) => void;
@@ -96,6 +96,7 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
   onShowHelpChange: (visible: boolean) => void;
   onQuit: () => void;
   onTabSwitch: (index: number) => void;
+  onTabSwitchBack?: (index: number) => void;
   showFooter?: boolean;
   inputLocked?: boolean;
 }) {
@@ -225,6 +226,7 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
     if (key.name === '/') return setFilterMode(true);
     if (key.name === 'f') return setFilterQuery(prev => setOrToggleFilterToken(prev, 'status', 'failed'));
     if (key.name === 'a') return setFilterQuery(prev => setOrToggleFilterToken(prev, 'status', 'pending'));
+    if (key.name === 'tab' && key.shift) return onTabSwitchBack?.(selectedIndex);
     if (key.name === 'tab') return onTabSwitch(selectedIndex);
     if (key.name === 'up' || key.name === 'k') {
       setSelectedIndex(i => Math.max(0, i - 1));
@@ -317,7 +319,7 @@ export function SpecsList({ cwd, initialIndex, onSelect, onActivate, onFilterCha
       </scrollbox>
       {showFooter ? (
         <box style={{ paddingLeft: 1, flexShrink: 0 }}>
-          <text fg={THEME.textMuted}>[j/k] navigate  [g/G] top/end  [/] filter  [f] failed  [a] pending  [?] help  [enter] view  [r] run  [tab] next tab  [q] quit</text>
+          <text fg={THEME.textMuted}>[j/k] navigate  [g/G] top/end  [/] filter  [f] failed  [a] pending  [?] help  [enter] view  [r] run  [tab/shift+tab] tabs  [q] quit</text>
         </box>
       ) : null}
       <ToastOverlay toasts={toast.toasts} onDismiss={toast.dismiss} />
@@ -352,13 +354,14 @@ function SpecRunRow({ run, selected, maxWidth }: { run: SpecRun; selected: boole
   );
 }
 
-export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitch, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false }: {
+export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitch, onTabSwitchBack, interactive = true, showFooter = true, searchQuery = '', searchActive = false, activeMatchIndex = 0, onSearchMatchCountChange, inputLocked = false }: {
   entry: SpecEntry;
   cwd: string;
   onSelectRun: (run: SpecRun) => void;
   onBack: () => void;
   onQuit: () => void;
   onTabSwitch: () => void;
+  onTabSwitchBack?: () => void;
   interactive?: boolean;
   showFooter?: boolean;
   searchQuery?: string;
@@ -386,6 +389,7 @@ export function SpecDetail({ entry, cwd, onSelectRun, onBack, onQuit, onTabSwitc
   useKeyboard((key) => {
     if (!interactive || inputLocked) return;
     if (key.name === 'q') return onQuit();
+    if (key.name === 'tab' && key.shift) return onTabSwitchBack?.();
     if (key.name === 'tab') return onTabSwitch();
     if (key.name === 'escape' || key.name === 'backspace') return onBack();
     if (key.name === 'up' || key.name === 'k') {
